@@ -1,0 +1,16 @@
+{
+  "statusLine": {
+    "type": "command",
+    "command": "node \"C:/AutoClaude/spikes/p08-supervisor/statusline.js\""
+  },
+  "hooks": {
+    "SessionStart":      [ { "hooks": [ { "type": "command", "command": "node \"C:/AutoClaude/spikes/p08-supervisor/hooklog.js\" SessionStart" } ] } ],
+    "SessionEnd":        [ { "hooks": [ { "type": "command", "command": "node \"C:/AutoClaude/spikes/p08-supervisor/hooklog.js\" SessionEnd" } ] } ],
+    "Notification":      [ { "hooks": [ { "type": "command", "command": "node \"C:/AutoClaude/spikes/p08-supervisor/hooklog.js\" Notification" } ] } ],
+    "StopFailure":       [ { "hooks": [ { "type": "command", "command": "node \"C:/AutoClaude/spikes/p08-supervisor/hooklog.js\" StopFailure" } ] } ],
+    "Stop":              [ { "hooks": [ { "type": "command", "command": "node \"C:/AutoClaude/spikes/p08-supervisor/hooklog.js\" Stop" } ] } ],
+    "PostToolUse":       [ { "hooks": [ { "type": "command", "command": "node \"C:/AutoClaude/spikes/p08-supervisor/hooklog.js\" PostToolUse" } ] } ],
+    "PermissionRequest": [ { "hooks": [ { "type": "command", "command": "node \"C:/AutoClaude/spikes/p08-supervisor/permission-deny.js\"" } ] } ],
+    "PreToolUse":        [ { "matcher": "AskUserQuestion", "hooks": [ { "type": "command", "command": "node \"C:/AutoClaude/spikes/p08-supervisor/pretool-deny.js\"" } ] } ]
+  }
+}

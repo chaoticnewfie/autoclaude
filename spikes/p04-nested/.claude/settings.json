@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"C:/AutoClaude/spikes/p04-nested/nested-hook.js\"",
+            "timeout": 900
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"C:/AutoClaude/spikes/p02-stop-loop/stop-hook.js\"",
+            "timeout": 1200
+          }
+        ]
+      }
+    ]
+  }
+}

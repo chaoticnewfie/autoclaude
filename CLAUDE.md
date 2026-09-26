@@ -14,7 +14,8 @@ what order lives in [PLAN.md](PLAN.md). Where things are right now lives in
 
 ## Status, in one line
 
-Docs only. The plan is approved and revised for pure Windows (2026-09-26). No code exists. Next: Phase 0.
+Phase 0 nearly done (2026-09-26): five spikes pass, three wait for Scott's one-time interactive
+`claude` run in this folder (`VERIFY.md`). No plugin code exists. Next: rerun `spikes/p08-supervisor`, then CHECKPOINT 0.
 
 ## Definition of done: every prompt, no exceptions
 
@@ -110,6 +111,24 @@ Docs only. The plan is approved and revised for pure Windows (2026-09-26). No co
 - GitHub `chaoticnewfie/autoclaude` is private. SSH to github.com is already trusted there.
 - An RDP disconnect keeps a console window alive on Windows; a log-off or a sleeping machine kills
   it. That is the difference between "walk away" and "lose the run".
+- The native CLI's first interactive run shows a theme picker, then a workspace-trust dialog. Until
+  Scott has done that once in `C:\AutoClaude`, an unattended interactive `claude` there sits on the
+  picker forever. Editing `~/.claude.json` to skip it is denied by the auto-mode classifier
+  (self-modification); the tool never does it either (D28).
+- The Bash tool is Git Bash: it rewrites `/D`-style switches into paths (`/D` became `D:/`). Launch
+  Windows commands from Node, and use `//c` for a cmd switch when bash is unavoidable. `start` needs
+  a quoted title or it treats the first word as the program; both mistakes leave a `cmd` hung on an
+  error dialog.
+- `claude config` is not a subcommand in 2.1.283: `claude config list` sends "config list" as a
+  prompt and burns a turn.
+- `--bare` skips credential reads and fails auth under a subscription login; nested runs use
+  `--settings '{"disableAllHooks":true}'` (D30).
+- `claude agents --json --all` lists interactive sessions with `pid`, `sessionId` and `status`
+  even when no background session exists (D31).
+- `~/.claude.json` -> `cachedUsageUtilization` carries `five_hour` and `seven_day` utilization
+  with `resets_at`, refreshed by any session. Read it; never write that file (D27, D28).
+- Bash-tool commands are wrapped in a way that breaks on an apostrophe even inside a quoted
+  heredoc. Write scripts with the Write tool and call them by path.
 
 ## Documentation index
 

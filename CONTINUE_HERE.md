@@ -1,39 +1,54 @@
 # CONTINUE_HERE.md
 
-**Last updated: 2026-09-26.** Rewrite this file at the end of every prompt.
+**Last updated: 2026-09-26 (end of the Phase 0 session).** Rewrite this file at the end of every prompt.
 
 ## Where things are
 
-**Docs only. No code, nothing installed.** The plan is approved and revised; Phase 0 has not started.
+**Phase 0 is nearly done. No plugin code exists yet.** Findings and evidence: `VERIFY.md`.
 
-- `PLAN.md`: the plan, revised 2026-09-26 for pure Windows (a Node supervisor instead of tmux and
-  systemd, D18), pause for review (section 4.10, D19), shareability (D20) and one `init` for new and
-  existing projects (D23). Read section 0, then Phase 0.
-- `CLAUDE.md`: the rules for this repo, built from Scott's conventions across his repos
-  (`docs/CONVENTIONS_SURVEY.md`, all except 10, with 15 reworded).
-- `docs/DECISIONS.md`: D17 to D25, made 2026-09-26. `docs/DEFERRED.md`: ten later ideas with triggers.
-- Remote `chaoticnewfie/autoclaude` (private), branch `main`, in sync with `C:\AutoClaude`.
+| Step | State |
+|---|---|
+| P0.1 environment, P0.2 Stop-hook loop, P0.4 nested headless, P0.5 browser tester, P0.10 plugin hooks | Done and ticked in `PLAN.md` |
+| P0.7 usage-limit behaviour | Done from the docs; the `/config` look is Scott's |
+| P0.3 statusline, P0.6 permissions, P0.8 supervisor | Blocked on one thing: the native CLI has never completed its first interactive run on this VM |
+| P0.9 reconcile | `VERIFY.md` written; `PLAN.md` and `docs/DECISIONS.md` (D26 to D31) updated |
 
-## What Scott has decided (2026-09-26)
+Installed on this VM today: Claude Code native 2.1.283 (`%USERPROFILE%\.local\bin`, on the user
+PATH), Playwright Chromium. Nothing else changed on the machine. `~/.claude.json` was not touched.
 
-- Vision confirmed as described in the chat. Pause feature as proposed in D19.
-- Pure Windows: Windows Server 2025 (the `Code` VM) and Windows 11, no WSL. Linux and macOS keep
-  working through the same code.
-- Name: `autoclaude` everywhere (D17).
-- Agents: reasonable numbers are fine, stop them when done (`CLAUDE.md` rule 10). His global
-  `~/.claude/CLAUDE.md` was corrected to say the same.
+## What Scott needs to do (five minutes)
 
-## Still open (Scott to decide, not blocking)
+1. Open a terminal (Windows Terminal or PowerShell, a fresh one so PATH is current), then:
+   `cd C:\AutoClaude` and `claude`.
+2. Pick a theme. Accept the workspace trust dialog for `C:\AutoClaude`.
+3. Run `/config` and confirm "Continue automatically at usage limit" is on (it should be, by default).
+4. `/exit`.
+5. Say so in chat. The interactive spike (`spikes/p08-supervisor`) then reruns unchanged and closes
+   P0.3, P0.6 and P0.8. While that window is open, an RDP disconnect and reconnect would close the
+   last P0.8 line too.
 
-- License (MIT suggested) and public versus private. `docs/DECISIONS.md` D20.
-- Whether `project-template/` ships the fuller docs set (ARCHITECTURE, DATA_MODEL, API, DEPLOY) as
-  empty stubs. Default: core files only, and `init` offers the rest.
+## The exact next step (after the above)
 
-## The exact next step
+```
+cd /c/AutoClaude/spikes/p08-supervisor && rm -rf out
+node ../lib/open-window.mjs ac-spike "C:\AutoClaude\spikes\p08-supervisor" "C:\Program Files\nodejs\node.exe" "C:\AutoClaude\spikes\p08-supervisor\supervise.mjs" 80000
+```
 
-Phase 0 of `PLAN.md`. Start with P0.1 (record the environment in `VERIFY.md`), which needs the
-native Claude Code install on this VM (`irm https://claude.ai/install.ps1 | iex`, then `claude`
-to log in). Then P0.2 to P0.10, each as a throwaway script under `spikes/`, results in `VERIFY.md`.
-Stop at CHECKPOINT 0 and walk Scott through `VERIFY.md` and any plan changes.
+Then read `out/supervisor.log`, `out/hooks.jsonl` (SessionStart, Notification `idle_prompt`,
+PermissionRequest deny, PreToolUse deny, Stop, StopFailure), `out/statusline.jsonl`
+(`rate_limits`), and the three transcripts under `~/.claude/projects/C--AutoClaude-spikes-p08-supervisor/`.
+Update `VERIFY.md` rows P0.3, P0.6, P0.8, tick them in `PLAN.md`, then **CHECKPOINT 0** with Scott.
 
-Known machine facts that save time are in `CLAUDE.md`, "Facts worth not re-deriving".
+## Decisions Scott still owns
+
+- License and public versus private (`docs/DECISIONS.md` D20).
+- Whether the project template ships the fuller docs set as stubs (default: core files only).
+
+## Facts that save time
+
+In `CLAUDE.md`, "Facts worth not re-deriving": PATH quirks, the Git Bash `/D` mangling, the
+`start` title rule, `claude config` not being a subcommand, `--bare` breaking auth, and where usage
+data lives. Spike helpers: `spikes/lib/claude-clean.mjs` (run the native CLI with `CLAUDE*` env
+stripped), `spikes/lib/open-window.mjs` (detached console window), `spikes/lib/summarize.js`
+(summarize a `-p` JSON result and its transcript), `spikes/lib`-style outputs go under `out/` and
+are gitignored.

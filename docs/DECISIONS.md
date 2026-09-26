@@ -128,3 +128,77 @@ steps over a docs nit.
 - License and public versus private (D20).
 - Whether `project-template/` also ships the fuller docs set (ARCHITECTURE, DATA_MODEL, API,
   DEPLOY) as empty stubs. Default until told otherwise: core files only, and `init` offers the rest.
+
+---
+
+## 2026-09-26 - Phase 0 findings (details in `VERIFY.md`)
+
+### D26 Claude Code background sessions are not the runner
+
+**Decision.** The runner stays an interactive `claude` under our supervisor in a console window
+(D18). `claude --bg` background sessions are not used.
+
+**Why.** They looked ideal: a built-in supervisor daemon, no terminal needed, survive terminal
+close and machine sleep, restart crashed processes, Windows supported, `claude agents --json`
+for state. But the agent-view docs say **Stop hooks do not run in background sessions**, and the
+gate is a Stop hook. They also do not auto-continue at usage limits (the session waits for a
+reply), and they isolate edits into a worktree unless `worktree.bgIsolation` is `none`.
+
+**Rejected.** Rewriting the gate around another hook (PostToolUse cannot decide when a step is
+"ready"). Kept as a revisit trigger in `DEFERRED.md`.
+
+### D27 Two usage sources, statusline first
+
+**Decision.** The usage gate reads `~/.claude/autoclaude/usage.json` (written by the statusline
+bridge, `rate_limits.*.used_percentage` and `resets_at`) and falls back to
+`~/.claude.json` -> `cachedUsageUtilization.utilization.{five_hour,seven_day}` (`utilization`,
+`resets_at`, `fetchedAtMs`) when the statusline has not run yet or its file is stale.
+
+**Why.** The statusline only runs in interactive sessions and only after the first API response;
+`cachedUsageUtilization` is refreshed by any session and needs no terminal. Both are read-only
+for us.
+
+### D28 Onboarding and workspace trust are checked, never written
+
+**Decision.** `autoclaude start` reads `hasCompletedOnboarding` and
+`projects[<repo root>].hasTrustDialogAccepted` from `~/.claude.json`. If either is missing it
+refuses to start and tells the user to run `claude` once in the project, pick a theme, accept the
+trust dialog and exit. The tool never edits `~/.claude.json`.
+
+**Why.** The first interactive run of the native CLI shows a theme picker and then the trust
+dialog, and an unattended session sits on them forever (Phase 0 screenshot). Writing those keys
+from a session was denied by the auto-mode classifier as self-modification, and a tool other
+people install should not silently grant trust to a folder either.
+
+**Rejected.** Editing `~/.claude.json` from `init` or `start`.
+
+### D29 Hooks use exec form, and `node` must be on the claude process PATH
+
+**Decision.** Every `hooks.json` entry is `{"type":"command","command":"node","args":["${CLAUDE_PLUGIN_ROOT}/scripts/<x>.js", ...]}`.
+`init` and `start` check that `node` resolves on the PATH the claude process will have.
+
+**Why.** Exec form spawns `node.exe` directly with `${CLAUDE_PLUGIN_ROOT}` expanded in `args`
+(verified, including a path with a space) and needs no shell. Shell form runs under Git Bash on
+Windows, or PowerShell when Git Bash is absent, with profile output risks. `node` was not on the
+PATH of shells opened before it was installed, which is the failure the check catches.
+
+### D30 Nested runs use `--settings '{"disableAllHooks":true}'`, never `--bare`
+
+**Decision.** Tester and reviewer are `claude -p ... --settings '{"disableAllHooks":true}'`.
+
+**Why.** Verified from inside a Stop hook with the parent's environment inherited: hooks were
+disabled in the child (no recursion), `--json-schema` returned `structured_output`, and the
+subscription login was used. `--bare` also skips keychain and credential reads and the run
+failed with `is_error: true`. Stripping `CLAUDE*` variables made no difference and is not done.
+
+### D31 The launcher spawns `cmd start` from Node, and the supervisor polls `claude agents --json`
+
+**Decision.** `autoclaude run` opens the window through Node's `spawn("cmd.exe", ["/d","/s","/c",
+"start \"ac-<slug>\" /D <dir> node ..."], { detached: true, stdio: "ignore" })` and `unref()`s
+it. The supervisor polls `claude agents --json` (interactive sessions appear with `kind:
+"interactive"` and a `status`) next to the heartbeat and idle marker.
+
+**Why.** Launching from Git Bash mangles `/D` into `D:/` (MSYS path conversion) and an unquoted
+`start` title is taken as the program; both hung `cmd` on an error dialog. From Node with a
+quoted title it worked first time, and the window outlived the launching shell. Three
+spawn, `taskkill /T /F`, relaunch cycles left no orphan `claude.exe`.

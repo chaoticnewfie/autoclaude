@@ -1,0 +1,11 @@
+{
+  "name": "spike-local",
+  "owner": { "name": "autoclaude spike" },
+  "plugins": [
+    {
+      "name": "spikeplug",
+      "source": "./plugins/spikeplug",
+      "description": "P0.10 spike: exec-form hooks on Windows"
+    }
+  ]
+}

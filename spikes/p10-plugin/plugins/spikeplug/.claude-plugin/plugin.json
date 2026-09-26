@@ -1,0 +1,14 @@
+{
+  "name": "spikeplug",
+  "version": "0.0.1",
+  "description": "P0.10 spike: exec-form hooks on Windows",
+  "author": { "name": "autoclaude spike" },
+  "userConfig": {
+    "greeting": {
+      "type": "string",
+      "title": "Greeting",
+      "description": "A test option",
+      "default": "hello-from-userconfig"
+    }
+  }
+}

@@ -62,3 +62,16 @@ Trigger: `autoclaude answer` from a shell proves inconvenient from the phone.
 
 Trigger: someone without ntfy or Discord wants alerts on the same machine. Path: a PowerShell
 one-liner behind the same notify interface, opt-in.
+
+## 11. Claude Code background sessions as the runner
+
+**What.** Host the builder session in `claude --bg` under Claude Code's own supervisor daemon
+instead of our console-window supervisor (D18, D26).
+**Why it waits.** Stop hooks do not run in background sessions, usage limits are not
+auto-continued there, and edits are isolated into a worktree by default. The gate is a Stop hook.
+**Trigger.** A Claude Code release whose agent-view docs list Stop hooks as running in background
+sessions and auto-continue as applying to them.
+**Path.** `autoclaude run --bg` as an alternative runner: dispatch with `--bg`, poll
+`claude agents --json`, set `worktree.bgIsolation: "none"` in the project settings, and relaunch
+with `claude --resume <id> --bg "<prompt>"`.
+**No rework.** The gate, the CLI and the state files do not know which supervisor is running.

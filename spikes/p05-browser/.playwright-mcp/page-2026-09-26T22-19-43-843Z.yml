@@ -1,0 +1,4 @@
+- generic [active] [ref=e1]:
+  - heading "Spike page" [level=1] [ref=e2]
+  - button "Click me" [ref=e3]
+  - paragraph [ref=e4]: not clicked yet
