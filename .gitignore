@@ -1,0 +1,14 @@
+# AutoClaude runtime state inside a target project. Never committed.
+.autoclaude/
+
+# Node
+node_modules/
+
+# Phase 0 spike outputs
+spikes/**/out/
+
+# Local
+*.log
+.env
+.env.*
+!.env.example

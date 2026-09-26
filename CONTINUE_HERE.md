@@ -4,31 +4,36 @@
 
 ## Where things are
 
-Nothing is built. The repo holds the approved build plan and a survey of Scott's conventions.
+**Docs only. No code, nothing installed.** The plan is approved and revised; Phase 0 has not started.
 
-- `PLAN.md`: the build plan drafted with Claude on the phone (2026-09-24). Read section 0 first.
-- `docs/CONVENTIONS_SURVEY.md`: what every `chaoticnewfie` repo does the same way, as a numbered
-  list Scott picks from for this repo's `CLAUDE.md` and for the project template.
-- Remote: `chaoticnewfie/autoclaude` (private). Local: `C:\AutoClaude` on the `Code` VM.
+- `PLAN.md`: the plan, revised 2026-09-26 for pure Windows (a Node supervisor instead of tmux and
+  systemd, D18), pause for review (section 4.10, D19), shareability (D20) and one `init` for new and
+  existing projects (D23). Read section 0, then Phase 0.
+- `CLAUDE.md`: the rules for this repo, built from Scott's conventions across his repos
+  (`docs/CONVENTIONS_SURVEY.md`, all except 10, with 15 reworded).
+- `docs/DECISIONS.md`: D17 to D25, made 2026-09-26. `docs/DEFERRED.md`: ten later ideas with triggers.
+- Remote `chaoticnewfie/autoclaude` (private), branch `main`, in sync with `C:\AutoClaude`.
 
-## Waiting on Scott (asked 2026-09-26)
+## What Scott has decided (2026-09-26)
 
-1. Confirm the one-paragraph description of the project matches his vision.
-2. Pick which numbered conventions from `docs/CONVENTIONS_SURVEY.md` section 2 go into
-   `CLAUDE.md` and the template.
-3. Decide where unattended runs live: WSL2 on the `Code` VM, or the Debian LXC the plan assumes.
-4. Naming: keep `autopilot` from the plan, or rename plugin, CLI and skills to `autoclaude`.
-5. Shape of the pause-for-review feature (proposal is in the same message).
+- Vision confirmed as described in the chat. Pause feature as proposed in D19.
+- Pure Windows: Windows Server 2025 (the `Code` VM) and Windows 11, no WSL. Linux and macOS keep
+  working through the same code.
+- Name: `autoclaude` everywhere (D17).
+- Agents: reasonable numbers are fine, stop them when done (`CLAUDE.md` rule 10). His global
+  `~/.claude/CLAUDE.md` was corrected to say the same.
 
-## New requirements since the plan was drafted
+## Still open (Scott to decide, not blocking)
 
-- The repo will be used on other devices and shared with other people through GitHub. No personal
-  paths, IPs or homelab facts inside the plugin or its templates; per-machine values go in plugin
-  userConfig; docs written for a stranger.
-- Optional pause: Scott can stop an unattended run to review progress, leave notes, edit the plan,
-  and resume with those notes injected. Off by default.
+- License (MIT suggested) and public versus private. `docs/DECISIONS.md` D20.
+- Whether `project-template/` ships the fuller docs set (ARCHITECTURE, DATA_MODEL, API, DEPLOY) as
+  empty stubs. Default: core files only, and `init` offers the rest.
 
 ## The exact next step
 
-Once the answers arrive: write `CLAUDE.md` from the chosen conventions, fold the new requirements
-and any renames into `PLAN.md` (log each change in `docs/DECISIONS.md`), then start Phase 0.
+Phase 0 of `PLAN.md`. Start with P0.1 (record the environment in `VERIFY.md`), which needs the
+native Claude Code install on this VM (`irm https://claude.ai/install.ps1 | iex`, then `claude`
+to log in). Then P0.2 to P0.10, each as a throwaway script under `spikes/`, results in `VERIFY.md`.
+Stop at CHECKPOINT 0 and walk Scott through `VERIFY.md` and any plan changes.
+
+Known machine facts that save time are in `CLAUDE.md`, "Facts worth not re-deriving".
