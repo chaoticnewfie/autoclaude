@@ -1,0 +1,10 @@
+# Everything checks out as LF so a Windows and a Linux clone never differ.
+* text=auto eol=lf
+*.ps1 text eol=crlf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.png binary
+*.jpg binary
+*.gif binary
+*.ico binary
+*.webp binary
