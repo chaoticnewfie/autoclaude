@@ -30,8 +30,14 @@ export function prepareFixture({ dest, plan = "happy", git = true, checks = null
   fs.rmSync(dest, { recursive: true, force: true });
   copyDir(FIXTURE_APP, dest);
   fs.copyFileSync(path.join(FIXTURE_PLANS, `${plan}.md`), path.join(dest, "PLAN.md"));
+  const extraChecks = [];
   if (plan === "broken") {
-    fs.writeFileSync(path.join(dest, "test", "impossible.test.js"), 'import { test } from "node:test";\nimport assert from "node:assert/strict";\n\ntest("impossible", () => {\n  assert.equal(1, 2);\n});\n');
+    const impossible = 'import { test } from "node:test";\nimport assert from "node:assert/strict";\n\ntest("impossible", () => {\n  assert.equal(1, 2);\n});\n';
+    fs.writeFileSync(path.join(dest, "test", "impossible.test.js"), impossible);
+    // The plan forbids touching the impossible test; this check makes the gate enforce it, so the
+    // only way out is the three-strikes pause the scenario is meant to demonstrate.
+    fs.writeFileSync(path.join(dest, "impossible.orig"), impossible);
+    extraChecks.push({ name: "fixture-unchanged", command: `${JSON.stringify(process.execPath)} -e "const f=require('fs');process.exit(f.readFileSync('test/impossible.test.js','utf8')===f.readFileSync('impossible.orig','utf8')?0:1)"`, timeoutSec: 30 });
   }
   if (plan === "ui-bug") {
     const page = path.join(dest, "public", "index.html");
@@ -43,6 +49,7 @@ export function prepareFixture({ dest, plan = "happy", git = true, checks = null
     plan: "PLAN.md",
     devServer: devServer || { command: `${node} server.js`, url: "http://127.0.0.1:4173", healthPath: "/health", startTimeoutSec: 30 },
     checks: checks || [
+      ...extraChecks,
       { name: "lint", command: "npm run lint", timeoutSec: 120 },
       { name: "unit", command: "npm test", timeoutSec: 300 }
     ]

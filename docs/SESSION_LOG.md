@@ -110,3 +110,22 @@ One entry per working session: what was done, what was committed. Append only.
 - Both agents stopped on completion. Scratch project for the live run prepared at
   `spikes/out/todo-live` (happy plan, its own git repo, so it needs Scott's one-time trust).
 - P3.1 to P3.8 ticked. CHECKPOINT 3 (the first live run) is next.
+
+## 2026-09-27 (Code VM) - CHECKPOINT 3, first live runs
+
+- Scott trusted `spikes/out/todo-live` once. `autoclaude start` created branch
+  `autoclaude/todo-fixture`; the builder ran in a window opened by the spike supervisor with
+  `--permission-mode auto` and one initial prompt.
+- **Happy plan: 3/3 steps verified and committed, 02:04 to 02:10 UTC, every step on its first
+  attempt.** Commits `c6b4611`, `aebe624`, `2ca5f87` (`autoclaude(S1.x): ...`), tag `ac-phase-1`,
+  clean tree, PLAN.md ticked by the gate, three PROGRESS.md lines, state `complete`, Discord
+  summary delivered (HTTP 204). The builder logged five D-### decisions and rewrote
+  CONTINUE_HERE.md before each `ready` without being reminded.
+- One permission prompt appeared and Scott accepted it (auto-mode classifier fallback); the
+  Phase 5 PermissionRequest hook is what removes that.
+- Found and fixed: Git Bash does not resolve the `.cmd` shim by bare name, so `install-cli` now
+  writes an extensionless sh shim too (D34); the tool guard denied two plain reads because of a
+  `2>/dev/null` on the same line, so its shell rules now match only real writes to protected
+  paths (D34, 9 new assertions); `status | head` crashed with EPIPE, now ignored. 108 tests pass.
+- Broken plan (`plans/broken.md` plus a `fixture-unchanged` check so the impossible test cannot
+  be edited into passing): run started 02:14 UTC; result below.

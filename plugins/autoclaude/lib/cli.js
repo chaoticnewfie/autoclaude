@@ -375,16 +375,19 @@ function cmdInstallCli(args, io) {
   ensureDir(dir);
   const entry = path.join(pluginRoot(), "bin", "autoclaude.js");
   const node = process.execPath;
-  let shim;
+  // Two shims on Windows, like npm ships: autoclaude.cmd for cmd and PowerShell, and an
+  // extensionless sh script for Git Bash, which is the shell Claude Code's Bash tool uses there
+  // and which does not resolve .cmd files by bare name (seen in the first live run).
+  const shim = path.join(dir, "autoclaude");
+  fs.writeFileSync(shim, `#!/bin/sh\nexec "${node.replace(/\\/g, "/")}" "${entry.replace(/\\/g, "/")}" "$@"\n`);
+  try { fs.chmodSync(shim, 0o755); } catch {}
+  const written = [shim];
   if (isWindows) {
-    shim = path.join(dir, "autoclaude.cmd");
-    fs.writeFileSync(shim, `@echo off\r\n"${node}" "${entry}" %*\r\n`);
-  } else {
-    shim = path.join(dir, "autoclaude");
-    fs.writeFileSync(shim, `#!/bin/sh\nexec "${node}" "${entry}" "$@"\n`);
-    fs.chmodSync(shim, 0o755);
+    const cmdShim = path.join(dir, "autoclaude.cmd");
+    fs.writeFileSync(cmdShim, `@echo off\r\n"${node}" "${entry}" %*\r\n`);
+    written.push(cmdShim);
   }
-  io.out(`autoclaude: wrote ${shim}`);
+  io.out(`autoclaude: wrote ${written.join(" and ")}`);
   const onPath = (io.env.PATH || io.env.Path || "").split(path.delimiter).some((d) => path.resolve(d) === path.resolve(dir));
   if (onPath) { io.out("  that directory is already on your PATH"); return 0; }
   if (!updatePath) { io.out(`  add ${dir} to your PATH to use \`autoclaude\` directly`); return 0; }

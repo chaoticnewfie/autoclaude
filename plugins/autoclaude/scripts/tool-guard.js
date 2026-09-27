@@ -41,12 +41,31 @@ export function decide(input, { root, config }) {
     if (/git\s+reset\s+--hard/.test(cmd)) return "git reset --hard is not allowed during an AutoClaude run. Use a new commit or revert instead.";
     if (/git\s+(commit|tag)\b/.test(cmd)) return "The gate commits and tags after each verified step. Do not commit yourself; run `autoclaude ready <step>` when the step is done.";
     if (/rm\s+(-[a-zA-Z]*r[a-zA-Z]*f|-[a-zA-Z]*f[a-zA-Z]*r)\s+(\/|~|[A-Za-z]:[\\/]|\.\.)/.test(cmd) || /Remove-Item\b[^\n]*-Recurse[^\n]*([A-Za-z]:[\\/]|~|\.\.)/.test(cmd)) return "Recursive deletes outside the project are not allowed during an AutoClaude run.";
-    const planName = path.basename(config.plan).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    if (new RegExp(`(>|>>|sed\\s+-i|tee|Set-Content|Out-File)[^\\n]*\\b${planName}\\b|\\b${planName}\\b[^\\n]*(<<|\\|\\s*tee)`).test(cmd)) return `Shell writes to ${config.plan} are not allowed; only the gate edits it.`;
-    if (/autoclaude\.config\.json/.test(cmd) && /(>|>>|sed\s+-i|tee|Set-Content|Out-File|del\b|rm\b)/.test(cmd)) return "autoclaude.config.json is read-only during a run.";
-    if (/\.autoclaude[\\/]/.test(cmd) && /(>|>>|sed\s+-i|tee|Set-Content|Out-File|del\b|rm\b|Remove-Item)/.test(cmd)) return ".autoclaude/ is the gate's state; do not write to it.";
+    // A write is a redirect, tee, in-place sed, PowerShell writer, delete or move whose TARGET is
+    // the protected path. Reading it (cat, grep, `2>/dev/null` elsewhere on the line) is fine.
+    const planName = path.basename(config.plan);
+    if (writesTo(cmd, planName)) return `Shell writes to ${config.plan} are not allowed; only the gate edits it.`;
+    if (writesTo(cmd, "autoclaude.config.json")) return "autoclaude.config.json is read-only during a run.";
+    if (writesTo(cmd, ".autoclaude/") || writesTo(cmd, ".autoclaude\\")) return ".autoclaude/ is the gate's state; do not write to it.";
   }
   return null;
+}
+
+// True when a shell command line writes to, deletes or moves a path containing `target`.
+export function writesTo(cmd, target) {
+  const t = target.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&");
+  const pathRe = `["']?[^\\s"'|;&]*${t}[^\\s"'|;&]*["']?`;
+  const patterns = [
+    `(?:^|[^0-9])>>?\\s*${pathRe}`,                        // > file, >> file (not 2>/dev/null)
+    `\\btee\\s+(?:-a\\s+)?${pathRe}`,                      // tee file
+    `\\bsed\\s+-i[^|;&]*\\s${pathRe}`,                     // sed -i ... file
+    `\\b(?:Set-Content|Out-File|Add-Content)\\b[^|;&]*${pathRe}`,
+    `\\b(?:rm|del|erase|unlink|Remove-Item)\\b[^|;&]*${pathRe}`,
+    `\\b(?:mv|move|cp|copy|Move-Item|Copy-Item)\\b[^|;&]*\\s${pathRe}\\s*$`, // ... as the destination
+    `\\b(?:mv|move|Move-Item)\\b\\s+${pathRe}`,            // moving the file away
+    `\\btruncate\\b[^|;&]*${pathRe}`
+  ];
+  return patterns.some((p) => new RegExp(p, "m").test(cmd));
 }
 
 function main() {

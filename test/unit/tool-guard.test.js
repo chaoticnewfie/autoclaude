@@ -38,6 +38,18 @@ test("bash: force push, push when off, reset --hard, commits, recursive deletes 
   assert.equal(d("Bash", { command: "npm test" }), null);
 });
 
+test("reads of protected files are allowed even with redirects elsewhere on the line (live-run false positives)", () => {
+  assert.equal(d("Bash", { command: "ls -la && cat CONTINUE_HERE.md 2>/dev/null; cat autoclaude.config.json; ls test 2>/dev/null" }), null);
+  assert.equal(d("Bash", { command: "cat .autoclaude/state.json | head -40" }), null);
+  assert.equal(d("Bash", { command: "ls .autoclaude 2>/dev/null; cat PLAN.md" }), null);
+  assert.equal(d("Bash", { command: "node -e \"console.log(1)\" > out.txt 2>&1; cat PLAN.md" }), null);
+  assert.match(d("Bash", { command: "cat x > .autoclaude/state.json" }), /gate's state/);
+  assert.match(d("Bash", { command: "rm .autoclaude/ready.json" }), /gate's state/);
+  assert.match(d("Bash", { command: "mv PLAN.md PLAN.old" }), /Shell writes to PLAN\.md/);
+  assert.match(d("Bash", { command: "cp other.md autoclaude.config.json" }), /read-only/);
+  assert.match(d("Bash", { command: "Set-Content -Path PLAN.md -Value x" }), /Shell writes to PLAN\.md/);
+});
+
 test("push is allowed when the config says so", () => {
   const allowPush = { root, config: mergeConfig({ git: { push: true } }) };
   assert.equal(decide({ tool_name: "Bash", tool_input: { command: "git push origin HEAD" } }, allowPush), null);

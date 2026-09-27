@@ -237,6 +237,22 @@ needs a way to send the run back to a step without editing state files by hand.
 Claude ticking boxes during a run, not for the owner during a pause). A separate "redo step"
 command (the checkbox is the interface everyone already understands).
 
+### D34 Two CLI shims on Windows, and the tool guard only blocks real writes
+
+**Decision.** `install-cli` writes an extensionless `autoclaude` sh script on every OS and, on
+Windows, `autoclaude.cmd` as well. `cliCommand()` reports `autoclaude` only when the sh shim is
+on PATH. The tool guard's shell rules deny a command only when a write operator (redirect, tee,
+in-place sed, PowerShell writer, delete, move, copy-as-destination) targets a protected path.
+
+**Why.** Seen in the first live run (2026-09-27): Claude's Bash tool on Windows is Git Bash,
+which does not resolve `.cmd` files by bare name, so the builder had to find the CLI by hand; and
+the guard denied `cat autoclaude.config.json` and `cat .autoclaude/state.json` because a
+`2>/dev/null` elsewhere on the line looked like a write. Both cost the builder a turn and would
+confuse anyone reading the denial log.
+
+**Rejected.** Telling the builder to always use the node invocation (ugly in every prompt and
+log). Denying every command that mentions a protected path (reading them is legitimate).
+
 ### D31 The launcher spawns `cmd start` from Node, and the supervisor polls `claude agents --json`
 
 **Decision.** `autoclaude run` opens the window through Node's `spawn("cmd.exe", ["/d","/s","/c",

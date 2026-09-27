@@ -129,10 +129,14 @@ test("install-cli writes a shim into the given bin dir", async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "autoclaude-bin-"));
   const r = await run(["install-cli", "--no-path"], dir, { env: { AUTOCLAUDE_BIN_DIR: dir, PATH: "" } });
   assert.equal(r.code, 0, r.out + r.err);
-  const shim = path.join(dir, process.platform === "win32" ? "autoclaude.cmd" : "autoclaude");
-  assert.ok(fs.existsSync(shim));
-  const body = fs.readFileSync(shim, "utf8");
-  assert.match(body, /autoclaude\.js/);
+  const sh = path.join(dir, "autoclaude");
+  assert.ok(fs.existsSync(sh), "the extensionless sh shim exists on every OS");
+  assert.match(fs.readFileSync(sh, "utf8"), /^#!\/bin\/sh\nexec ".*node(\.exe)?" ".*autoclaude\.js" "\$@"\n$/);
+  if (process.platform === "win32") {
+    const cmd = path.join(dir, "autoclaude.cmd");
+    assert.ok(fs.existsSync(cmd));
+    assert.match(fs.readFileSync(cmd, "utf8"), /autoclaude\.js/);
+  }
   assert.match(r.out, /add .* to your PATH/);
 });
 

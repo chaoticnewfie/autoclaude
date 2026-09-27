@@ -19,9 +19,10 @@ import { readUsage } from "./usage.js";
 const MAX_REASON = 4000;
 
 export function cliCommand(env = process.env) {
-  // What the builder should type. The shim is on the user PATH after install-cli; fall back to node.
+  // What the builder should type. Claude's Bash tool is Git Bash on Windows, which resolves the
+  // extensionless shim only, so that is the one that counts; fall back to the node invocation.
   const dirs = (env.PATH || env.Path || "").split(path.delimiter);
-  const hasShim = dirs.some((d) => d && (fs.existsSync(path.join(d, "autoclaude.cmd")) || fs.existsSync(path.join(d, "autoclaude"))));
+  const hasShim = dirs.some((d) => d && fs.existsSync(path.join(d, "autoclaude")));
   if (hasShim) return "autoclaude";
   return `node "${path.resolve(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1")), "..", "bin", "autoclaude.js").replace(/\\/g, "/")}"`;
 }
