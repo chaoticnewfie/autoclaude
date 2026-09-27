@@ -1,6 +1,6 @@
 {
-  "name": "autoclaude-local",
-  "description": "Local marketplace for the AutoClaude plugin. Add it with `claude plugin marketplace add <path to this repo>`.",
+  "name": "autoclaude",
+  "description": "AutoClaude: runs a project's PLAN.md step by step, unattended, and verifies every step before moving on. Add it with `claude plugin marketplace add <owner>/<repo>` (or a local clone's path), then `claude plugin install autoclaude@autoclaude`.",
   "owner": {
     "name": "AutoClaude"
   },

@@ -56,6 +56,7 @@ Everything Scott has asked for after 2026-09-24, with where it landed. Nothing i
 | 2026-09-26 | "Keep agents small means don't make 70... make sure that they are stopped when they aren't needed anymore" | `CLAUDE.md` rule 10 (a rule for building this, not a feature) | Done |
 | 2026-09-27 | Plans made in plan mode must settle decisions ahead of time, since nobody answers during a run; an existing project gets a plan review once autoclaude is added (R17) | P2.1 (init message), P2.5 (template `CLAUDE.md`), P7.1 (plan skill) | Planned |
 | 2026-09-27 | "Could we change phase 7 to work on a real project... my database project... that will also give us the chance to test integrating this into an existing project"; "give claude in that project the github repo for autoclaude and have it add it to the project and start it that way"; plan size follows the project, not a fixed 12 steps; then "dont look at that project at all... I want to test it without you specifically preparing it for that project" | D36, D37, P7.3 (blind rehearsal on the DB repo), P5.3 and P7.1 (generic existing-project handling), P8.1 | Planned |
+| 2026-09-27 | "I'm going to keep it private and give certain people access. It's the morning now but I can let it run all day when it's time." | D41, P7.2 (install from a private repo), P7.3 (an all-day run), P7.4 (no license file) | Planned |
 
 ### How each requirement is met
 
@@ -399,7 +400,7 @@ The security reviewer uses the same shape, with `findings[]` (`severity`, `file`
 
 ```
 autoclaude/
-├── .claude-plugin/marketplace.json        # local marketplace "autoclaude-local"
+├── .claude-plugin/marketplace.json        # marketplace "autoclaude" (D42)
 ├── plugins/autoclaude/
 │   ├── .claude-plugin/plugin.json         # name, version, userConfig (ntfy_url, ntfy_token*, discord_webhook*)
 │   ├── hooks/hooks.json                   # exec form only: {"command":"node","args":["${CLAUDE_PLUGIN_ROOT}/scripts/x.js"]} (D29)
@@ -416,7 +417,7 @@ autoclaude/
 │   └── templates/{autoclaude.config.json, PLAN.template.md, playwright.config.ts,
 │                  mcp.playwright.json, statusline-bridge.js,
 │                  watchdog/{windows-task.xml, crontab.txt, systemd.service, systemd.timer}}
-├── project-template/                      # what `autoclaude init` writes into a project (D23)
+├── plugins/autoclaude/project-template/   # what `autoclaude init` writes into a project (D23, D42)
 │   CLAUDE.md  PLAN.md  CONTINUE_HERE.md  PROGRESS.md  .gitattributes  .editorconfig  .gitignore
 │   docs/{DECISIONS,SESSION_LOG,DEFERRED,BLOCKERS,SECURITY-FINDINGS,REVIEW_NOTES}.md
 ├── test/
@@ -626,7 +627,7 @@ autoclaude/
 
 **CHECKPOINT 6:** Show the chaos-test log and the notifications received.
 
-### Phase 7: Planner, docs and an overnight dress rehearsal
+### Phase 7: Planner, docs and a dress rehearsal
 
 - [ ] **P7.1** `/autoclaude:plan` skill
   - Accept: interviews Scott (goal, users, stack, constraints, out of scope), proposes phases and 20–90 minute steps with browser-observable Accept lines, `Test:` files and tags, writes `PLAN.md` from `PLAN.template.md`, and runs `lint-plan`
@@ -635,14 +636,16 @@ autoclaude/
   - Accept: in an existing project the skill also works out, with the owner: where the AutoClaude plan should live when the project's own plan file must not be rewritten (the `plan` config key); where the project's existing rules conflict with a run (for example "commit and push after every change" while the gate commits and pushing is off) and a short AutoClaude section for its `CLAUDE.md`; what the run must never touch outside the project, written as `guard.deny` rules; and whether every check command actually runs on this machine, naming any missing tool as a prerequisite for the owner
 - [ ] **P7.2** Docs
   - Accept: `README.md` (what it is, a 5-minute quickstart) and `docs/USAGE.md` (install, init, plan, run, watch, pause and notes, alerts, answering blockers, recovery, uninstall, troubleshooting; Windows notes on RDP disconnect versus log-off, power settings and the standard-user recommendation; Linux and macOS notes), all written for someone who has never seen this repo or Scott's machines
-- [ ] **P7.3** Overnight dress rehearsal on a real project, as a blind test: Scott's DB repo (D36, D37)
+  - Accept: the docs cover installing from the private repo as an invited collaborator (D41)
+  - Accept: a GitHub install works on a machine that has never seen the repo: everything `init`, the CLI shim and the watchdog need ships inside the plugin folder and survives a plugin update, proven by a scripted install into a throwaway Claude config (D42)
+- [ ] **P7.3** Dress rehearsal on a real project, as a blind test: Scott's DB repo (D36, D37)
   - Accept: nothing in AutoClaude, its docs or this plan is prepared for that project; whoever builds AutoClaude does not open it. The only preparation is generic: the local-directory install of the plugin is removed from this machine, so the rehearsal installs from GitHub the way a new machine would
   - Accept: onboarding by link: in a Claude Code session in that project, Scott gives Claude only the repo URL `https://github.com/chaoticnewfie/autoclaude` and asks it to add AutoClaude; using nothing but the repo's `README.md` and `docs/USAGE.md`, Claude installs the plugin and the CLI, runs `init`, reviews the project's existing plan and rules with Scott, and writes the AutoClaude plan. Every place it had to guess, or asked Scott something the docs should have answered, becomes a fix to the docs
-  - Accept: the run goes overnight with no input; the morning review finds one verified commit per completed step on the run branch, no false alarms, every pause justified, nothing done outside the project, and every issue turned into a fix or a backlog item. The run branch is merged only after Scott's review
+  - Accept: the run goes all day (D41) with no input; the review afterwards finds one verified commit per completed step on the run branch, no false alarms, every pause justified, nothing done outside the project, and every issue turned into a fix or a backlog item. The run branch is merged only after Scott's review
 - [ ] **P7.4** Release
-  - Accept: `plugin.json` version `1.0.0`, git tag `v1.0.0`, `CHANGELOG.md`, and `LICENSE` if Scott chose one
+  - Accept: `plugin.json` version `1.0.0`, git tag `v1.0.0` and `CHANGELOG.md`. No `LICENSE` file: the repo stays private and is shared with invited collaborators (D41)
 
-**CHECKPOINT 7:** Morning-after review of the dress rehearsal with Scott.
+**CHECKPOINT 7:** Review of the dress rehearsal with Scott, after the run.
 
 ### Phase 8: Rollout
 
@@ -705,10 +708,11 @@ Phase 0 and Phase 3 onward involve live runs. Stay nearby for those, because Cla
 ### 6.6 Daily use once it's built
 
 ```text
-# once per machine
-/plugin marketplace add C:\path\to\autoclaude
-/plugin install autoclaude@autoclaude-local      # enter ntfy or Discord settings when prompted
-autoclaude install-cli                           # adds `autoclaude` to your user PATH
+# once per machine (D41, D42: a private repo, so git needs read access to it)
+claude plugin marketplace add chaoticnewfie/autoclaude
+claude plugin install autoclaude@autoclaude
+node <plugin folder>/bin/autoclaude.js install-cli   # adds `autoclaude` to your user PATH
+autoclaude notify-setup --discord <webhook>      # or --ntfy <topic url>
 autoclaude watchdog --install                    # optional backstop, every 5 minutes
 
 # per project (new or existing)

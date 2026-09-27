@@ -21,6 +21,7 @@ import { preflight, formatPreflight } from "./preflight.js";
 import { supervise } from "./supervisor.js";
 import { openConsoleWindow, isPidAlive as pidAlive } from "./proc.js";
 import { registerProject } from "./registry.js";
+import { installLauncher } from "./launcher.js";
 
 const VERSION = JSON.parse(fs.readFileSync(path.join(pluginRoot(), ".claude-plugin", "plugin.json"), "utf8")).version;
 
@@ -562,7 +563,9 @@ function cmdInstallCli(args, io) {
   const dir = io.env.AUTOCLAUDE_BIN_DIR || binDir();
   const updatePath = !args.includes("--no-path");
   ensureDir(dir);
-  const entry = path.join(pluginRoot(), "bin", "autoclaude.js");
+  // The shims run the launcher, which finds the current plugin install each time, so they keep
+  // working after a plugin update moves the plugin to a new versioned folder (D42).
+  const entry = installLauncher({ dir });
   const node = process.execPath;
   // Two shims on Windows, like npm ships: autoclaude.cmd for cmd and PowerShell, and an
   // extensionless sh script for Git Bash, which is the shell Claude Code's Bash tool uses there
@@ -634,6 +637,6 @@ async function cmdNotifyTest(args, io) {
   const r = await notify({ title: "AutoClaude test", message, priority: "default", tags: ["white_check_mark"] }, { logFile, stdout: io.stdoutStream, env: io.env });
   if (r.ok && !r.fallback) io.out(`autoclaude: sent through ${r.channel}${r.status ? ` (HTTP ${r.status})` : ""}. Log: ${logFile}`);
   else io.out(`autoclaude: ${r.channel} delivery failed (${r.error}); printed above instead. Log: ${logFile}`);
-  if (r.channel === "stdout") io.out("  no channel is configured: run `autoclaude notify-setup --discord <webhook>` or `--ntfy <topic url>` (and /plugin configure autoclaude@autoclaude-local for hook processes)");
+  if (r.channel === "stdout") io.out("  no channel is configured: run `autoclaude notify-setup --discord <webhook>` or `--ntfy <topic url>`; every AutoClaude process on this machine reads that setting");
   return r.ok ? 0 : 1;
 }

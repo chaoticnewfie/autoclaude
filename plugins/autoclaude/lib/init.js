@@ -10,7 +10,7 @@ import { registerProject } from "./registry.js";
 import { installStatusline } from "./statusline.js";
 
 export function templateDir() {
-  return path.join(pluginRoot(), "..", "..", "project-template");
+  return path.join(pluginRoot(), "project-template");
 }
 
 // Looks at package.json and guesses the checks and the dev server. Every guess is reported.

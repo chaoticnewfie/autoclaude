@@ -1,7 +1,8 @@
 // Backstop watchdog: a scheduled task that relaunches a dead supervisor. PLAN.md P6.4, D18.
 // Node built-ins only.
 //
-// Every 5 minutes the OS scheduler runs `node <plugin>/bin/autoclaude.js watchdog`. One pass looks
+// Every 5 minutes the OS scheduler runs `node <bin>/autoclaude-launch.mjs watchdog`; the launcher
+// finds the current plugin install and runs its CLI (D42). One pass looks
 // at every project in the machine registry whose run state is "running" and opens a new supervisor
 // window when the recorded supervisor process is gone (killed, crashed, or the user logged off and
 // back on). A healthy run is never touched, and a pass never throws.
@@ -20,6 +21,7 @@ import { spawnSync } from "node:child_process";
 import { openConsoleWindow, isPidAlive, findOnPath } from "./proc.js";
 import { binDir, homeDir, machinePaths, projectPaths, pluginRoot } from "./paths.js";
 import { loadRegistry } from "./registry.js";
+import { installLauncher } from "./launcher.js";
 import { loadState, STATUS } from "./state.js";
 import { readText, readJson, writeJsonAtomic, writeFileAtomic, appendLine, ensureDir, removeIfExists } from "./fsatomic.js";
 
@@ -312,12 +314,15 @@ export function installWatchdog({
   env = process.env,
   dir = binDir(),
   node = process.execPath,
-  cli = cliPath(),
+  cli = null,
   platform = process.platform,
   unitDir = null,
   which = findOnPath,
   templates = templatesDir()
 } = {}) {
+  // The task runs the launcher, not a path inside one versioned plugin folder, so a plugin update
+  // cannot break it (D42).
+  if (!cli) cli = installLauncher({ dir });
   if (platform !== "win32") return installSystemd({ run, env, node, cli, unitDir, which, templates });
   const file = path.join(dir, VBS_NAME);
   const tr = taskCommand(file);

@@ -200,11 +200,13 @@ test("install-cli writes a shim into the given bin dir", async () => {
   assert.equal(r.code, 0, r.out + r.err);
   const sh = path.join(dir, "autoclaude");
   assert.ok(fs.existsSync(sh), "the extensionless sh shim exists on every OS");
-  assert.match(fs.readFileSync(sh, "utf8"), /^#!\/bin\/sh\nexec ".*node(\.exe)?" ".*autoclaude\.js" "\$@"\n$/);
+  // The shims run the launcher, which finds the current plugin install each time (D42).
+  assert.match(fs.readFileSync(sh, "utf8"), /^#!\/bin\/sh\nexec ".*node(\.exe)?" ".*autoclaude-launch\.mjs" "\$@"\n$/);
+  assert.ok(fs.existsSync(path.join(dir, "autoclaude-launch.mjs")), "the launcher sits next to the shims");
   if (process.platform === "win32") {
     const cmd = path.join(dir, "autoclaude.cmd");
     assert.ok(fs.existsSync(cmd));
-    assert.match(fs.readFileSync(cmd, "utf8"), /autoclaude\.js/);
+    assert.match(fs.readFileSync(cmd, "utf8"), /autoclaude-launch\.mjs/);
   }
   assert.match(r.out, /add .* to your PATH/);
 });

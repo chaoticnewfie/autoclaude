@@ -96,7 +96,7 @@ Phase 7 (planner, docs, the blind DB rehearsal, release). Never open the DB proj
 | `docs/DEFERRED.md` | Deliberately not built yet, with triggers |
 | `docs/CONVENTIONS_SURVEY.md` | Where these rules came from: Scott's other repos |
 | `plugins/autoclaude/` | The plugin (from Phase 1) |
-| `project-template/` | The doc set `autoclaude init` writes into a project (from Phase 2) |
+| `plugins/autoclaude/project-template/` | The doc set `autoclaude init` writes into a project (inside the plugin since D42) |
 | `test/` | `node --test` unit and scenario tests (from Phase 1) |
 | `spikes/` | Phase 0 throwaway experiments; results go in `VERIFY.md` |
 

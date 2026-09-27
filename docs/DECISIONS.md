@@ -442,3 +442,34 @@ it. The supervisor polls `claude agents --json` (interactive sessions appear wit
 `start` title is taken as the program; both hung `cmd` on an error dialog. From Node with a
 quoted title it worked first time, and the window outlived the launching shell. Three
 spawn, `taskkill /T /F`, relaunch cycles left no orphan `claude.exe`.
+
+### D41 Private repo, shared by invitation; the rehearsal runs all day (2026-09-27)
+
+**Decision.** The repo stays private. Scott gives chosen people access as GitHub collaborators.
+There is no LICENSE file; P7.4 ships without one. The docs explain installing from a private
+repo: the marketplace is added with the owner/repo shorthand, and git needs credentials that can
+read it (the GitHub CLI logged in, or an SSH key on the account). The P7.3 rehearsal runs during
+the day instead of overnight.
+
+**Why.** Scott: "I'm going to keep it private and give certain people access. It's the morning
+now but I can let it run all day when it's time." This settles the open item in D20.
+
+**Rejected.** MIT and a public repo (the D20 suggestion).
+
+### D42 Everything the plugin needs ships inside the plugin folder (2026-09-27)
+
+**Decision.** `project-template/` moves into `plugins/autoclaude/project-template/`. The CLI shim
+and the watchdog task call a small launcher kept in the machine's AutoClaude bin folder. The
+launcher finds the current install from Claude Code's plugin records each time it runs. The
+marketplace is renamed from `autoclaude-local` to `autoclaude`, so the install command is
+`autoclaude@autoclaude`.
+
+**Why.** Found while writing the install docs. A marketplace install copies only the plugin
+folder into a cache folder named after the version. `init` read the template from the repo root,
+so it would have failed on every machine except this one. The shim and the watchdog stored that
+versioned path, so they would have broken after the first plugin update. A directory
+marketplace, which is how this machine ran every live test, hides both problems because it loads
+the plugin from the clone.
+
+**Rejected.** Copying the template into the machine folder at install time: there is no install
+hook, and a stale copy would outlive plugin updates.
