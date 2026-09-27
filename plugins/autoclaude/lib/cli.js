@@ -56,6 +56,9 @@ Machine commands:
   watchdog [--install | --uninstall | --status]
                         One pass: bring back the supervisor of any running project whose window
                         is gone. --install schedules it every 5 minutes.
+  uninstall [--purge]   Remove what AutoClaude added to this machine: the watchdog task, the
+                        status line bridge, the command shims and their PATH entry (--purge also
+                        deletes the machine settings: notification channel, registry, logs)
   version | help
 
 `;
@@ -67,6 +70,8 @@ class Io {
     this.stdoutStream = io.stdout || process.stdout;
     this.stderrStream = io.stderr || process.stderr;
     this.now = io.now || (() => new Date());
+    // Test seams for commands that change the machine (uninstall).
+    this.deps = io.deps || {};
   }
   out(s = "") { this.stdoutStream.write(s + "\n"); }
   err(s = "") { this.stderrStream.write(s + "\n"); }
@@ -85,6 +90,7 @@ export async function runCli(argv, rawIo = {}) {
       case "supervise": return cmdSupervise(rest, io);
       case "nudge": return cmdNudge(rest, io);
       case "watchdog": return cmdWatchdog(rest, io);
+      case "uninstall": return cmdUninstall(rest, io);
       case "start": return cmdStart(rest, io);
       case "ready": return cmdReady(rest, io);
       case "blocked": return cmdBlocked(rest, io);
@@ -286,6 +292,63 @@ function cmdNudge(args, io) {
   writeJsonAtomic(path.join(projectPaths(project.root).runtimeDir, "nudge.json"), { prompt, at: io.now().toISOString() });
   io.out(`autoclaude: on its next pass the supervisor restarts the session with: ${prompt}`);
   return 0;
+}
+
+// ---------- uninstall ----------
+
+// Removes AutoClaude's machine-level pieces. The plugin itself is removed with Claude Code's own
+// commands, printed at the end; project files are never touched.
+async function cmdUninstall(args, io) {
+  const purge = args.includes("--purge");
+  const w = await import("./watchdog.js");
+  const s = await import("./statusline.js");
+  const l = await import("./launcher.js");
+  const uninstallWatchdog = io.deps.uninstallWatchdog || ((o) => w.uninstallWatchdog(o));
+  const uninstallStatusline = io.deps.uninstallStatusline || (() => s.uninstallStatusline());
+  const removeFromUserPath = io.deps.removeFromUserPath || removeDirFromUserPath;
+  let ok = true;
+  io.out("autoclaude: removing AutoClaude from this machine");
+
+  const wd = uninstallWatchdog({ env: io.env });
+  if (wd.ok) io.out(`  watchdog: ${wd.wasInstalled === false ? "was not installed" : "removed"}${wd.manual ? ` (${wd.manual})` : ""}`);
+  else { ok = false; io.out(`  watchdog: could not remove it: ${String(wd.stderr || "").trim()}`); }
+
+  try {
+    const sl = uninstallStatusline();
+    io.out(`  status line bridge: ${sl.removed ? (sl.restored ? "removed; your previous status line is back" : "removed") : "was not installed"}`);
+  } catch (e) { ok = false; io.out(`  status line bridge: could not remove it: ${e.message}`); }
+
+  const dir = io.env.AUTOCLAUDE_BIN_DIR || binDir();
+  const files = ["autoclaude", "autoclaude.cmd", l.LAUNCHER_NAME, l.LAUNCHER_SIDECAR, "autoclaude-watchdog.vbs"].map((f) => path.join(dir, f)).filter((f) => fs.existsSync(f));
+  for (const f of files) fs.rmSync(f, { force: true });
+  io.out(`  command shims: ${files.length ? `removed ${files.length} file(s) from ${dir}` : "none found"}`);
+  try { if (fs.existsSync(dir) && fs.readdirSync(dir).length === 0) fs.rmdirSync(dir); } catch {}
+  const p = removeFromUserPath(dir);
+  io.out(`  PATH: ${p}`);
+
+  const machine = machinePaths().dir;
+  if (purge) {
+    fs.rmSync(machine, { recursive: true, force: true });
+    io.out(`  machine settings: removed ${machine}`);
+  } else {
+    io.out(`  machine settings: kept in ${machine} (notification channel, project registry, logs); \`autoclaude uninstall --purge\` removes them`);
+  }
+  io.out("");
+  io.out("Last, remove the plugin itself:");
+  io.out("  claude plugin uninstall autoclaude@autoclaude");
+  io.out("  claude plugin marketplace remove autoclaude");
+  io.out("Project files (autoclaude.config.json, .autoclaude/, the docs) are left alone; delete them by hand if you want.");
+  return ok ? 0 : 1;
+}
+
+// Takes `dir` out of the user's PATH. Windows: the user environment through PowerShell, as
+// install-cli added it. Elsewhere install-cli only printed a profile line, so this does too.
+function removeDirFromUserPath(dir) {
+  if (!isWindows) return `remove ${dir} from PATH in your shell profile if you added it`;
+  const ps = `$d='${dir.replace(/'/g, "''")}'; $p=[Environment]::GetEnvironmentVariable('Path','User'); $parts=@($p -split ';' | Where-Object { $_ -and ($_.TrimEnd('\\') -ne $d.TrimEnd('\\')) }); if ($parts.Count -eq @($p -split ';' | Where-Object { $_ }).Count) { 'absent' } else { [Environment]::SetEnvironmentVariable('Path', ($parts -join ';'), 'User'); 'removed' }`;
+  const r = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", ps], { encoding: "utf8", windowsHide: true });
+  if (r.status !== 0) return `could not update the user PATH (${String(r.stderr || r.error).trim().slice(0, 200)}); remove ${dir} from it by hand`;
+  return String(r.stdout).trim() === "removed" ? `removed ${dir} from your user PATH (new terminals pick it up)` : `${dir} was not on your user PATH`;
 }
 
 async function cmdWatchdog(args, io) {

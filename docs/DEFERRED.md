@@ -105,3 +105,17 @@ sessions and auto-continue as applying to them.
 `claude agents --json`, set `worktree.bgIsolation: "none"` in the project settings, and relaunch
 with `claude --resume <id> --bg "<prompt>"`.
 **No rework.** The gate, the CLI and the state files do not know which supervisor is running.
+
+## 15. A time limit per step (`retries.maxMinutesPerStep`)
+
+**What.** Pause, or nudge the session to wrap up or block, when one step has run longer than
+`retries.maxMinutesPerStep` (default 120) without being handed in.
+**Why it waits.** The key is accepted by the config but nothing enforces it (found while writing
+docs/USAGE.md, 2026-09-27). The supervisor's stall rules, the no-progress counter and the
+three-attempt limit already stop a session that is stuck. A session that keeps working busily on
+one step for hours without calling `ready` is not caught, and has not been seen yet.
+**Trigger.** A run where one step takes more than two hours with steady heartbeats.
+**Path.** The supervisor compares `state.stepStartedAt` with the limit; first a nudge asking the
+builder to hand in or block, then a pause with a high alert.
+**No rework.** The state already records `stepStartedAt`, and the supervisor's `decide` gains one
+rule.

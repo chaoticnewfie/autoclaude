@@ -67,6 +67,14 @@ added, never removed. Nothing is built early unless the owner says so.
 | Date | Request, in the owner's words | Slotted into | Status |
 |---|---|---|---|
 
+## Before the run
+
+What the owner does before `autoclaude run`, because the run cannot: tools to install,
+environment variables to set, local services or test databases to create, accounts to sign in
+to. Plain bullets, not checkboxes. `/autoclaude:plan` fills this in.
+
+- Nothing yet.
+
 ## Phases
 
 Each phase is a `## Phase N: title` heading. Each step is one checkbox line with a bold ID,

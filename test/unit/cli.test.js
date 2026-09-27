@@ -194,6 +194,39 @@ test("lint-plan reports ok and problems, for the project plan and for a given fi
   assert.match(r.out, /duplicate step id S1\.1/);
 });
 
+test("uninstall removes the watchdog, the status line bridge, the shims and the PATH entry; --purge the machine settings", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "autoclaude-bin-"));
+  const configDir = fs.mkdtempSync(path.join(os.tmpdir(), "autoclaude-cfg-"));
+  await run(["install-cli", "--no-path"], dir, { configDir, env: { AUTOCLAUDE_BIN_DIR: dir, PATH: "" } });
+  assert.ok(fs.existsSync(path.join(dir, "autoclaude-launch.mjs")));
+  const machine = path.join(configDir, "autoclaude");
+  fs.mkdirSync(machine, { recursive: true });
+  fs.writeFileSync(path.join(machine, "notify.json"), "{}");
+  const calls = [];
+  const deps = {
+    uninstallWatchdog: () => { calls.push("watchdog"); return { ok: true, stderr: "", wasInstalled: true }; },
+    uninstallStatusline: () => { calls.push("statusline"); return { removed: true, restored: { command: "old" } }; },
+    removeFromUserPath: (d) => { calls.push(`path ${d}`); return `removed ${d} from your user PATH`; }
+  };
+  let r = await run(["uninstall"], dir, { configDir, deps, env: { AUTOCLAUDE_BIN_DIR: dir, PATH: "" } });
+  assert.equal(r.code, 0, r.out);
+  assert.deepEqual(calls, ["watchdog", "statusline", `path ${dir}`]);
+  assert.match(r.out, /watchdog: removed/);
+  assert.match(r.out, /status line bridge: removed; your previous status line is back/);
+  assert.match(r.out, new RegExp(`command shims: removed ${process.platform === "win32" ? 4 : 3} file\\(s\\)`));
+  assert.equal(fs.existsSync(path.join(dir, "autoclaude")), false);
+  assert.match(r.out, /machine settings: kept in/);
+  assert.ok(fs.existsSync(path.join(machine, "notify.json")), "kept without --purge");
+  assert.match(r.out, /claude plugin uninstall autoclaude@autoclaude/);
+
+  assert.ok(machine.startsWith(os.tmpdir()), "the purge below only ever touches a temp folder");
+  r = await run(["uninstall", "--purge"], dir, { configDir, deps: { ...deps, uninstallWatchdog: () => ({ ok: false, stderr: "Access is denied." }) }, env: { AUTOCLAUDE_BIN_DIR: dir, PATH: "" } });
+  assert.equal(r.code, 1, "a step that failed is reported");
+  assert.match(r.out, /watchdog: could not remove it: Access is denied\./);
+  assert.match(r.out, /command shims: none found/);
+  assert.equal(fs.existsSync(machine), false);
+});
+
 test("install-cli writes a shim into the given bin dir", async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "autoclaude-bin-"));
   const r = await run(["install-cli", "--no-path"], dir, { env: { AUTOCLAUDE_BIN_DIR: dir, PATH: "" } });
