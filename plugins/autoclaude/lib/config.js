@@ -19,6 +19,8 @@ export const DEFAULTS = Object.freeze({
   gate: { timeoutSec: 1800 },
   notify: { morningSummaryAt: null },
   review: { pauseAt: "never" },
+  // The supervisor that keeps the builder session alive (PLAN.md P6.4, D18). Minutes unless noted.
+  supervisor: { pollSec: 60, idleRelaunchMin: 15, stallMin: 45, resumeGraceMin: 2, rateLimitGraceMin: 10, maxRecoveries: 2 },
   // Extra Bash commands a run may never execute in this project, on top of the built-in list
   // (D37). Each rule: { "pattern": "<regular expression, case-insensitive>", "reason": "..." }.
   guard: { deny: [] },
@@ -134,6 +136,9 @@ export function validateConfig(cfg) {
     if (typeof cfg.notify.morningSummaryAt !== "string" || !/^([01]\d|2[0-3]):[0-5]\d$/.test(cfg.notify.morningSummaryAt)) err("notify.morningSummaryAt", "expected null or a time like 07:30");
   }
   if (expect("review", cfg.review, "object")) oneOf("review.pauseAt", cfg.review.pauseAt, PAUSE_AT);
+  if (expect("supervisor", cfg.supervisor, "object")) {
+    for (const k of ["pollSec", "idleRelaunchMin", "stallMin", "resumeGraceMin", "rateLimitGraceMin", "maxRecoveries"]) positive(`supervisor.${k}`, cfg.supervisor[k]);
+  }
   if (expect("guard", cfg.guard, "object") && expect("guard.deny", cfg.guard.deny, "array")) {
     cfg.guard.deny.forEach((rule, i) => {
       const p = `guard.deny[${i}]`;

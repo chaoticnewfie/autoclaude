@@ -10,12 +10,17 @@ import { loadState, updateState, describeState, STATUS } from "./state.js";
 import { parsePlan, lintPlan, formatLint, stepById, nextStep, progress } from "./plan.js";
 import { readUsage, formatUsage } from "./usage.js";
 import { notify, readMachineNotify, writeMachineNotify, resolveChannel } from "./notify.js";
-import { readText, readJson, appendLine, ageMs, ensureDir, writeFileAtomic } from "./fsatomic.js";
+import { readText, readJson, appendLine, ageMs, ensureDir, writeFileAtomic, writeJsonAtomic } from "./fsatomic.js";
 import { isPidAlive, findOnPath } from "./proc.js";
 import { initProject, formatInitReport } from "./init.js";
 import { writeReady, writeBlocked, readReady } from "./protocol.js";
 import { firstUnfinished, planSlug, setMarker, MARKERS } from "./plan.js";
 import * as git from "./git.js";
+import { resumeRun } from "./resume.js";
+import { preflight, formatPreflight } from "./preflight.js";
+import { supervise } from "./supervisor.js";
+import { openConsoleWindow, isPidAlive as pidAlive } from "./proc.js";
+import { registerProject } from "./registry.js";
 
 const VERSION = JSON.parse(fs.readFileSync(path.join(pluginRoot(), ".claude-plugin", "plugin.json"), "utf8")).version;
 
@@ -27,8 +32,11 @@ Project commands (run inside a project):
   init [--playwright] [--no-statusline] [--dev-url <url>] [--dir <path>]
                         Set the project up: config, doc set, .gitignore, browser-tester config,
                         machine registry, statusline bridge. Never overwrites existing files.
+  run                   Preflight, then open the ac-<project> window where the supervisor runs the build
   status [--all]        State, current step, attempts, usage, last progress (--all: every registered project)
-  start                 Preflight, create the run branch, set the run going on the first unfinished step
+  start [--no-preflight]  Preflight, create the run branch, set the run going (the run window does this)
+  supervise             The supervisor loop itself (what \`run\` starts in the window)
+  nudge "<prompt>"      Restart the running session now with this prompt (for example "/compact")
   ready [<step>]        Builder: tell the gate the current step is done (verified on the next stop)
   blocked <step> "<q>"  Builder: stop the run with a question only the owner can answer
   answer "<text>"       Owner: answer the blocked question; recorded as a decision, the run resumes
@@ -44,9 +52,11 @@ Machine commands:
                [--discord <webhook url>] [--show] [--clear]
                         Store the notification channel for this machine (outside any repo)
   notify-test [message] Send a test notification through the configured channel
+  watchdog [--install | --uninstall | --status]
+                        One pass: bring back the supervisor of any running project whose window
+                        is gone. --install schedules it every 5 minutes.
   version | help
 
-Coming in later phases: init, run, start, ready, blocked, answer, watchdog.
 `;
 
 class Io {
@@ -70,6 +80,10 @@ export async function runCli(argv, rawIo = {}) {
       case "version": case "--version": case "-v": io.out(VERSION); return 0;
       case "init": return cmdInit(rest, io);
       case "status": return cmdStatus(rest, io);
+      case "run": return cmdRun(rest, io);
+      case "supervise": return cmdSupervise(rest, io);
+      case "nudge": return cmdNudge(rest, io);
+      case "watchdog": return cmdWatchdog(rest, io);
       case "start": return cmdStart(rest, io);
       case "ready": return cmdReady(rest, io);
       case "blocked": return cmdBlocked(rest, io);
@@ -195,6 +209,104 @@ function statusAll(io) {
   return 0;
 }
 
+// ---------- run / supervise ----------
+
+function supervisorPid(root) {
+  try { return Number(fs.readFileSync(projectPaths(root).supervisorPidFile, "utf8")) || null; } catch { return null; }
+}
+
+async function cmdRun(args, io) {
+  const project = requireProject(io);
+  if (!project) return 1;
+  const { root } = project;
+  const state = loadState(root);
+  const pid = supervisorPid(root);
+  if (pid && pidAlive(pid)) {
+    io.out(`autoclaude: this project already has a supervisor (pid ${pid}, window ${state.windowTitle || "?"}). Watch it with \`autoclaude status\`.`);
+    return 1;
+  }
+  if (state.status === STATUS.complete) {
+    io.out("autoclaude: the plan is complete; add steps to it, then `autoclaude run` again");
+    return 1;
+  }
+  // A new run gets the full preflight; bringing back the supervisor of a run already under way
+  // (after a reboot, or a closed window) checks only the tools and the folder's trust, because
+  // mid-step the working tree is legitimately dirty.
+  const fresh = state.status === STATUS.idle;
+  const skip = fresh ? [] : ["plan", "git", "checks", "playwright", "dev server", "usage"];
+  const pf = await preflight(project, { env: io.env, devServer: fresh, skip });
+  io.out("autoclaude: preflight");
+  io.out(formatPreflight(pf));
+  if (!pf.ok) { io.out("autoclaude: not starting; fix the FAIL lines above and run it again"); return 1; }
+  registerProject(root);
+  const title = `ac-${path.basename(root).toLowerCase().replace(/[^a-z0-9]+/g, "-")}`;
+  const r = openConsoleWindow({
+    title,
+    cwd: root,
+    program: process.execPath,
+    args: [path.join(pluginRoot(), "bin", "autoclaude.js"), "supervise"],
+    logFile: path.join(projectPaths(root).logsDir, "supervisor.log"),
+    env: io.env
+  });
+  io.out(`autoclaude: ${fresh ? "starting the run" : `bringing back the ${state.status} run`} in a new window, ${title} (${r.method}).`);
+  io.out("  Watch:  the window, or `autoclaude status` from any terminal. Leave the window open; an RDP disconnect is fine, logging off is not.");
+  io.out("  Stop:   `autoclaude pause` (after the current step is verified) or `autoclaude pause --now`.");
+  io.out("  Notes:  `autoclaude note \"...\"` any time; they reach Claude at the next step or resume.");
+  return 0;
+}
+
+async function cmdSupervise(args, io) {
+  const project = requireProject(io);
+  if (!project) return 1;
+  const other = supervisorPid(project.root);
+  if (other && other !== process.pid && pidAlive(other)) {
+    io.out(`autoclaude: another supervisor (pid ${other}) is already running this project; this one stops.`);
+    return 1;
+  }
+  io.out(`autoclaude: supervisor for ${project.root} (pid ${process.pid}). This window runs the build. Closing it stops the run until \`autoclaude run\` or the watchdog brings it back.`);
+  const r = await supervise({ root: project.root, env: io.env });
+  io.out(`autoclaude: supervisor finished (${r.exit}).`);
+  return 0;
+}
+
+function cmdNudge(args, io) {
+  const project = requireProject(io);
+  if (!project) return 1;
+  const prompt = args.join(" ").trim();
+  if (!prompt) { io.err('autoclaude: usage: autoclaude nudge "<prompt>"   (for example "/compact")'); return 2; }
+  const state = loadState(project.root);
+  if (state.status !== STATUS.running) { io.out(`autoclaude: the run is ${describeState(state)}; a nudge only applies to a running session`); return 1; }
+  const pid = supervisorPid(project.root);
+  if (!pid || !pidAlive(pid)) { io.out("autoclaude: no supervisor is running for this project, so nothing would act on it; use `autoclaude run`"); return 1; }
+  writeJsonAtomic(path.join(projectPaths(project.root).runtimeDir, "nudge.json"), { prompt, at: io.now().toISOString() });
+  io.out(`autoclaude: on its next pass the supervisor restarts the session with: ${prompt}`);
+  return 0;
+}
+
+async function cmdWatchdog(args, io) {
+  const w = await import("./watchdog.js");
+  if (args.includes("--install")) {
+    const r = w.installWatchdog({ env: io.env });
+    if (r.ok) io.out(`autoclaude: watchdog installed (${process.platform === "win32" ? `scheduled task "${w.TASK_NAME}", every 5 minutes while you are logged on` : "systemd user timer"}).`);
+    else io.out(`autoclaude: could not install the watchdog: ${String(r.stderr || r.error || "").trim()}${r.cronLine ? `\n  add this line with \`crontab -e\`:\n    ${r.cronLine}` : ""}`);
+    return r.ok ? 0 : 1;
+  }
+  if (args.includes("--uninstall")) {
+    const r = w.uninstallWatchdog({ env: io.env });
+    io.out(r.ok ? "autoclaude: watchdog removed" : `autoclaude: could not remove the watchdog: ${String(r.stderr || "").trim()}`);
+    return r.ok ? 0 : 1;
+  }
+  if (args.includes("--status")) {
+    const s = w.watchdogStatus({ env: io.env });
+    if (!s.installed) { io.out("autoclaude: the watchdog is not installed (`autoclaude watchdog --install`)"); return 1; }
+    io.out(`autoclaude: watchdog ${s.status || "installed"}; last run ${s.lastRun || "?"} (result ${s.lastResult ?? "?"}); next run ${s.nextRun || "?"}`);
+    return 0;
+  }
+  const results = await w.watchdogPass({ env: io.env });
+  for (const r of results) if (r.action !== "not-running") io.out(`${r.root}: ${r.action}${r.error ? ` (${r.error})` : ""}`);
+  return 0;
+}
+
 // ---------- start / ready / blocked ----------
 
 async function cmdStart(args, io) {
@@ -219,16 +331,24 @@ async function cmdStart(args, io) {
     for (const e of st.entries.slice(0, 10)) io.out(`  ${e.code} ${e.path}`);
     return 1;
   }
+  if (!args.includes("--no-preflight")) {
+    const pf = await preflight(project, { env: gitEnv });
+    io.out("autoclaude: preflight");
+    io.out(formatPreflight(pf));
+    if (!pf.ok) { io.out("autoclaude: not starting; fix the FAIL lines above and run it again"); return 1; }
+  }
   const branch = config.branch.replace("{planSlug}", planSlug(plan.parsed));
   const co = await git.checkoutBranch(root, branch, { create: true, env: gitEnv });
   if (!co.ok) { io.out(`autoclaude: could not check out ${branch}: ${co.stderr}`); return 1; }
   const ticked = plan.parsed.steps.filter((s) => s.marker === MARKERS.done).map((s) => s.id);
   const now = io.now().toISOString();
   const baseCommit = await git.head(root, { env: gitEnv });
+  const usage = readUsage({ staleAfterMin: config.usage.staleAfterMin, now: io.now().getTime() });
   updateState(root, (s) => {
     s.status = STATUS.running; s.pauseReason = null; s.pauseRequested = false; s.currentStep = first.id;
     s.attempts = {}; s.infraFailures = {}; s.noProgress = 0; s.recoveries = 0; s.tickedByGate = ticked; s.startedAt = now; s.stepStartedAt = now;
     s.headAtLastGate = null; s.toolCallsAtLastGate = 0; s.baseCommit = baseCommit; s.ownerAnswer = null; s.lastBlockedQuestion = null;
+    s.usageAtStart = usage.sevenDay && !usage.stale ? usage.sevenDay.pct : null; s.weeklyResetsAt = null;
   });
   io.out(`autoclaude: running on branch ${branch}${co.created ? " (created)" : ""}. First step: ${first.id} ${first.title}.`);
   io.out(`  the builder session works the plan; the gate verifies on every stop. Watch with \`autoclaude status\`.`);
@@ -339,42 +459,6 @@ function cmdResume(args, io) {
   io.out(`autoclaude: resumed on ${next.currentStep || "?"}${notes ? ` with ${notes} review note(s) waiting for Claude` : ""}. The supervisor nudges the session on its next pass.`);
   for (const c of changes) io.out(`  ${c}`);
   return 0;
-}
-
-// Resume re-baselines on the plan as the owner left it (D33): the owner's ticks are the new
-// record, a failed [!] or blocked [?] step goes back to [ ] with fresh attempts, and the current
-// step becomes the first unfinished one if the old one is gone or done. Returns what changed.
-function resumeRun(project, state, extra = {}) {
-  const { root, config } = project;
-  const planFile = path.join(root, config.plan);
-  let text = readText(planFile, "");
-  let parsed = parsePlan(text);
-  const changes = [];
-  for (const s of parsed.steps) {
-    if (s.marker === MARKERS.failed || s.marker === MARKERS.blocked) {
-      text = setMarker(text, s.id, MARKERS.todo);
-      changes.push(`${s.id}: [${s.marker}] reset to [ ] with fresh attempts`);
-    }
-  }
-  if (changes.length) writeFileAtomic(planFile, text);
-  parsed = parsePlan(text);
-  const ticked = parsed.steps.filter((s) => s.marker === MARKERS.done).map((s) => s.id);
-  const before = new Set(state.tickedByGate || []);
-  for (const id of ticked) if (!before.has(id)) changes.push(`${id}: ticked by the owner, accepted as done`);
-  for (const id of before) if (!ticked.includes(id)) changes.push(`${id}: unticked by the owner, will be done again`);
-  // The first unfinished step in plan order is always where the run continues: that is the old
-  // current step unless the owner ticked it, removed it, or unticked something before it.
-  const current = firstUnfinished(parsed);
-  const id = current ? current.id : null;
-  if (id !== (state.currentStep || null)) changes.push(`current step is now ${id || "none (every step is done)"}`);
-  updateState(root, (s) => {
-    s.status = STATUS.running; s.pauseReason = null; s.pauseRequested = false; s.recoveries = 0; s.noProgress = 0;
-    s.tickedByGate = ticked;
-    s.currentStep = id;
-    if (id) { s.attempts = { ...s.attempts, [id]: 0 }; s.infraFailures = { ...(s.infraFailures || {}), [id]: 0 }; }
-    Object.assign(s, extra);
-  });
-  return changes;
 }
 
 // ---------- answer ----------

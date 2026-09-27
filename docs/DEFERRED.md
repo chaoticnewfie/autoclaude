@@ -74,6 +74,25 @@ can clear the file. Not yet done.
 process (`wmic`/`Get-CimInstance` on Windows, `/proc` elsewhere) before killing; clear the file
 in `autoclaude start`.
 
+## 13. The watchdog on a laptop running on battery
+
+**What.** Tasks created with `schtasks /Create` default to "do not start on batteries", so the
+backstop watchdog does not run on a laptop that is unplugged.
+**Why it waits.** The Code VM and the desktop have no battery; the laptop is not a run machine yet.
+**Trigger.** Running AutoClaude unattended on a laptop.
+**Path.** Create the task from an XML definition (`schtasks /Create /XML`) with
+`DisallowStartIfOnBatteries` and `StopIfGoingOnBatteries` set to false.
+
+## 14. A reused process id makes a dead supervisor look alive
+
+**What.** The watchdog and `autoclaude run` treat the recorded supervisor pid as alive if any
+process has that pid, so after a reboot an unrelated process can hide a dead supervisor.
+**Why it waits.** Rare, and the owner can always run `autoclaude run` after a reboot.
+**Trigger.** One occurrence, or before the rollout to other people.
+**Path.** Record the supervisor's start time with its pid and compare it with the live process
+(`Get-CimInstance Win32_Process` on Windows, `/proc/<pid>/stat` elsewhere), as DEFERRED 12
+proposes for the dev server.
+
 ## 11. Claude Code background sessions as the runner
 
 **What.** Host the builder session in `claude --bg` under Claude Code's own supervisor daemon

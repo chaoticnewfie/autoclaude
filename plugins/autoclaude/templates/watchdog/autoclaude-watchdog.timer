@@ -1,0 +1,13 @@
+# AutoClaude backstop watchdog timer, systemd user unit (PLAN.md P6.4, D18).
+# Starts autoclaude-watchdog.service 2 minutes after boot and every 5 minutes after that.
+# Written by `autoclaude watchdog --install`, removed by `autoclaude watchdog --uninstall`.
+[Unit]
+Description=Run the AutoClaude backstop watchdog every 5 minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -14,6 +14,7 @@ import { writeReport, checkFailureSection, summarize, fence } from "./report.js"
 import { restartDevServer, stopDevServer } from "./devserver.js";
 import { runBrowserCheck } from "./tester.js";
 import { runSecurityReview, securityWanted } from "./security.js";
+import { buildSummary } from "./summary.js";
 import { ensureDir } from "./fsatomic.js";
 import * as git from "./git.js";
 import { notify } from "./notify.js";
@@ -335,7 +336,7 @@ export async function runGate(input, deps = {}) {
     base.usageStaleWarned = false;
   }
   if (!usage.stale && usage.sevenDay && usage.sevenDay.pct >= config.usage.weeklyPauseAtPct) {
-    saveState(root, { ...base, currentStep: next.id, status: STATUS.paused, pauseReason: "weekly-limit", stepStartedAt: null });
+    saveState(root, { ...base, currentStep: next.id, status: STATUS.paused, pauseReason: "weekly-limit", stepStartedAt: null, weeklyResetsAt: usage.sevenDay.resetsAt ? new Date(usage.sevenDay.resetsAt).toISOString() : null });
     stopDevServer({ root });
     ev("paused", { reason: "weekly-limit", pct: usage.sevenDay.pct });
     const resets = usage.sevenDay.resetsAt ? new Date(usage.sevenDay.resetsAt).toLocaleString() : "unknown";
@@ -355,8 +356,13 @@ async function complete(root, state, config, parsed, ev, events, say, deps) {
   const p = progress(parsed);
   const started = state.startedAt ? Date.parse(state.startedAt) : null;
   const mins = started ? Math.round(((deps.now ? deps.now().getTime() : Date.now()) - started) / 60000) : null;
-  ev("complete", { done: p.done, total: p.total });
+  ev("complete", { done: p.done, total: p.total, mins });
   try { appendLine(path.join(root, ".autoclaude", "logs", "gate.log"), `${new Date().toISOString()} plan complete: ${p.done}/${p.total}`); } catch {}
-  await say({ title: `AutoClaude: plan complete (${planSlug(parsed)})`, message: `${p.done}/${p.total} steps verified${mins !== null ? ` in ${mins} min` : ""}. Branch ${(await git.currentBranch(root)) || "?"}. Review the commits and ${config.docs.decisions}.`, priority: "default" });
+  let summary = `${p.done}/${p.total} steps verified${mins !== null ? ` in ${mins} min` : ""}.`;
+  try {
+    const usage = readUsage({ staleAfterMin: config.usage.staleAfterMin, now: deps.now ? deps.now().getTime() : Date.now() });
+    summary = buildSummary({ root, config, state: { ...state, status: STATUS.complete }, parsed, usage: usage.stale ? null : usage, now: deps.now ? deps.now().getTime() : Date.now() });
+  } catch {}
+  await say({ title: `AutoClaude: plan complete (${planSlug(parsed)})`, message: `${summary}\nBranch ${(await git.currentBranch(root)) || "?"}. Review the commits, ${config.docs.decisions} and ${config.docs.blockers} before merging.`, priority: "default" });
   return allow(events);
 }

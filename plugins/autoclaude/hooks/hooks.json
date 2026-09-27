@@ -22,6 +22,20 @@
         ]
       }
     ],
+    "Notification": [
+      {
+        "hooks": [
+          { "type": "command", "command": "node", "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/notify-idle.js"], "timeout": 30 }
+        ]
+      }
+    ],
+    "StopFailure": [
+      {
+        "hooks": [
+          { "type": "command", "command": "node", "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/stop-failure.js"], "timeout": 20 }
+        ]
+      }
+    ],
     "PermissionRequest": [
       {
         "hooks": [

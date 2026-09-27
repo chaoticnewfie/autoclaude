@@ -168,7 +168,9 @@ test("last step passes: the plan completes, the run stops, the summary goes out"
   assert.equal(s.status, "complete");
   assert.equal(s.currentStep, null);
   assert.match(sent.at(-1).title, /plan complete/);
-  assert.match(sent.at(-1).message, /1\/1 steps verified/);
+  assert.match(sent.at(-1).message, /Steps: 1\/1 verified\.\nAttempts: 1 for 1 step \(1 passed first time\)\./);
+  assert.match(sent.at(-1).message, /Decisions logged: 0\. Follow-ups: 0\. Security findings filed: 0\./);
+  assert.match(sent.at(-1).message, /Review the commits, docs\/DECISIONS\.md and docs\/BLOCKERS\.md before merging/);
 });
 
 test("pause requested: pauses for review after the verified commit, with the next step recorded", async () => {

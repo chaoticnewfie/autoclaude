@@ -365,6 +365,41 @@ through the logged-in GitHub CLI and D20 remains open for anyone else.
 - **The decider runs in the foreground.** Live, the builder started it in the background and
   spent turns waiting; the context prompt now says to wait for its reply.
 
+### D39 An idle session does not page the owner; the supervisor fixes it
+
+**Decision.** The Notification hook writes every notification to `.autoclaude/idle` for the
+supervisor. It pages the owner (high, at most once per 30 minutes) only for prompts that wait for
+a person: `permission_prompt`, `agent_needs_input`, `elicitation_dialog`. `idle_prompt` alone is
+a marker; the supervisor relaunches the session after `supervisor.idleRelaunchMin` and pages only
+when two relaunches make no progress (pause as stuck).
+
+**Why.** PLAN.md P6.1 as drafted paged for `idle_prompt` too, but with a supervisor that recovers
+idle sessions in minutes those pages would be false alarms, against the "Quiet" success
+criterion and R10. A prompt waiting for a person means the PermissionRequest hook did not catch
+something, which is worth a page.
+
+### D40 Supervisor details settled in Phase 6
+
+- **Everything it decides from is a file** (heartbeat, idle marker, `failure.json`, the gate's
+  `gate.json`, `nudge.json`, usage, state), plus `claude agents --json` only when activity is
+  stale. The decision is one pure function (`decide`), unit-tested rule by rule.
+- **It never prints while the session is alive**; the session owns the console. It logs to
+  `.autoclaude/logs/supervisor.log`.
+- **The gate keeps `gate.json` (with its pid) while it works**, so a 20-minute verification is not
+  mistaken for a stall; a marker whose pid is dead is ignored and removed.
+- **`autoclaude nudge "<prompt>"`** asks the supervisor to restart the session with that prompt
+  now (for example `/compact`). It is an owner request, not a recovery, so it does not count
+  towards the stuck limit. Added because the chaos tests need a forced compaction and nothing else
+  can inject a prompt into a running session.
+- **Relaunch is always `claude --continue --permission-mode auto "<prompt>"`**, which resumes the
+  same conversation; the builder's environment drops a parent session's `CLAUDE_CODE_*` variables
+  and keeps `CLAUDE_CONFIG_DIR`.
+- **`run` and `start` share one preflight.** `run` on a run that is already under way (after a
+  reboot or a closed window) checks only tools and trust, because mid-step the tree is dirty.
+- **A second supervisor refuses to start** while a live one is recorded.
+- **Trust lookups compare real paths,** because Windows can name one folder by its 8.3 short form
+  and its long form (found by a test, not by guessing).
+
 ### D31 The launcher spawns `cmd start` from Node, and the supervisor polls `claude agents --json`
 
 **Decision.** `autoclaude run` opens the window through Node's `spawn("cmd.exe", ["/d","/s","/c",

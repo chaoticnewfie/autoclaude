@@ -1,0 +1,4 @@
+# AutoClaude backstop watchdog for machines without systemd (macOS, minimal Linux).
+# `autoclaude watchdog --install` prints this line filled in; add it with `crontab -e`.
+# PATH is the PATH of the shell that ran the install, so the relaunched supervisor finds claude.
+*/5 * * * * PATH={{PATH}} {{NODE}} {{CLI}} watchdog

@@ -1,0 +1,18 @@
+# AutoClaude backstop watchdog, systemd user service (PLAN.md P6.4, D18).
+# Written into ~/.config/systemd/user/ by `autoclaude watchdog --install` and removed by
+# `autoclaude watchdog --uninstall`. autoclaude-watchdog.timer starts it every 5 minutes. Each run
+# relaunches the supervisor of every registered project whose run is "running" but whose
+# supervisor process is gone. It never touches a healthy run.
+#
+# User units stop when you log out. To keep the watchdog running without a login session, run
+# this once:  loginctl enable-linger <user>
+#
+# PATH is the PATH of the shell that installed the watchdog, so the relaunched supervisor finds
+# the same programs (claude, npx, git) that an interactive run finds.
+[Unit]
+Description=AutoClaude backstop watchdog (relaunches a dead supervisor)
+
+[Service]
+Type=oneshot
+Environment="PATH={{PATH}}"
+ExecStart={{NODE}} {{CLI}} watchdog

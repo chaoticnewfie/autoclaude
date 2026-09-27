@@ -153,6 +153,25 @@ test("resume re-baselines on the plan the owner left (D33): failed steps get fre
   assert.deepEqual([s.currentStep, s.tickedByGate], ["S1.1", []], "the run goes back to the first unfinished step");
 });
 
+test("run refuses before opening any window: complete plan, a live supervisor, a failing preflight", async () => {
+  const root = project();
+  saveState(root, { ...defaultState(), status: "complete" });
+  let r = await run(["run"], root);
+  assert.equal(r.code, 1);
+  assert.match(r.out, /the plan is complete/);
+  saveState(root, { ...defaultState(), status: "idle" });
+  fs.writeFileSync(path.join(root, ".autoclaude", "supervisor.pid"), String(process.pid));
+  r = await run(["run"], root);
+  assert.equal(r.code, 1);
+  assert.match(r.out, /already has a supervisor \(pid \d+/);
+  fs.unlinkSync(path.join(root, ".autoclaude", "supervisor.pid"));
+  r = await run(["run"], root);
+  assert.equal(r.code, 1);
+  assert.match(r.out, /FAIL git: not a git repository/);
+  assert.match(r.out, /FAIL trust: Claude Code has not been opened here yet/);
+  assert.match(r.out, /not starting; fix the FAIL lines above/);
+});
+
 test("resume refuses when the plan fails lint", async () => {
   const root = project({ plan: "# X\n\n## Phase 1: A\n- [ ] **S1.1** no accept\n" });
   saveState(root, { ...defaultState(), status: "paused", pauseReason: "review" });
