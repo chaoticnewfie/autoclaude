@@ -46,3 +46,23 @@ One entry per working session: what was done, what was committed. Append only.
 - `VERIFY.md` rows P0.3, P0.6, P0.8 set to Pass; P0.9 done; PLAN.md ticked. Only the RDP
   disconnect check remains and it is Scott's.
 - Next: CHECKPOINT 0 review, then Phase 1.
+
+## 2026-09-27 (Code VM) - Phase 1
+
+- Scott: Phase 0 accepted implicitly ("continue with phase 1"); new requirement R17 (plans must
+  settle decisions ahead of time; existing projects get a plan review) recorded in PLAN.md.
+- RDP disconnect and reconnect verified with a live spike window: both processes survived.
+- Built the plugin skeleton: local marketplace, `plugin.json` with userConfig, skills `status`,
+  `pause`, `note`, `resume`; `claude plugin validate --strict` passes; installed on this machine
+  through `claude plugin marketplace add` and `claude plugin install` (loads in place from the repo).
+- Libraries: `paths`, `fsatomic` (atomic writes with EPERM retry), `config` (defaults, merge,
+  validation), `state`, `plan` (parse, lint, next step, byte-exact marker writes; fenced blocks
+  ignored; phase headings at H2 to H4), `usage` (statusline file first, cached key as fallback),
+  `notify` (ntfy, Discord, stdout), `proc` (shell runs with timeout, kill tree, PATH lookup,
+  console-window launcher), `cli` (status, pause, note, resume, lint-plan, usage, install-cli,
+  notify-test). `install-cli` wrote the shim and added it to the user PATH on this VM.
+- Tests: `node scripts/check.js` -> syntax 19/19, **44 tests, 44 pass**. The parser test runs on
+  this repo's own PLAN.md, which is why P8.1 to P8.3 gained Accept lines.
+- Found: `cachedUsageUtilization` vanished from `~/.claude.json` after an interactive session
+  rewrote it (D27 amended).
+- P1.5 (phone delivery) waits for Scott's ntfy topic or Discord webhook. Then CHECKPOINT 1.

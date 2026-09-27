@@ -1,0 +1,14 @@
+{
+  "name": "autoclaude-local",
+  "description": "Local marketplace for the AutoClaude plugin. Add it with `claude plugin marketplace add <path to this repo>`.",
+  "owner": {
+    "name": "AutoClaude"
+  },
+  "plugins": [
+    {
+      "name": "autoclaude",
+      "source": "./plugins/autoclaude",
+      "description": "Runs a project's PLAN.md step by step, unattended, and verifies every step before moving on."
+    }
+  ]
+}

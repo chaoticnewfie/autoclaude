@@ -158,6 +158,11 @@ bridge, `rate_limits.*.used_percentage` and `resets_at`) and falls back to
 `cachedUsageUtilization` is refreshed by any session and needs no terminal. Both are read-only
 for us.
 
+**Amended 2026-09-27.** `cachedUsageUtilization` disappeared from `~/.claude.json` after an
+interactive session rewrote the file, so it is present only sometimes. The statusline bridge is
+the source the usage gate depends on; the cached key is a fallback when it happens to exist, and
+"no data" means unknown (one log warning, never a pause).
+
 ### D28 Onboarding and workspace trust are checked, never written
 
 **Decision.** `autoclaude start` reads `hasCompletedOnboarding` and

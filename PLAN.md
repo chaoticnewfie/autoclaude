@@ -41,6 +41,7 @@ You are building the tool this document describes. Scott will build it **with yo
 | R14 | "It may be used on other devices, and likely by other people by sharing the github so make sure you factor that into the build too." (2026-09-26) |
 | R15 | "A way to pause the automated work so I could review the progress and give notes or changes along the way, but that is optional, only if I want to do it." (2026-09-26) |
 | R16 | "I'd like a way to start using it with my existing projects", as well as using this repo as the starting point for new ones. (2026-09-26) |
+| R17 | "If you're making a plan in plan mode, make it in a way decisions are made ahead of time as much as possible since we won't be able to answer while building. If the project was already started, recommend reviewing the plan to make sure it will work as well as possible with autoclaude now that it has been added to the project." (2026-09-27) |
 
 ### Requested since the draft
 
@@ -53,6 +54,7 @@ Everything Scott has asked for after 2026-09-24, with where it landed. Nothing i
 | 2026-09-26 | Optional pause to review and leave notes (R15) | D19, section 4.10, P5.6 | Planned |
 | 2026-09-26 | Works with existing projects and as the starting point for new ones (R16) | D23, P2.1, P2.5 | Planned |
 | 2026-09-26 | "Keep agents small means don't make 70... make sure that they are stopped when they aren't needed anymore" | `CLAUDE.md` rule 10 (a rule for building this, not a feature) | Done |
+| 2026-09-27 | Plans made in plan mode must settle decisions ahead of time, since nobody answers during a run; an existing project gets a plan review once autoclaude is added (R17) | P2.1 (init message), P2.5 (template `CLAUDE.md`), P7.1 (plan skill) | Planned |
 
 ### How each requirement is met
 
@@ -74,6 +76,7 @@ Everything Scott has asked for after 2026-09-24, with where it landed. Nothing i
 | R14 | No personal facts in the plugin, templates or user docs; per-machine values in plugin `userConfig`; docs written for a stranger; one `init` that works in any project (D20, D23). |
 | R15 | `autoclaude pause` stops at the next clean point (or now), `autoclaude note` leaves notes, `resume` injects them. Optional automatic stops at phase ends or every step (§4.10). |
 | R16 | `autoclaude init` writes only what is missing from `project-template/` into any folder, empty or not, and the plan skill writes a new plan or converts an existing one into the step format (D23, P2.5, P7.1). |
+| R17 | The template `CLAUDE.md` carries a "planning for an unattended run" rule for any planner, plan mode included: settle stack, naming, scope and what-to-do-when-unsure up front, and write Accept lines a test or browser can check. `init` on a project that already has code or a plan ends by recommending a plan review, and `/autoclaude:plan` performs that review (P2.1, P2.5, P7.1). |
 
 ---
 
@@ -324,7 +327,7 @@ A plan is normal Markdown. AutoClaude only reads **step lines** and their indent
 ```
 
 - Status markers: `[ ]` todo, `[x]` verified (written only by the gate), `[!]` failed and paused, `[?]` blocked.
-- An ID is `S<phase>.<n>`, unique within the plan. A phase is an `## Phase N: …` heading.
+- An ID is `S<phase>.<n>`, unique within the plan (any letters before the digits are accepted, so this repo's own `P0.1` style works). A phase is a `## Phase N: …` heading; `###` and `####` are accepted too, because real plans nest phases under a numbered section. Anything inside a fenced code block is ignored, so a plan can show examples.
 - `Accept:` lines are required (at least one) and must be observable in a browser, a test or a command.
 - Optional fields: `Test:` (spec files to create or extend), `Tags:` (`ui`, `no-ui`, `security`, `db`, …), `Depends:` (reserved for a later version).
 - `autoclaude lint-plan` enforces these rules. `start` refuses to run a plan that fails lint.
@@ -462,7 +465,7 @@ autoclaude/
 - [ ] **P0.7** Confirm the usage-limit behaviour
   - Accept: `autoContinueAtUsageLimit` is on (check with `/config`)
   - Accept: documented from the current docs: auto-continue conditions, the "re-arms at most twice in a row" rule, the weekly exception (over 24 h), and whether a connected Remote Control session disables auto-continue (D14)
-- [x] **P0.8** Spike the supervisor (replaces the tmux spike, D18). VERIFY.md: every line verified except the RDP disconnect and reconnect, which Scott does with a spike window open
+- [x] **P0.8** Spike the supervisor (replaces the tmux spike, D18). VERIFY.md: every line verified, including the RDP disconnect and reconnect on 2026-09-27
   - Accept: a Node script using only built-ins opens a new console window titled `ac-spike` running `claude` interactively, and that window survives the launching terminal being closed
   - Accept: the same script sees the child exit, relaunches `claude --continue "<prompt>"`, and the prompt is submitted and answered in the new window
   - Accept: ending the child from the script kills the whole process tree (`taskkill /T /F` on Windows, the process group elsewhere), leaving no orphan `node` or `claude`
@@ -480,24 +483,24 @@ autoclaude/
 
 ### Phase 1: Plugin skeleton and core libraries
 
-- [ ] **P1.1** Repo, local marketplace and an installable empty plugin
+- [x] **P1.1** Repo, local marketplace and an installable empty plugin (2026-09-27: `claude plugin marketplace add C:\AutoClaude`, `claude plugin install autoclaude@autoclaude-local`, loads in place; `/autoclaude:status` prints the not-initialized line; `validate --strict` passes)
   - Accept: `/plugin marketplace add <path to this repo>` then `/plugin install autoclaude@autoclaude-local` succeeds
   - Accept: `/autoclaude:status` prints "autoclaude: not initialized in this project"
   - Accept: `claude plugin validate plugins/autoclaude --strict` passes
-- [ ] **P1.2** `lib/plan.js`: parse, find the next step, set a marker, lint
+- [x] **P1.2** `lib/plan.js`: parse, find the next step, set a marker, lint (2026-09-27: `test/unit/plan.test.js`, 7 tests incl. CRLF, BOM, mixed endings, fenced code blocks, and this plan itself)
   - Accept: unit tests cover the step format in §4.8.1, prose between steps, nested bullets, CRLF files, duplicate IDs, missing Accept lines and unknown markers
   - Accept: writes change only the marker characters and leave everything else byte-for-byte identical
-- [ ] **P1.3** `lib/state.js`, `lib/config.js`, `lib/fsatomic.js`
+- [x] **P1.3** `lib/state.js`, `lib/config.js`, `lib/fsatomic.js` (2026-09-27: crash-before-rename and locked-file retry tests pass; config validation reports paths)
   - Accept: state writes are atomic (temp file then rename) and survive a simulated crash mid-write
   - Accept: config merges defaults, validates types and gives clear errors, with no dependencies
-- [ ] **P1.4** CLI skeleton `bin/autoclaude.js` with `status`, `pause`, `note`, `resume`, `lint-plan`, `usage`, `install-cli`
+- [x] **P1.4** CLI skeleton `bin/autoclaude.js` with `status`, `pause`, `note`, `resume`, `lint-plan`, `usage`, `install-cli` (2026-09-27: `test/unit/cli.test.js`; `install-cli` wrote `%LOCALAPPDATA%\autoclaude\bin\autoclaude.cmd` and added it to the user PATH on the Code VM)
   - Accept: `autoclaude install-cli` writes a shim into a per-user bin directory (`%LOCALAPPDATA%\autoclaude\bin\autoclaude.cmd` on Windows, `~/.local/bin/autoclaude` elsewhere), adds that directory to the user PATH without admin rights (Windows: `HKCU\Environment`), and prints what to reopen
   - Accept: `autoclaude status` shows state, current step, attempts, usage and last progress time
 - [ ] **P1.5** `lib/notify.js` and `userConfig`
   - Accept: `plugin.json` declares `ntfy_url`, `ntfy_token` (sensitive), `discord_webhook` (sensitive) and `notify_channel`
   - Accept: `autoclaude notify-test` delivers a message to Scott's phone through the configured channel
   - Accept: with no channel configured, it falls back to stdout plus `logs/notify.log`
-- [ ] **P1.6** `lib/proc.js` and `lib/paths.js`
+- [x] **P1.6** `lib/proc.js` and `lib/paths.js` (2026-09-27: `test/unit/proc.test.js`; the Windows console-window launcher is the one proven in the P0.8 spike; the tmux and background branches are untested until a Linux or macOS machine runs them)
   - Accept: spawns with quoted arguments through `cmd.exe /d /s /c` on Windows and `/bin/sh -c` elsewhere; kills a process tree on both; opens a detached console window on Windows (`start`), a tmux session or a background process elsewhere
   - Accept: every per-machine path (`~/.claude/autoclaude/`, the bin directory) resolves from `os.homedir()` and `LOCALAPPDATA`, with unit tests covering both OS branches
 
@@ -510,6 +513,7 @@ autoclaude/
   - Accept: it writes every missing file from `project-template/` (`CLAUDE.md`, `PLAN.md`, `CONTINUE_HERE.md`, `PROGRESS.md`, the `docs/` set, `.gitattributes`, `.editorconfig`), never touches a file that exists, reports what it skipped, and adds `.autoclaude/` to `.gitignore`
   - Accept: it offers to add Playwright (config plus one smoke spec) if missing, and writes the tester's MCP config into `.autoclaude/mcp.playwright.json` (on Windows `{"command":"cmd","args":["/c","npx","-y","@playwright/mcp@latest","--headless"]}`, elsewhere `npx` directly; P0.5)
   - Accept: it checks that `node` resolves on the machine PATH and that `claude` is the native install, and says what to fix if not (D29)
+  - Accept: in a project that already has code or a plan, `init` ends by recommending a review of the plan against the step format and the decide-ahead rule (R17), and names `/autoclaude:plan` as the way to do it
   - Accept: running it again is safe (idempotent) and never overwrites a filled-in config or plan
 - [ ] **P2.2** Statusline bridge
   - Accept: `init` installs `~/.claude/autoclaude/statusline.js` and registers it in `~/.claude/settings.json`, chaining any existing `statusLine` command and leaving its output intact
@@ -521,6 +525,7 @@ autoclaude/
   - Accept: `init` adds the project to `~/.claude/autoclaude/registry.json`, and `autoclaude status --all` lists every registered project
 - [ ] **P2.5** Project template
   - Accept: `project-template/CLAUDE.md` carries the conventions in `docs/CONVENTIONS_SURVEY.md` section 2 (all except 10, with 15 as reworded in this repo's `CLAUDE.md`) with fill-in slots for the stack and the definition-of-done commands; `PLAN.md` is the step-format skeleton with the requested-features table; each `docs/` file opens with a one-paragraph statement of its purpose
+  - Accept: `project-template/CLAUDE.md` has a "planning for an unattended run" section (R17): decisions are made in the plan, not during the run, because nobody answers while autoclaude builds; every step needs Accept lines a test or a browser can check; the Constraints & decisions section says what to do when something is unclear; and a plan written before autoclaude was added gets reviewed against these rules
   - Accept: `autoclaude init` in an empty folder produces a project that passes `lint-plan` once one step is filled in; `init` in a checkout of Lists or DB adds only the files they lack and lists what it skipped
 
 **CHECKPOINT 2:** Run `init` on the fixture app and show the generated config, the statusline and the injected context after `/compact`.
@@ -623,6 +628,7 @@ autoclaude/
 - [ ] **P7.1** `/autoclaude:plan` skill
   - Accept: interviews Scott (goal, users, stack, constraints, out of scope), proposes phases and 20–90 minute steps with browser-observable Accept lines, `Test:` files and tags, writes `PLAN.md` from `PLAN.template.md`, and runs `lint-plan`
   - Accept: the Constraints & decisions section is filled in, because the decider relies on it
+  - Accept: the interview settles every decision it can up front (stack, naming, scope, data, what to do when unsure) and records each in Constraints & decisions, so the run never needs a human (R17); for a project that already has a plan, the skill starts with a review of that plan and lists every step that would stall an unattended run, then rewrites it into the step format
 - [ ] **P7.2** Docs
   - Accept: `README.md` (what it is, a 5-minute quickstart) and `docs/USAGE.md` (install, init, plan, run, watch, pause and notes, alerts, answering blockers, recovery, uninstall, troubleshooting; Windows notes on RDP disconnect versus log-off, power settings and the standard-user recommendation; Linux and macOS notes), all written for someone who has never seen this repo or Scott's machines
 - [ ] **P7.3** Overnight dress rehearsal
@@ -636,8 +642,11 @@ autoclaude/
 ### Phase 8: Rollout
 
 - [ ] **P8.1** First real project on the Code VM: `/autoclaude:init`, `/autoclaude:plan`, Scott reviews `PLAN.md`, a supervised run of 2–3 steps (watching the window, or `review.pauseAt: every-step`), then unattended
+  - Accept: the first real project has run at least 3 steps unattended on the Code VM with one verified commit per step and no false alarms
 - [ ] **P8.2** Install on the Windows 11 desktop and confirm an unattended run behaves the same as on the Code VM, including sleep and power settings
+  - Accept: the fixture plan passes unattended on the Windows 11 desktop, and the sleep and power settings that matter are written into `docs/USAGE.md`
 - [ ] **P8.3** Backlog of later ideas lives in `docs/DEFERRED.md`, each with a trigger; review it and file anything new from the rollout
+  - Accept: every later idea raised during the rollout is in `docs/DEFERRED.md` with a trigger, and nothing is left only in chat
 
 ---
 

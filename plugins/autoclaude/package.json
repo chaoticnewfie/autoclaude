@@ -1,0 +1,13 @@
+{
+  "name": "autoclaude",
+  "version": "0.1.0",
+  "private": true,
+  "description": "AutoClaude plugin runtime. Node built-ins only: no dependencies, ever.",
+  "type": "module",
+  "bin": {
+    "autoclaude": "./bin/autoclaude.js"
+  },
+  "engines": {
+    "node": ">=24"
+  }
+}

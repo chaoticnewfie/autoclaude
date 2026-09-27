@@ -14,8 +14,9 @@ what order lives in [PLAN.md](PLAN.md). Where things are right now lives in
 
 ## Status, in one line
 
-Phase 0 complete (2026-09-27): every spike passes (`VERIFY.md`); only the RDP disconnect check is
-Scott's. CHECKPOINT 0 is waiting on his review. No plugin code exists. Next: Phase 1 after the go-ahead.
+Phase 1 nearly done (2026-09-27): the plugin installs from the local marketplace, the CLI and the
+core libraries exist with 44 passing tests. P1.5 waits for a notification channel from Scott.
+CHECKPOINT 1 is next. Phase 0 is fully verified (`VERIFY.md`).
 
 ## Definition of done: every prompt, no exceptions
 

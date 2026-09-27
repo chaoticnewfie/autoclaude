@@ -1,0 +1,36 @@
+{
+  "name": "autoclaude",
+  "version": "0.1.0",
+  "description": "Runs a project's PLAN.md step by step, unattended, and verifies every step (tests, then a real headless browser) before moving on.",
+  "author": {
+    "name": "AutoClaude"
+  },
+  "userConfig": {
+    "notify_channel": {
+      "type": "string",
+      "title": "Notification channel",
+      "description": "Where critical alerts go: ntfy, discord, or stdout (log only). Leave empty for auto: ntfy if ntfy_url is set, else discord if discord_webhook is set, else stdout.",
+      "required": false
+    },
+    "ntfy_url": {
+      "type": "string",
+      "title": "ntfy topic URL",
+      "description": "Full topic URL, for example https://ntfy.sh/<your-hard-to-guess-topic>. Leave empty if you use Discord.",
+      "required": false
+    },
+    "ntfy_token": {
+      "type": "string",
+      "title": "ntfy access token",
+      "description": "Only for protected topics. Stored in secure storage, never in settings.json.",
+      "sensitive": true,
+      "required": false
+    },
+    "discord_webhook": {
+      "type": "string",
+      "title": "Discord webhook URL",
+      "description": "A channel webhook URL. Stored in secure storage, never in settings.json.",
+      "sensitive": true,
+      "required": false
+    }
+  }
+}

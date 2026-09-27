@@ -1,0 +1,6 @@
+{
+  "name": "autoclaude-spikes",
+  "private": true,
+  "description": "Phase 0 throwaway spikes. CommonJS so the hook scripts keep using require(); the .mjs files stay ES modules.",
+  "type": "commonjs"
+}

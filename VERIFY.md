@@ -53,7 +53,7 @@ Docs, for the implementation:
 
 - Input carries `rate_limits.five_hour`, `rate_limits.seven_day` and `rate_limits.spend_limit`, each `{ used_percentage, resets_at }` with `resets_at` in Unix seconds. `rate_limits` appears only for Pro and Max, only after the first API response, and each window may be absent; a window is dropped once its `resets_at` passes.
 - Updates are debounced at 300 ms, run on every message, and also when a window's `resets_at` is reached; a `refreshInterval` setting can add a timer.
-- A second usage source exists and needs no terminal: `~/.claude.json` -> `cachedUsageUtilization` = `{ fetchedAtMs, utilization: { five_hour: { utilization, resets_at }, seven_day: { utilization, resets_at }, ... } }`, refreshed by any session (the VS Code session had written it). Read-only for us (D27, D28).
+- A second usage source sometimes exists and needs no terminal: `~/.claude.json` -> `cachedUsageUtilization` = `{ fetchedAtMs, utilization: { five_hour: { utilization, resets_at }, seven_day: { utilization, resets_at }, ... } }`. It was present on 2026-09-26 (written by the VS Code session) and **gone on 2026-09-27** after an interactive session rewrote the file. So it is a bonus, not a dependable source: the statusline bridge is primary, and a missing key reads as "unknown", never as a pause (D27). Read-only for us (D28).
 
 ## P0.4 Nested headless run from a hook (`spikes/p04-nested`)
 
@@ -111,7 +111,7 @@ Rerun (2026-09-27 00:03 UTC), three runs in one window, 80 s each, all in one se
 
 - `claude agents --json --all` during run 1 listed the spike session as `{ pid: 4636, kind: "interactive", status: "idle", name: "p08-supervisor-6a", cwd, sessionId }` while this VS Code session read `busy`. So the supervisor has three consistent idle signals: the heartbeat age, the `idle_prompt` marker, and `claude agents --json`.
 - StopFailure never fired (no API errors occurred), so the `rate_limit` input shape is documented from the hooks reference only: `hook_event_name: "StopFailure"` with the error type as the matcher value (`rate_limit`, `overloaded`, `server_error`, ...).
-- Still Scott's: with a spike window open, disconnect RDP and reconnect, then check the window and `out/supervisor.log` are still alive. Log-off and sleep end the session by Windows semantics; documented in `docs/USAGE.md` later.
+- **RDP disconnect and reconnect: verified (2026-09-27 00:46 UTC).** With a spike window idling (supervisor pid 1920, claude pid 12140), Scott closed the RDP client and reconnected. Both processes were still alive afterwards, listed under session `RDP-Tcp#0` instead of `Console`, `claude agents --json` still reported the session as `idle`, and an `idle_prompt` notification fired at 00:46:26 across the reconnect. Log-off and sleep still end the session by Windows semantics; documented in `docs/USAGE.md` later.
 
 ## P0.10 Plugin hooks on Windows (`spikes/p10-plugin`)
 
