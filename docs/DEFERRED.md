@@ -63,6 +63,17 @@ Trigger: `autoclaude answer` from a shell proves inconvenient from the phone.
 Trigger: someone without ntfy or Discord wants alerts on the same machine. Path: a PowerShell
 one-liner behind the same notify interface, opt-in.
 
+## 12. Stale dev-server pid after a reboot
+
+**What.** `.autoclaude/devserver.json` records the pid of a dev server the gate started. After a
+reboot the pid can belong to an unrelated process, and `stopDevServer` would end it.
+**Why it waits.** The window is small: the run itself does not survive a reboot, and `start`
+can clear the file. Not yet done.
+**Trigger.** The first time a wrong process gets killed, or before the rollout to other people.
+**Path.** Record the command line and start time next to the pid and compare them with the live
+process (`wmic`/`Get-CimInstance` on Windows, `/proc` elsewhere) before killing; clear the file
+in `autoclaude start`.
+
 ## 11. Claude Code background sessions as the runner
 
 **What.** Host the builder session in `claude --bg` under Claude Code's own supervisor daemon

@@ -25,7 +25,7 @@ const log = (m) => {
 const env = { ...process.env };
 for (const k of Object.keys(env)) if (k === "CLAUDECODE" || k.startsWith("CLAUDE_")) delete env[k];
 const home = process.env.USERPROFILE || process.env.HOME;
-env.PATH = "C:\\Program Files\\nodejs;" + path.join(home, ".local", "bin") + ";" + env.PATH;
+env.PATH = "C:\\Program Files\\nodejs;" + path.join(home, ".local", "bin") + ";" + path.join(process.env.LOCALAPPDATA || "", "autoclaude", "bin") + ";C:\\Program Files\\Git\\cmd;" + env.PATH;
 const claude = path.join(home, ".local", "bin", "claude.exe");
 
 fs.writeFileSync(path.join(out, "supervisor.pid"), String(process.pid));

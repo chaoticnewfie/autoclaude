@@ -533,25 +533,25 @@ autoclaude/
 
 ### Phase 3: The Stop gate (core loop)
 
-- [ ] **P3.1** Fixture app and plans
+- [x] **P3.1** Fixture app and plans (2026-09-27: `test/fixtures/todo-app` with a unit test, a Playwright spec and `npm run dev`; `plans/{happy,broken,ui-bug}.md`; `test/fixtures/prepare.js` builds a scratch project and applies the broken and ui-bug variants)
   - Accept: `test/fixtures/todo-app`: a minimal web app (Vite or Express with static HTML) with a unit test, a Playwright spec and `npm run dev`
   - Accept: `test/fixtures/plans/` contains `happy.md` (3 steps), `broken.md` (one step whose test can't pass) and `ui-bug.md` (unit tests pass but the UI is broken)
-- [ ] **P3.2** Ready/blocked protocol and gate skeleton
+- [x] **P3.2** Ready/blocked protocol and gate skeleton (2026-09-27: `lib/protocol.js`, `autoclaude ready|blocked|start`, `lib/gate.js` + `scripts/stop-gate.js`; scenario tests cover not-running, nested role, nudge, no-progress pause)
   - Accept: `autoclaude ready <id>` and `autoclaude blocked <id> "<reason>"` write the markers, and reject IDs that aren't the current step
   - Accept: gate behaviour follows §4.4 for not-running (allow), no ready marker (continue nudge) and no progress (counter then pause)
-- [ ] **P3.3** `lib/devserver.js`
+- [x] **P3.3** `lib/devserver.js` (2026-09-27: 7 tests; on Windows a detached console-less node wrapper runs `cmd /c <command>` so the server survives the hook and still logs, see CLAUDE.md facts)
   - Accept: health-checks the URL, starts the command detached with logs in `.autoclaude/logs/devserver.log`, reuses a running server, and stops it on complete or pause
-- [ ] **P3.4** `lib/checks.js` and `lib/report.js`
+- [x] **P3.4** `lib/checks.js` and `lib/report.js` (2026-09-27: 13 tests; summaries never exceed 4,000 characters and always end with the report path)
   - Accept: runs the checks in order with per-check timeouts, stops at the first failure, and captures the last 150 lines of each failing check
   - Accept: the report file holds full output. The summary sent to Claude is ≤ 4,000 characters and names the report path.
-- [ ] **P3.5** Pass path
+- [x] **P3.5** Pass path (2026-09-27: scenario tests "ready with passing checks" and "last step passes")
   - Accept: ticks the step, appends `PROGRESS.md`, commits `autoclaude(<id>): <title>`, tags phase ends, advances to the next step and sends Claude the next step's full text
   - Accept: the last step marks the plan complete and sends the summary notification
-- [ ] **P3.6** Fail path
+- [x] **P3.6** Fail path (2026-09-27: scenario tests "ready with failing checks" and "fail then pass")
   - Accept: attempts increment. On the 3rd failure the step is marked `[!]`, the state pauses, a high-priority notification goes out and the stop is allowed.
-- [ ] **P3.7** Integrity check
+- [x] **P3.7** Integrity check (2026-09-27: scenario test "integrity: a box ticked by anyone but the gate is reverted")
   - Accept: if a `PLAN.md` box was ticked by anything other than the gate, the gate reverts it and tells Claude why
-- [ ] **P3.8** Scenario tests (no live Claude, fake hook stdin)
+- [x] **P3.8** Scenario tests (no live Claude, fake hook stdin) (2026-09-27: `test/scenarios/stop-gate.test.js`, 12 scenarios incl. blocked, wrong-step ready, pause requested, phase-end tag, D33 re-baseline)
   - Accept: `node --test test/scenarios` covers pass, fail→retry→pass, fail×3→pause, blocked, no-progress→pause, integrity violation and complete
 
 **CHECKPOINT 3 (first live run):** On the fixture, Scott runs `happy.md` with a real Claude session. All 3 steps are verified and committed with no input. `broken.md` pauses after 3 attempts and sends a notification.

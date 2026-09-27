@@ -50,7 +50,7 @@ test("run active: injects the rules, the current step, the progress tail and pen
   const ctx = out.hookSpecificOutput.additionalContext;
   assert.equal(out.hookSpecificOutput.hookEventName, "SessionStart");
   assert.match(ctx, /AutoClaude run in progress/);
-  assert.match(ctx, /autoclaude ready S1\.2/);
+  assert.match(ctx, /(autoclaude|autoclaude\.js") ready S1\.2/);
   assert.match(ctx, /## Current step: S1\.2 Build the thing \(attempt 2 of 3\)/);
   assert.match(ctx, /Accept: the list has 3 items/);
   assert.doesNotMatch(ctx, /S1\.3/);

@@ -13,6 +13,9 @@ import { notify, readMachineNotify, writeMachineNotify, resolveChannel } from ".
 import { readText, readJson, appendLine, ageMs, ensureDir } from "./fsatomic.js";
 import { isPidAlive, findOnPath } from "./proc.js";
 import { initProject, formatInitReport } from "./init.js";
+import { writeReady, writeBlocked, readReady } from "./protocol.js";
+import { firstUnfinished, planSlug, MARKERS } from "./plan.js";
+import * as git from "./git.js";
 
 const VERSION = JSON.parse(fs.readFileSync(path.join(pluginRoot(), ".claude-plugin", "plugin.json"), "utf8")).version;
 
@@ -25,6 +28,9 @@ Project commands (run inside a project):
                         Set the project up: config, doc set, .gitignore, browser-tester config,
                         machine registry, statusline bridge. Never overwrites existing files.
   status [--all]        State, current step, attempts, usage, last progress (--all: every registered project)
+  start                 Preflight, create the run branch, set the run going on the first unfinished step
+  ready [<step>]        Builder: tell the gate the current step is done (verified on the next stop)
+  blocked <step> "<q>"  Builder: stop the run with a question only the owner can answer
   pause [--now]         Pause after the next verified commit (or right now with --now)
   note "<text>"         Leave a review note for Claude; it is read on the next resume or session start
   resume                Clear a pause and set the run going again (refuses if PLAN.md fails lint)
@@ -63,6 +69,9 @@ export async function runCli(argv, rawIo = {}) {
       case "version": case "--version": case "-v": io.out(VERSION); return 0;
       case "init": return cmdInit(rest, io);
       case "status": return cmdStatus(rest, io);
+      case "start": return cmdStart(rest, io);
+      case "ready": return cmdReady(rest, io);
+      case "blocked": return cmdBlocked(rest, io);
       case "pause": return cmdPause(rest, io);
       case "note": return cmdNote(rest, io);
       case "resume": return cmdResume(rest, io);
@@ -181,6 +190,74 @@ function statusAll(io) {
     const state = loadState(root);
     io.out(`${root}: ${describeState(state)}${state.currentStep ? `, step ${state.currentStep}` : ""}`);
   }
+  return 0;
+}
+
+// ---------- start / ready / blocked ----------
+
+async function cmdStart(args, io) {
+  const project = requireProject(io);
+  if (!project) return 1;
+  const { root, config } = project;
+  const state = loadState(root);
+  if (state.status === STATUS.running) { io.out(`autoclaude: already running (step ${state.currentStep || "?"})`); return 1; }
+  const plan = loadPlan(project);
+  if (plan.problems.length) {
+    io.out(`autoclaude: not starting, ${config.plan} has ${plan.problems.length} problem(s):`);
+    io.out(formatLint(plan.problems));
+    return 1;
+  }
+  const first = firstUnfinished(plan.parsed);
+  if (!first) { io.out("autoclaude: every step is already verified; nothing to run"); return 1; }
+  const gitEnv = { ...io.env, PATH: io.env.PATH || io.env.Path || process.env.PATH };
+  if (!(await git.isRepo(root, { env: gitEnv }))) { io.out("autoclaude: not starting, the project is not a git repository (the gate commits every verified step)"); return 1; }
+  const st = await git.status(root, { env: gitEnv });
+  if (!st.clean) {
+    io.out(`autoclaude: not starting, the working tree is not clean (${st.entries.length} change(s)). Commit or stash first:`);
+    for (const e of st.entries.slice(0, 10)) io.out(`  ${e.code} ${e.path}`);
+    return 1;
+  }
+  const branch = config.branch.replace("{planSlug}", planSlug(plan.parsed));
+  const co = await git.checkoutBranch(root, branch, { create: true, env: gitEnv });
+  if (!co.ok) { io.out(`autoclaude: could not check out ${branch}: ${co.stderr}`); return 1; }
+  const ticked = plan.parsed.steps.filter((s) => s.marker === MARKERS.done).map((s) => s.id);
+  const now = io.now().toISOString();
+  updateState(root, (s) => {
+    s.status = STATUS.running; s.pauseReason = null; s.pauseRequested = false; s.currentStep = first.id;
+    s.attempts = {}; s.noProgress = 0; s.recoveries = 0; s.tickedByGate = ticked; s.startedAt = now; s.stepStartedAt = now;
+    s.headAtLastGate = null; s.toolCallsAtLastGate = 0;
+  });
+  io.out(`autoclaude: running on branch ${branch}${co.created ? " (created)" : ""}. First step: ${first.id} ${first.title}.`);
+  io.out(`  the builder session works the plan; the gate verifies on every stop. Watch with \`autoclaude status\`.`);
+  return 0;
+}
+
+function cmdReady(args, io) {
+  const project = requireProject(io);
+  if (!project) return 1;
+  const state = loadState(project.root);
+  if (state.status !== STATUS.running) { io.out(`autoclaude: no run is active (${describeState(state)})`); return 1; }
+  const id = args[0] || null;
+  if (id && state.currentStep && id !== state.currentStep) {
+    io.out(`autoclaude: the current step is ${state.currentStep}, not ${id}. Run \`autoclaude ready ${state.currentStep}\` when that step is done.`);
+    return 1;
+  }
+  writeReady(project.root, id || state.currentStep, { now: io.now() });
+  io.out(`autoclaude: ${id || state.currentStep || "the run"} marked ready. Stop now; the gate verifies it and tells you the result.`);
+  return 0;
+}
+
+function cmdBlocked(args, io) {
+  const project = requireProject(io);
+  if (!project) return 1;
+  const state = loadState(project.root);
+  if (state.status !== STATUS.running) { io.out(`autoclaude: no run is active (${describeState(state)})`); return 1; }
+  const id = args[0];
+  const question = args.slice(1).join(" ").trim();
+  if (!id || !question) { io.err('autoclaude: usage: autoclaude blocked <step> "<question with the options>"'); return 2; }
+  if (state.currentStep && id !== state.currentStep) { io.out(`autoclaude: the current step is ${state.currentStep}, not ${id}.`); return 1; }
+  writeBlocked(project.root, id, question, { now: io.now() });
+  io.out("autoclaude: blocked marker written. Stop now; the run pauses and the owner is notified with your question.");
   return 0;
 }
 

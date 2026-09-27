@@ -27,10 +27,11 @@ function mirrorNotifyConfig(env) {
   if (changed) writeMachineNotify(values);
 }
 
-export function buildContext({ root, state, config, planText, progressText, promptTemplate }) {
+export function buildContext({ root, state, config, planText, progressText, promptTemplate, cli = "autoclaude" }) {
   const parsed = parsePlan(planText || "");
   const step = (state.currentStep && stepById(parsed, state.currentStep)) || nextStep(parsed);
   const fill = (s) => s
+    .replace(/\{\{AUTOCLAUDE_CMD\}\}/g, cli)
     .replace(/\{\{PROJECT_ROOT\}\}/g, root)
     .replace(/\{\{STEP_ID\}\}/g, step ? step.id : "<step>")
     .replace(/\{\{PLAN_FILE\}\}/g, config.plan)
@@ -52,7 +53,7 @@ export function buildContext({ root, state, config, planText, progressText, prom
   return parts.join("\n\n");
 }
 
-function main() {
+async function main() {
   let raw = "";
   try { raw = fs.readFileSync(0, "utf8"); } catch {}
   let input = {};
@@ -71,7 +72,9 @@ function main() {
   const planText = readText(path.join(root, config.plan), "");
   const progressText = readText(path.join(root, config.docs.progress), "");
   const promptTemplate = readText(path.join(here, "..", "prompts", "context.md"), "");
-  const context = buildContext({ root, state, config, planText, progressText, promptTemplate });
+  let cli = "autoclaude";
+  try { cli = (await import("../lib/gate.js")).cliCommand(process.env); } catch {}
+  const context = buildContext({ root, state, config, planText, progressText, promptTemplate, cli });
 
   if (input.session_id && state.sessionId !== input.session_id) {
     try { saveState(root, { ...state, sessionId: input.session_id }); } catch {}
@@ -82,5 +85,5 @@ function main() {
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  try { main(); } catch {}
+  try { await main(); } catch {}
 }

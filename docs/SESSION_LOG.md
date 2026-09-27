@@ -92,3 +92,21 @@ One entry per working session: what was done, what was committed. Append only.
   window stopped on the trust dialog; removed the nested repo (now in `CLAUDE.md` facts).
 - Three Discord test notifications delivered in total today.
 - P2.1 to P2.5 ticked. CHECKPOINT 2 presented; Scott's look at `/compact` re-injection pending.
+
+## 2026-09-27 (Code VM) - Phase 3, the gate
+
+- Scott: go for Phase 3. Two background agents wrote the leaf libraries against written
+  contracts (`checks` + `report`, 13 tests; `devserver` + `git`, 15 tests) while the core was
+  written here: `lib/protocol.js`, `lib/gate.js` (section 4.4 in full, plus the review pause,
+  the weekly-usage pause and the D33 re-baseline), `scripts/stop-gate.js` (lazy imports so a
+  half-written library can never break a session), `scripts/heartbeat.js`,
+  `scripts/tool-guard.js`, `hooks/hooks.json` with all four hooks, CLI `start`, `ready`,
+  `blocked`, the start skill, `test/fixtures/prepare.js`, the fixture Playwright spec.
+- `test/scenarios/stop-gate.test.js`: 12 scenarios, all green on the first run. Full suite: 107
+  tests pass, syntax 49/49, `claude plugin validate --strict` passes.
+- Agent finding worth keeping: on Windows a dev server started from a hook must be detached, and
+  a detached cmd.exe loses the inherited log handle, so the dev server runs through a detached
+  console-less node wrapper (now in `CLAUDE.md` facts). Stale-pid caveat filed as DEFERRED 12.
+- Both agents stopped on completion. Scratch project for the live run prepared at
+  `spikes/out/todo-live` (happy plan, its own git repo, so it needs Scott's one-time trust).
+- P3.1 to P3.8 ticked. CHECKPOINT 3 (the first live run) is next.

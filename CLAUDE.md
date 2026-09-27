@@ -135,6 +135,14 @@ is waiting on Scott's look at the status line and the `/compact` re-injection. N
   trust dialog. Scratch projects under `spikes/out/` must not be git repositories.
 - `~/.claude/settings.json` may be written by the CLI (the statusline bridge install did it with a
   backup); `~/.claude.json` may not (classifier-denied, and D28 forbids it anyway).
+- A long-lived child (the dev server) started from a hook must be spawned `detached` on Windows,
+  or it dies with the hook: non-detached children sit in libuv's kill-on-close job object. A
+  detached `cmd.exe` has no console and Windows gives its child a fresh one, which replaces an
+  inherited log handle, so `lib/devserver.js` spawns a detached console-less `node` wrapper that
+  runs `cmd /c <command>` non-detached with the log file as stdio. Verified in Phase 3.
+- The PreToolUse, PostToolUse and Stop hooks of this plugin run in every session on the machine,
+  including this one. They must stay silent and instant when no run is active, and the Stop hook
+  imports its libraries lazily so a half-written library can never break someone's session.
 
 ## Documentation index
 
