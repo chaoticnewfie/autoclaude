@@ -49,6 +49,9 @@ Then CHECKPOINT 7 (review of the run with Scott) and P7.4 (version 1.0.0, tag, C
 
 ## Notes for whoever continues
 
+- `INSTRUCTIONS.md` (repo root) is the plain guide for people; `docs/USAGE.md` is the full
+  reference. When behavior changes, update both.
+
 - To test unpushed plugin changes without installing on this machine, run
   `node test/live/gh-install.live.mjs C:/AutoClaude` (throwaway config). Do not re-add the clone
   as a marketplace while the GitHub one is installed: both are named `autoclaude`.

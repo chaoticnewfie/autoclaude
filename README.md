@@ -1,5 +1,8 @@
 # AutoClaude
 
+**New here? Start with [INSTRUCTIONS.md](INSTRUCTIONS.md)**: plain step-by-step instructions for
+setting up and using every part of AutoClaude.
+
 AutoClaude lets Claude Code build a project from its plan while you are away. You write the plan
 with Claude first: phases, small steps, and for every step the "Accept" lines that say how to tell
 it is done. Then you start a run and leave it. Claude builds one step at a time, and a separate

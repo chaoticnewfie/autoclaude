@@ -94,6 +94,7 @@ this machine has no AutoClaude installed on purpose. Never open the DB project (
 |---|---|
 | `PLAN.md` | The approved plan: phases, steps, Accept lines, checkpoints |
 | `CONTINUE_HERE.md` | Resume point. Read first |
+| `INSTRUCTIONS.md` | Plain instructions for people using AutoClaude; keep in step with `docs/USAGE.md` |
 | `CLAUDE.md` | This file |
 | `docs/DECISIONS.md` | Dated decision log (D17 onward; D1 to D16 are in the plan) |
 | `docs/SESSION_LOG.md` | One entry per working session |

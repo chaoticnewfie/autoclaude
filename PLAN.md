@@ -57,6 +57,7 @@ Everything Scott has asked for after 2026-09-24, with where it landed. Nothing i
 | 2026-09-27 | Plans made in plan mode must settle decisions ahead of time, since nobody answers during a run; an existing project gets a plan review once autoclaude is added (R17) | P2.1 (init message), P2.5 (template `CLAUDE.md`), P7.1 (plan skill) | Planned |
 | 2026-09-27 | "Could we change phase 7 to work on a real project... my database project... that will also give us the chance to test integrating this into an existing project"; "give claude in that project the github repo for autoclaude and have it add it to the project and start it that way"; plan size follows the project, not a fixed 12 steps; then "dont look at that project at all... I want to test it without you specifically preparing it for that project" | D36, D37, P7.3 (blind rehearsal on the DB repo), P5.3 and P7.1 (generic existing-project handling), P8.1 | Planned |
 | 2026-09-27 | "I'm going to keep it private and give certain people access. It's the morning now but I can let it run all day when it's time." | D41, P7.2 (install from a private repo), P7.3 (an all-day run), P7.4 (no license file) | Planned |
+| 2026-09-27 | "Could you just write one now and it gets pulled with the github repo? literally just needs to be a text docment of instructions for the user" (a people-facing guide: getting started and every feature) | `INSTRUCTIONS.md` at the repo root, linked from the top of `README.md` | Done |
 
 ### How each requirement is met
 

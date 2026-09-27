@@ -242,3 +242,12 @@ One entry per working session: what was done, what was committed. Append only.
 - The machine is back to no AutoClaude (plugin, marketplace, command, status line bridge and
   watchdog removed; the Discord setting kept; the registry emptied) for Scott's blind rehearsal.
 - 265 tests pass. P7.1 and P7.2 ticked.
+
+## 2026-09-27 (Code VM) - INSTRUCTIONS.md
+
+- Scott asked for a plain instructions file for people that comes with the repo. Wrote
+  `INSTRUCTIONS.md` at the repo root (what it does, requirements, one-time setup, starting in a
+  project, running, pausing and notes, what each alert means, answering questions, after the run,
+  settings, safety, troubleshooting, updating, a command list) and linked it from the top of
+  README.md. He first described a copy that `init` would put into every project, then asked for
+  just this one file in the repo instead. No plugin change, so no version bump.
