@@ -3,8 +3,10 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { runCli } from "../../plugins/autoclaude/lib/cli.js";
+import { spawn, spawnSync } from "node:child_process";
+import { runCli, nextDecisionId, outsideFences, maskNtfyUrl } from "../../plugins/autoclaude/lib/cli.js";
 import { loadState, saveState, defaultState } from "../../plugins/autoclaude/lib/state.js";
+import { trustKeyFor } from "../../plugins/autoclaude/lib/paths.js";
 
 class Sink { constructor() { this.text = ""; } write(s) { this.text += s; return true; } }
 
@@ -85,6 +87,10 @@ test("pause, note and resume move the state correctly", async () => {
   let s = loadState(root);
   assert.equal(s.status, "paused");
   assert.equal(s.pauseReason, "review");
+  assert.equal(s.haltSession, false, "no supervisor is alive, so nobody would act on a halt request");
+  assert.match(r.out, /No supervisor is running for this project, so nothing ends the builder session: .*stop it by hand/);
+  assert.match(r.out, /On `autoclaude resume`, S1\.1 starts again with fresh attempts/);
+  assert.doesNotMatch(r.out, /stays open with its attempts/);
 
   r = await run(["note", "Use", "the", "existing", "table"], root, { now: () => new Date("2026-09-27T01:02:03Z") });
   assert.equal(r.code, 0);
@@ -117,7 +123,7 @@ test("answer: records the owner's answer as the next D-###, resets [?], resumes,
   assert.equal(r.code, 0, r.out + r.err);
   assert.match(r.out, /recorded in docs\/DECISIONS\.md as D-008/);
   const decisions = fs.readFileSync(path.join(root, "docs", "DECISIONS.md"), "utf8");
-  assert.match(decisions, /## D-008 \(2026-09-27, S1\.1\) Owner answer to a blocked question\n\n- Question: Cookies or localStorage\?\n- Answer: Use cookies, httpOnly\n/);
+  assert.match(decisions, /\n\n## D-008 \(2026-09-27, S1\.1\) Owner answer to a blocked question\n- Question: Cookies or localStorage\?\n- Answer: Use cookies, httpOnly\n- Decided by: the owner, with `autoclaude answer`\n$/);
   const s = loadState(root);
   assert.deepEqual([s.status, s.pauseReason, s.currentStep, s.attempts["S1.1"], s.lastBlockedQuestion], ["running", null, "S1.1", 0, null]);
   assert.deepEqual({ ...s.ownerAnswer }, { step: "S1.1", question: "Cookies or localStorage?", answer: "Use cookies, httpOnly", at: "2026-09-27T04:00:00.000Z", decisionId: "D-008" });
@@ -154,11 +160,27 @@ test("resume re-baselines on the plan the owner left (D33): failed steps get fre
 });
 
 test("run refuses before opening any window: complete plan, a live supervisor, a failing preflight", async () => {
-  const root = project();
+  const root = project({ plan: PLAN.replace(/- \[ \]/g, "- [x]") });
   saveState(root, { ...defaultState(), status: "complete" });
   let r = await run(["run"], root);
   assert.equal(r.code, 1);
-  assert.match(r.out, /the plan is complete/);
+  assert.match(r.out, /the plan is complete; every step in PLAN\.md is verified\. To continue, add steps to PLAN\.md, commit them, then `autoclaude run`/);
+  assert.doesNotMatch(r.out, /preflight/);
+  r = await run(["resume"], root);
+  assert.equal(r.code, 1);
+  assert.match(r.out, /add steps to PLAN\.md, commit them, then `autoclaude run`/);
+
+  // A complete run whose plan has a new step gets the fresh-run preflight; failing it changes nothing.
+  fs.writeFileSync(path.join(root, "PLAN.md"), PLAN.replace("- [ ] **S1.1**", "- [x] **S1.1**"));
+  r = await run(["run"], root);
+  assert.equal(r.code, 1);
+  assert.match(r.out, /FAIL git: /);
+  assert.equal(loadState(root).status, "complete", "only a passing preflight turns the finished run into a fresh one");
+  r = await run(["resume"], root);
+  assert.equal(r.code, 1);
+  assert.match(r.out, /the last run finished, and PLAN\.md has new steps\. Commit them, then `autoclaude run` starts a fresh run/);
+
+  fs.writeFileSync(path.join(root, "PLAN.md"), PLAN);
   saveState(root, { ...defaultState(), status: "idle" });
   fs.writeFileSync(path.join(root, ".autoclaude", "supervisor.pid"), String(process.pid));
   r = await run(["run"], root);
@@ -208,7 +230,7 @@ test("uninstall removes the watchdog, the status line bridge, the shims and the 
     uninstallStatusline: () => { calls.push("statusline"); return { removed: true, restored: { command: "old" } }; },
     removeFromUserPath: (d) => { calls.push(`path ${d}`); return `removed ${d} from your user PATH`; }
   };
-  let r = await run(["uninstall"], dir, { configDir, deps, env: { AUTOCLAUDE_BIN_DIR: dir, PATH: "" } });
+  let r = await run(["uninstall"], dir, { configDir, deps: { ...deps, isWindows: true }, env: { AUTOCLAUDE_BIN_DIR: dir, PATH: "" } });
   assert.equal(r.code, 0, r.out);
   assert.deepEqual(calls, ["watchdog", "statusline", `path ${dir}`]);
   assert.match(r.out, /watchdog: removed/);
@@ -220,7 +242,7 @@ test("uninstall removes the watchdog, the status line bridge, the shims and the 
   assert.match(r.out, /claude plugin uninstall autoclaude@autoclaude/);
 
   assert.ok(machine.startsWith(os.tmpdir()), "the purge below only ever touches a temp folder");
-  r = await run(["uninstall", "--purge"], dir, { configDir, deps: { ...deps, uninstallWatchdog: () => ({ ok: false, stderr: "Access is denied." }) }, env: { AUTOCLAUDE_BIN_DIR: dir, PATH: "" } });
+  r = await run(["uninstall", "--purge"], dir, { configDir, deps: { ...deps, isWindows: true, uninstallWatchdog: () => ({ ok: false, stderr: "Access is denied." }) }, env: { AUTOCLAUDE_BIN_DIR: dir, PATH: "" } });
   assert.equal(r.code, 1, "a step that failed is reported");
   assert.match(r.out, /watchdog: could not remove it: Access is denied\./);
   assert.match(r.out, /command shims: none found/);
@@ -253,13 +275,15 @@ test("notify-test with no channel prints to stdout and reports it", async () => 
 
 test("notify-setup stores the channel per machine, masks the webhook, validates input and clears", async () => {
   const configDir = fs.mkdtempSync(path.join(os.tmpdir(), "autoclaude-cfg-"));
-  let r = await run(["notify-setup", "--discord", "https://discord.com/api/webhooks/123/abcdefghijklmnop", "--channel", "discord"], os.tmpdir(), { configDir });
+  let r = await run(["notify-setup", "--discord", "https://discord.com/api/webhooks/123/abcdefghijklmnop"], os.tmpdir(), { configDir });
   assert.equal(r.code, 0, r.out + r.err);
   assert.match(r.out, /channel: discord\n/);
   assert.match(r.out, /discord_webhook: https:\/\/disc\.\.\.mnop/);
   assert.doesNotMatch(r.out, /abcdefghijklmnop/);
   const stored = JSON.parse(fs.readFileSync(path.join(configDir, "autoclaude", "notify.json"), "utf8"));
   assert.equal(stored.discord_webhook, "https://discord.com/api/webhooks/123/abcdefghijklmnop");
+  assert.equal(stored.channel, "discord", "--discord without --channel picks the discord channel");
+  assert.doesNotMatch(r.out, /\(auto\)/);
 
   r = await run(["notify-setup", "--show"], os.tmpdir(), { configDir });
   assert.match(r.out, /channel: discord/);
@@ -278,7 +302,306 @@ test("help and unknown commands", async () => {
   let r = await run(["help"], os.tmpdir());
   assert.equal(r.code, 0);
   assert.match(r.out, /Usage: autoclaude/);
+  assert.match(r.out, /run \[--check\]/);
+  assert.match(r.out, /\n  checks /);
+  assert.match(r.out, /guard-test "<command>"/);
+  assert.match(r.out, /init \[<folder>\]/);
   r = await run(["bogus"], os.tmpdir());
   assert.equal(r.code, 2);
   assert.match(r.err, /unknown command/);
+});
+
+test("notify-setup: a URL picks its channel (the last one wins), --channel always wins, and --show masks the ntfy topic", async () => {
+  const configDir = fs.mkdtempSync(path.join(os.tmpdir(), "autoclaude-cfg-"));
+  const file = path.join(configDir, "autoclaude", "notify.json");
+  const stored = () => JSON.parse(fs.readFileSync(file, "utf8"));
+  const NTFY = "https://ntfy.sh/secret-topic-xyz";
+  const HOOK = "https://discord.com/api/webhooks/123/abcdefghijklmnop";
+  let r = await run(["notify-setup", "--ntfy", NTFY], os.tmpdir(), { configDir });
+  assert.equal(r.code, 0, r.out + r.err);
+  assert.equal(stored().channel, "ntfy");
+  assert.match(r.out, /channel: ntfy\n/);
+  assert.match(r.out, /ntfy_url: https:\/\/ntfy\.sh\/sec\.\.\.\n/);
+  assert.doesNotMatch(r.out, /secret-topic/);
+
+  // Adding a webhook later switches to Discord, although auto would still prefer ntfy.
+  r = await run(["notify-setup", "--discord", HOOK], os.tmpdir(), { configDir });
+  assert.deepEqual([stored().channel, stored().ntfy_url], ["discord", NTFY]);
+  assert.match(r.out, /channel: discord\n/);
+
+  r = await run(["notify-setup", "--discord", HOOK, "--ntfy", NTFY], os.tmpdir(), { configDir });
+  assert.equal(stored().channel, "ntfy", "the last URL given wins");
+  r = await run(["notify-setup", "--ntfy", NTFY, "--discord", HOOK], os.tmpdir(), { configDir });
+  assert.equal(stored().channel, "discord");
+  r = await run(["notify-setup", "--channel", "stdout", "--ntfy", NTFY], os.tmpdir(), { configDir });
+  assert.equal(stored().channel, "stdout", "an explicit --channel always wins");
+  assert.match(r.out, /channel: stdout\n/);
+  assert.match(r.out, /stdout is chosen/);
+  r = await run(["notify-setup", "--ntfy-token", "tk_live_123"], os.tmpdir(), { configDir });
+  assert.equal(stored().channel, "stdout", "a token alone leaves the channel alone");
+
+  r = await run(["notify-setup", "--show"], os.tmpdir(), { configDir });
+  assert.equal(r.code, 0);
+  assert.doesNotMatch(r.out, /secret-topic|abcdefghijklmnop|tk_live_123/);
+  assert.match(r.out, /ntfy_token: \(set\)/);
+
+  assert.equal(maskNtfyUrl("http://10.0.0.5:8080/ab"), "http://10.0.0.5:8080/ab...");
+  assert.equal(maskNtfyUrl(""), "(not set)");
+});
+
+test("decision ids skip fenced code blocks: the template's example is not an entry", () => {
+  const tpl = "# DECISIONS\n\n```markdown\n## D-001 (YYYY-MM-DD, S1.2) Example\n```\n\n## Entries\n";
+  assert.equal(nextDecisionId(tpl), "D-001");
+  assert.equal(nextDecisionId(tpl + "\n## D-004 (2026-09-27, S1.1) real\n"), "D-005");
+  assert.equal(nextDecisionId("~~~\n```\nD-009\n```\n~~~\n## D-002 x\n"), "D-003", "a ``` line inside a ~~~ fence does not close it");
+  assert.equal(outsideFences("a\n````md\n```\nD-1\n````\nb"), "a\nb");
+  assert.equal(nextDecisionId(""), "D-001");
+});
+
+test("answer: the first real answer in the template's DECISIONS.md is D-001, in the template's entry format", async () => {
+  const root = project({ plan: PLAN.replace("- [ ] **S1.1**", "- [?] **S1.1**") });
+  fs.mkdirSync(path.join(root, "docs"));
+  const file = path.join(root, "docs", "DECISIONS.md");
+  const tpl = "# DECISIONS\n\nIntro.\n\n## Entry format\n\n```markdown\n## D-001 (YYYY-MM-DD, S1.2) Short title of the choice\n- Question: what needed deciding\n\n## N-001 (YYYY-MM-DD, S1.3) Short title of the note\n```\n\n## Entries\n\n(none yet)\n";
+  fs.writeFileSync(file, tpl);
+  saveState(root, { ...defaultState(), status: "paused", pauseReason: "blocked", currentStep: "S1.1", lastBlockedQuestion: "Postgres or SQLite?" });
+  const r = await run(["answer", "SQLite"], root, { now: () => new Date("2026-09-27T04:00:00Z") });
+  assert.equal(r.code, 0, r.out + r.err);
+  assert.match(r.out, /as D-001;/);
+  const text = fs.readFileSync(file, "utf8");
+  assert.ok(text.endsWith("## Entries\n\n## D-001 (2026-09-27, S1.1) Owner answer to a blocked question\n- Question: Postgres or SQLite?\n- Answer: SQLite\n- Decided by: the owner, with `autoclaude answer`\n"), text);
+  assert.doesNotMatch(text, /\(none yet\)/);
+  assert.ok(text.includes("```markdown\n## D-001 (YYYY-MM-DD, S1.2) Short title of the choice\n"), "the example is left alone");
+  assert.equal(loadState(root).ownerAnswer.decisionId, "D-001");
+});
+
+test("status: a plan with no steps says none yet and points at /autoclaude:plan", async () => {
+  const root = project({ plan: "# Empty plan\n\nNothing here yet.\n" });
+  const r = await run(["status"], root);
+  assert.equal(r.code, 0, r.out + r.err);
+  assert.match(r.out, /next step: none yet \(the plan has no steps; run \/autoclaude:plan\)/);
+  assert.doesNotMatch(r.out, /none left/);
+});
+
+test("init takes the folder as a positional argument; an unknown option mentions --dir", async () => {
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "autoclaude-init-cli-"));
+  const target = path.join(parent, "newproj");
+  fs.mkdirSync(target);
+  let r = await run(["init", "newproj", "--no-statusline"], parent);
+  assert.equal(r.code, 0, r.out + r.err);
+  assert.ok(fs.existsSync(path.join(target, "autoclaude.config.json")));
+  assert.equal(fs.existsSync(path.join(parent, "autoclaude.config.json")), false);
+  r = await run(["init", "--folder", "x"], parent);
+  assert.equal(r.code, 1);
+  assert.match(r.err, /unknown option --folder.*--dir/);
+  r = await run(["init", "a", "--dir", "b"], parent);
+  assert.equal(r.code, 1);
+  assert.match(r.err, /one folder/);
+});
+
+test("guard-test prints the Bash and PowerShell decisions without a run, and always exits 0", async () => {
+  const root = project({ config: { version: 1, guard: { deny: [{ pattern: "ssh\\s+prod", reason: "no production access" }] } } });
+  let r = await run(["guard-test", "git push origin main"], root);
+  assert.equal(r.code, 0, r.out + r.err);
+  assert.match(r.out, /\n  Bash: denied: \S.*\n/);
+  assert.match(r.out, /\n  PowerShell: (allowed|denied: .+)\n/);
+  r = await run(["guard-test", "ssh", "prod-db"], root);
+  assert.equal(r.code, 0);
+  assert.match(r.out, /Bash: denied: .*no production access/);
+  r = await run(["guard-test", "npm test"], root);
+  assert.equal(r.code, 0);
+  assert.match(r.out, /\n  Bash: allowed\n/);
+  assert.match(r.out, /\n  PowerShell: allowed\n/);
+  assert.equal(loadState(root).status, "idle", "nothing about the run changes");
+  r = await run(["guard-test"], root);
+  assert.equal(r.code, 2);
+});
+
+test("checks runs the configured checks like the gate: dev server first when needed, one line per check, stop after", async () => {
+  const node = JSON.stringify(process.execPath);
+  const checks = [
+    { name: "lint", command: `${node} -e "process.exit(0)"`, timeoutSec: 60 },
+    { name: "e2e", command: `${node} -e "console.log('boom line'); process.exit(3)"`, timeoutSec: 60, needsDevServer: true },
+    { name: "late", command: `${node} -e "process.exit(0)"`, timeoutSec: 60 }
+  ];
+  const root = project({ config: { version: 1, checks, devServer: { command: "npm run dev", url: "http://127.0.0.1:9" } } });
+  const calls = [];
+  const deps = {
+    restartDevServer: async (ds, o) => { calls.push(`start ${ds.url} ${o.root === root}`); return { ok: true, reused: false }; },
+    stopDevServer: (o) => { calls.push(`stop ${o.root === root}`); return { stopped: true }; }
+  };
+  let r = await run(["checks"], root, { deps, env: { ...process.env } });
+  assert.equal(r.code, 1, r.out + r.err);
+  assert.deepEqual(calls, ["start http://127.0.0.1:9 true", "stop true"]);
+  assert.match(r.out, /dev server: started at http:\/\/127\.0\.0\.1:9/);
+  assert.match(r.out, /\n  ok   lint \(\d+ s\): /);
+  assert.match(r.out, /\n  FAIL e2e \(exit code 3, \d+ s\): /);
+  assert.match(r.out, /\n  skip late: not run, an earlier check failed/);
+  assert.match(r.out, /boom line/);
+  assert.match(r.out, /check "e2e" failed\n$/);
+
+  // All passing, and no check needs the dev server: it is never started.
+  fs.writeFileSync(path.join(root, "autoclaude.config.json"), JSON.stringify({ version: 1, checks: [checks[0], checks[2]] }));
+  calls.length = 0;
+  r = await run(["checks"], root, { deps, env: { ...process.env } });
+  assert.equal(r.code, 0, r.out + r.err);
+  assert.deepEqual(calls, []);
+  assert.match(r.out, /all 2 check\(s\) passed/);
+
+  fs.writeFileSync(path.join(root, "autoclaude.config.json"), JSON.stringify({ version: 1 }));
+  r = await run(["checks"], root);
+  assert.equal(r.code, 0);
+  assert.match(r.out, /no checks are configured/);
+});
+
+test("pause --now with a live supervisor asks it to end the session and stops the dev server the gate started", async () => {
+  const root = project();
+  saveState(root, { ...defaultState(), status: "running", currentStep: "S1.1", attempts: { "S1.1": 2 } });
+  const rt = path.join(root, ".autoclaude");
+  fs.writeFileSync(path.join(rt, "supervisor.pid"), String(process.pid));
+  const server = spawn(process.execPath, ["-e", "setTimeout(() => {}, 120000)"], { stdio: "ignore" });
+  const exited = new Promise((resolve) => server.on("exit", resolve));
+  fs.writeFileSync(path.join(rt, "devserver.json"), JSON.stringify({ pid: server.pid, url: "http://127.0.0.1:9", command: "x", startedByUs: true }));
+  const r = await run(["pause", "--now"], root);
+  assert.equal(r.code, 0, r.out + r.err);
+  const s = loadState(root);
+  assert.deepEqual([s.status, s.pauseReason, s.haltSession, s.pauseRequested], ["paused", "review", true, false]);
+  assert.match(r.out, /paused now for review; the dev server is stopped\./);
+  assert.match(r.out, /The supervisor \(pid \d+\) ends the builder session on its next check, within 60 s/);
+  assert.match(r.out, /S1\.1 starts again with fresh attempts/);
+  await Promise.race([exited, new Promise((_, reject) => setTimeout(() => reject(new Error("the dev server was not stopped")), 10000))]);
+  assert.equal(fs.existsSync(path.join(rt, "devserver.json")), false);
+
+  // Resumed before the supervisor's next poll: the request must not end the resumed session later.
+  const again = await run(["resume"], root);
+  assert.equal(again.code, 0, again.out);
+  assert.deepEqual([loadState(root).status, loadState(root).haltSession, loadState(root).attempts["S1.1"]], ["running", false, 0]);
+});
+
+test("uninstall on Linux and macOS keeps ~/.local/bin and the PATH, and removes only AutoClaude's files", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "autoclaude-bin-"));
+  const configDir = fs.mkdtempSync(path.join(os.tmpdir(), "autoclaude-cfg-"));
+  await run(["install-cli", "--no-path"], dir, { configDir, env: { AUTOCLAUDE_BIN_DIR: dir, PATH: "" } });
+  fs.writeFileSync(path.join(dir, "other-tool"), "#!/bin/sh\n");
+  const calls = [];
+  const deps = {
+    isWindows: false,
+    uninstallWatchdog: () => ({ ok: true, stderr: "", wasInstalled: false }),
+    uninstallStatusline: () => ({ removed: false }),
+    removeFromUserPath: (d) => { calls.push(d); return "removed"; }
+  };
+  let r = await run(["uninstall"], dir, { configDir, deps, env: { AUTOCLAUDE_BIN_DIR: dir, PATH: "" } });
+  assert.equal(r.code, 0, r.out);
+  assert.deepEqual(calls, [], "the PATH is not touched");
+  assert.match(r.out, /PATH: unchanged \(.* is shared with other tools, so it stays\)/);
+  assert.doesNotMatch(r.out, /remove .* from PATH/);
+  assert.equal(fs.existsSync(path.join(dir, "autoclaude")), false);
+  assert.ok(fs.existsSync(path.join(dir, "other-tool")), "another tool's file stays");
+  // Even an empty bin folder stays: it is not AutoClaude's.
+  fs.rmSync(path.join(dir, "other-tool"));
+  r = await run(["uninstall"], dir, { configDir, deps, env: { AUTOCLAUDE_BIN_DIR: dir, PATH: "" } });
+  assert.equal(r.code, 0, r.out);
+  assert.ok(fs.existsSync(dir));
+});
+
+// ---------- run with a passing preflight: a real git repository, a trusted folder ----------
+
+function gitAvailable() {
+  return spawnSync("git", ["--version"], { stdio: "ignore" }).status === 0;
+}
+
+function trustedRepo({ plan, configDir }) {
+  const root = project({ plan, config: { version: 1, tester: { enabled: false } } });
+  fs.writeFileSync(path.join(root, ".gitignore"), ".autoclaude/\n");
+  const g = (...a) => { const r = spawnSync("git", ["-c", "user.name=t", "-c", "user.email=t@example.com", ...a], { cwd: root, encoding: "utf8" }); assert.equal(r.status, 0, r.stderr); };
+  g("init", "-q");
+  g("add", "-A");
+  g("commit", "-q", "-m", "init");
+  const top = fs.realpathSync.native(root);
+  fs.writeFileSync(path.join(configDir, ".claude.json"), JSON.stringify({ hasCompletedOnboarding: true, projects: { [trustKeyFor(top)]: { hasTrustDialogAccepted: true } } }));
+  return root;
+}
+
+function runEnv() {
+  const env = { ...process.env, AUTOCLAUDE_CLAUDE_BIN: process.execPath };
+  delete env.CLAUDE_CONFIG_DIR;
+  for (const k of Object.keys(env)) if (k.startsWith("CLAUDE_PLUGIN_OPTION_")) delete env[k];
+  return env;
+}
+
+test("run continues a finished plan that has new steps: --check only prints, then a fresh run opens the window", { skip: !gitAvailable() && "git is not installed" }, async () => {
+  const configDir = fs.mkdtempSync(path.join(os.tmpdir(), "autoclaude-cfg-"));
+  const root = trustedRepo({ plan: PLAN.replace("- [ ] **S1.1**", "- [x] **S1.1**"), configDir });
+  saveState(root, { ...defaultState(), status: "complete", builderSessionId: "old-id", tickedByGate: ["S1.1"] });
+  const opened = [];
+  const deps = { openConsoleWindow: (o) => { opened.push(o); return { method: "windows-console", pid: 1 }; } };
+
+  let r = await run(["run", "--check"], root, { configDir, deps, env: runEnv() });
+  assert.equal(r.code, 0, r.out + r.err);
+  assert.match(r.out, /ok   plan: 2 steps, next S1\.2/);
+  assert.match(r.out, /preflight passed; `autoclaude run` would continue the finished plan with its new steps/);
+  assert.deepEqual(opened, [], "--check opens no window");
+  assert.equal(loadState(root).status, "complete", "--check changes nothing");
+
+  r = await run(["run"], root, { configDir, deps, env: runEnv() });
+  assert.equal(r.code, 0, r.out + r.err);
+  assert.equal(opened.length, 1);
+  assert.deepEqual(opened[0].args.slice(-1), ["supervise"]);
+  assert.match(r.out, /continuing the finished plan with its new steps in a new window, ac-/);
+  const s = loadState(root);
+  assert.deepEqual([s.status, s.builderSessionId, s.currentStep], ["idle", null, null], "idle, so the supervisor launches /autoclaude:start");
+
+  // A tmux that cannot start the session is an error, not a success.
+  r = await run(["run"], root, { configDir, deps: { openConsoleWindow: () => ({ method: "tmux", ok: false, stderr: "no server running on /tmp/tmux-0/default\n" }) }, env: runEnv() });
+  assert.equal(r.code, 1);
+  assert.match(r.out, /could not start the tmux session ac-[^:]+: no server running/);
+  assert.doesNotMatch(r.out, /in a new window/);
+
+  // --check on a failing preflight exits 1, still without a window.
+  fs.writeFileSync(path.join(root, "stray.txt"), "dirty");
+  r = await run(["run", "--check"], root, { configDir, deps, env: runEnv() });
+  assert.equal(r.code, 1);
+  assert.match(r.out, /FAIL git: the working tree has 1 uncommitted change/);
+  assert.match(r.out, /preflight failed/);
+  assert.equal(opened.length, 1);
+  r = await run(["run", "--bogus"], root, { configDir, deps, env: runEnv() });
+  assert.equal(r.code, 1);
+  assert.match(r.err, /unknown option --bogus/);
+});
+
+test("start on a continued plan: an old run branch already merged here moves forward; an unmerged one without the new step refuses", { skip: !gitAvailable() && "git is not installed" }, async () => {
+  const configDir = fs.mkdtempSync(path.join(os.tmpdir(), "autoclaude-cfg-"));
+  const g = (root, ...a) => { const r = spawnSync("git", ["-c", "user.name=t", "-c", "user.email=t@example.com", ...a], { cwd: root, encoding: "utf8" }); assert.equal(r.status, 0, r.stderr); return r.stdout.trim(); };
+  const onePlan = PLAN.replace(/- \[ \] \*\*S1\.2\*\* Second\n  - Accept: b\n/, "");
+  const setUp = () => {
+    const root = trustedRepo({ plan: onePlan, configDir });
+    const base = g(root, "rev-parse", "--abbrev-ref", "HEAD");
+    // The last run: its branch ticked S1.1.
+    g(root, "checkout", "-q", "-b", "autoclaude/demo");
+    fs.writeFileSync(path.join(root, "PLAN.md"), onePlan.replace("- [ ] **S1.1**", "- [x] **S1.1**"));
+    g(root, "commit", "-q", "-am", "autoclaude(S1.1): First");
+    g(root, "checkout", "-q", base);
+    return { root, base };
+  };
+
+  // Merged into the base branch, then a new step added there: the run branch catches up.
+  let { root, base } = setUp();
+  g(root, "merge", "-q", "--ff-only", "autoclaude/demo");
+  fs.writeFileSync(path.join(root, "PLAN.md"), PLAN.replace("- [ ] **S1.1**", "- [x] **S1.1**"));
+  g(root, "commit", "-q", "-am", "plan: add S1.2");
+  const tip = g(root, "rev-parse", "HEAD");
+  let r = await run(["start", "--no-preflight"], root, { configDir, env: runEnv() });
+  assert.equal(r.code, 0, r.out + r.err);
+  assert.match(r.out, /running on branch autoclaude\/demo\. First step: S1\.2 Second/);
+  assert.deepEqual([g(root, "rev-parse", "--abbrev-ref", "HEAD"), g(root, "rev-parse", "HEAD")], ["autoclaude/demo", tip]);
+
+  // Not merged, and the new step went onto the base branch only: refuse, and stay put.
+  ({ root, base } = setUp());
+  fs.writeFileSync(path.join(root, "PLAN.md"), PLAN.replace("- [ ] **S1.1**", "- [x] **S1.1**"));
+  g(root, "commit", "-q", "-am", "plan: add S1.2");
+  r = await run(["start", "--no-preflight"], root, { configDir, env: runEnv() });
+  assert.equal(r.code, 1);
+  assert.match(r.out, new RegExp(`the run branch autoclaude/demo is left from an earlier run, and its PLAN\\.md does not have S1\\.2 to do\\. Merge ${base} into autoclaude/demo`));
+  assert.equal(g(root, "rev-parse", "--abbrev-ref", "HEAD"), base);
+  assert.equal(loadState(root).status, "idle");
 });

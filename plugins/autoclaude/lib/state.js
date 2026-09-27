@@ -4,7 +4,8 @@ import { readJson, writeJsonAtomic, ensureDir } from "./fsatomic.js";
 import { projectPaths } from "./paths.js";
 
 export const STATUS = Object.freeze({ idle: "idle", running: "running", paused: "paused", complete: "complete" });
-export const PAUSE_REASONS = Object.freeze(["step-failed", "blocked", "weekly-limit", "stuck", "security", "review", "manual", "infra"]);
+// Every pauseReason the gate, the CLI and the supervisor set.
+export const PAUSE_REASONS = Object.freeze(["review", "blocked", "step-failed", "security", "stuck", "infra", "commit-failed", "weekly-limit"]);
 
 export function defaultState() {
   return {
@@ -26,6 +27,10 @@ export function defaultState() {
     windowTitle: null,
     supervisorPid: null,
     sessionId: null,
+    // The UUID the supervisor gave the builder session, so hooks can tell it from other sessions.
+    builderSessionId: null,
+    // Set by `pause --now`; the supervisor ends the builder session and clears it.
+    haltSession: false,
     tickedByGate: [],
     baseCommit: null,
     ownerAnswer: null,

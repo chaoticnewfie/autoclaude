@@ -47,8 +47,12 @@ export function resolveChannel(opts = {}, env = process.env, machineFile = machi
   const ntfyUrl = pick("ntfyUrl", "CLAUDE_PLUGIN_OPTION_NTFY_URL", "ntfy_url");
   const ntfyToken = pick("ntfyToken", "CLAUDE_PLUGIN_OPTION_NTFY_TOKEN", "ntfy_token");
   const discordWebhook = pick("discordWebhook", "CLAUDE_PLUGIN_OPTION_DISCORD_WEBHOOK", "discord_webhook");
-  let channel = pick("channel", "CLAUDE_PLUGIN_OPTION_NOTIFY_CHANNEL", "channel").toLowerCase();
-  if (!channel || channel === "auto") channel = ntfyUrl ? "ntfy" : discordWebhook ? "discord" : "stdout";
+  // The first source that names a channel wins; an empty or "auto" one passes to the next, so a
+  // channel chosen with `notify-setup` is not overruled by a userConfig left on auto.
+  let channel = [opts.channel, env.CLAUDE_PLUGIN_OPTION_NOTIFY_CHANNEL, machine.channel]
+    .map((v) => String(v ?? "").trim().toLowerCase())
+    .find((v) => v && v !== "auto") || "";
+  if (!channel) channel = ntfyUrl ? "ntfy" : discordWebhook ? "discord" : "stdout";
   if (channel === "ntfy" && !ntfyUrl) channel = "stdout";
   if (channel === "discord" && !discordWebhook) channel = "stdout";
   if (!["ntfy", "discord", "stdout"].includes(channel)) channel = "stdout";

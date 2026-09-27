@@ -45,7 +45,7 @@
     ],
     "PreToolUse": [
       {
-        "matcher": "AskUserQuestion|Edit|Write|MultiEdit|NotebookEdit|Bash",
+        "matcher": "AskUserQuestion|Edit|Write|MultiEdit|NotebookEdit|Bash|PowerShell",
         "hooks": [
           { "type": "command", "command": "node", "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/tool-guard.js"], "timeout": 10 }
         ]

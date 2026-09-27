@@ -22,6 +22,8 @@ import { supervise } from "./supervisor.js";
 import { openConsoleWindow, isPidAlive as pidAlive } from "./proc.js";
 import { registerProject } from "./registry.js";
 import { installLauncher } from "./launcher.js";
+import { runChecks } from "./checks.js";
+import { restartDevServer, stopDevServer, devServerInfo } from "./devserver.js";
 
 const VERSION = JSON.parse(fs.readFileSync(path.join(pluginRoot(), ".claude-plugin", "plugin.json"), "utf8")).version;
 
@@ -30,18 +32,27 @@ const HELP = `autoclaude ${VERSION}
 Usage: autoclaude <command> [options]
 
 Project commands (run inside a project):
-  init [--playwright] [--no-statusline] [--dev-url <url>] [--dir <path>]
-                        Set the project up: config, doc set, .gitignore, browser-tester config,
-                        machine registry, statusline bridge. Never overwrites existing files.
-  run                   Preflight, then open the ac-<project> window where the supervisor runs the build
+  init [<folder>] [--playwright] [--no-statusline] [--dev-url <url>] [--dir <folder>]
+                        Set the project up (the current folder unless one is given): config, doc
+                        set, .gitignore, browser-tester config, machine registry, statusline
+                        bridge. Never overwrites existing files.
+  run [--check]         Preflight, then open the ac-<project> window where the supervisor runs the
+                        build. A finished plan with new steps added starts a fresh run.
+                        --check: only run and print the preflight; opens no window
   status [--all]        State, current step, attempts, usage, last progress (--all: every registered project)
+  checks                Run the configured checks the way the gate does (starting the dev server
+                        first when a check needs it) and print one line per check
+  guard-test "<command>"
+                        Show whether the run's tool guard would allow this command in the Bash
+                        tool and in the PowerShell tool, and why not
   start [--no-preflight]  Preflight, create the run branch, set the run going (the run window does this)
   supervise             The supervisor loop itself (what \`run\` starts in the window)
   nudge "<prompt>"      Restart the running session now with this prompt (for example "/compact")
   ready [<step>]        Builder: tell the gate the current step is done (verified on the next stop)
   blocked <step> "<q>"  Builder: stop the run with a question only the owner can answer
   answer "<text>"       Owner: answer the blocked question; recorded as a decision, the run resumes
-  pause [--now]         Pause after the next verified commit (or right now with --now)
+  pause [--now]         Pause after the next verified commit. --now pauses at once: the supervisor
+                        ends the builder session and the dev server is stopped
   note "<text>"         Leave a review note for Claude; it is read on the next resume or session start
   resume                Clear a pause and set the run going again (refuses if PLAN.md fails lint)
   lint-plan [file]      Check the plan against the step format
@@ -51,13 +62,15 @@ Machine commands:
   install-cli [--no-path]  Put an \`autoclaude\` shim on your PATH
   notify-setup [--channel ntfy|discord|stdout] [--ntfy <topic url>] [--ntfy-token <token>]
                [--discord <webhook url>] [--show] [--clear]
-                        Store the notification channel for this machine (outside any repo)
+                        Store the notification channel for this machine (outside any repo).
+                        --ntfy or --discord without --channel also picks that channel
   notify-test [message] Send a test notification through the configured channel
   watchdog [--install | --uninstall | --status]
                         One pass: bring back the supervisor of any running project whose window
                         is gone. --install schedules it every 5 minutes.
   uninstall [--purge]   Remove what AutoClaude added to this machine: the watchdog task, the
-                        status line bridge, the command shims and their PATH entry (--purge also
+                        status line bridge, the command shims and, on Windows, their PATH entry
+                        (on Linux and macOS ~/.local/bin and PATH are left alone) (--purge also
                         deletes the machine settings: notification channel, registry, logs)
   version | help
 
@@ -84,25 +97,29 @@ export async function runCli(argv, rawIo = {}) {
     switch (cmd) {
       case "help": case "--help": case "-h": io.out(HELP.trimEnd()); return 0;
       case "version": case "--version": case "-v": io.out(VERSION); return 0;
+      // Async commands are awaited, so one that throws (a bad option, say) ends in the catch
+      // below with a message instead of escaping as a rejected promise.
       case "init": return cmdInit(rest, io);
       case "status": return cmdStatus(rest, io);
-      case "run": return cmdRun(rest, io);
-      case "supervise": return cmdSupervise(rest, io);
+      case "run": return await cmdRun(rest, io);
+      case "checks": return await cmdChecks(rest, io);
+      case "guard-test": return await cmdGuardTest(rest, io);
+      case "supervise": return await cmdSupervise(rest, io);
       case "nudge": return cmdNudge(rest, io);
-      case "watchdog": return cmdWatchdog(rest, io);
-      case "uninstall": return cmdUninstall(rest, io);
-      case "start": return cmdStart(rest, io);
+      case "watchdog": return await cmdWatchdog(rest, io);
+      case "uninstall": return await cmdUninstall(rest, io);
+      case "start": return await cmdStart(rest, io);
       case "ready": return cmdReady(rest, io);
       case "blocked": return cmdBlocked(rest, io);
       case "answer": return cmdAnswer(rest, io);
       case "pause": return cmdPause(rest, io);
       case "note": return cmdNote(rest, io);
-      case "resume": return cmdResume(rest, io);
+      case "resume": return await cmdResume(rest, io);
       case "lint-plan": return cmdLintPlan(rest, io);
       case "usage": return cmdUsage(rest, io);
       case "install-cli": return cmdInstallCli(rest, io);
       case "notify-setup": return cmdNotifySetup(rest, io);
-      case "notify-test": return cmdNotifyTest(rest, io);
+      case "notify-test": return await cmdNotifyTest(rest, io);
       default:
         io.err(`autoclaude: unknown command "${cmd}". Run "autoclaude help".`);
         return 2;
@@ -156,15 +173,21 @@ function fmtAge(ms) {
 
 function cmdInit(args, io) {
   const opts = { playwright: false, statusline: true, devUrl: null, now: io.now(), env: io.env };
-  let dir = io.cwd;
+  let dir = null;
+  const setDir = (d) => {
+    if (dir !== null) throw new Error(`init takes one folder; got ${dir} and ${d}`);
+    dir = d;
+  };
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
     if (a === "--playwright") opts.playwright = true;
     else if (a === "--no-statusline") opts.statusline = false;
     else if (a === "--dev-url") { opts.devUrl = args[++i]; if (!opts.devUrl) throw new Error("--dev-url needs a value"); }
-    else if (a === "--dir") { dir = args[++i]; if (!dir) throw new Error("--dir needs a value"); }
-    else throw new Error(`unknown option ${a}`);
+    else if (a === "--dir") { const d = args[++i]; if (!d) throw new Error("--dir needs a value"); setDir(d); }
+    else if (!a.startsWith("-")) setDir(a);
+    else throw new Error(`unknown option ${a} (to set up another folder, give it as \`init <folder>\` or \`init --dir <folder>\`)`);
   }
+  if (dir === null) dir = io.cwd;
   const report = initProject(path.resolve(io.cwd, dir), opts);
   io.out(formatInitReport(report));
   return report.warnings.length ? 0 : 0;
@@ -187,6 +210,8 @@ function cmdStatus(args, io) {
     if (current) {
       const attempts = state.attempts[current.id] || 0;
       io.out(`  ${state.currentStep ? "current" : "next"} step: ${current.id} ${current.title}${attempts ? ` (attempt ${attempts}/${config.retries.maxAttemptsPerStep})` : ""}`);
+    } else if (plan.parsed.steps.length === 0) {
+      io.out("  next step: none yet (the plan has no steps; run /autoclaude:plan)");
     } else {
       io.out("  next step: none left");
     }
@@ -222,7 +247,24 @@ function supervisorPid(root) {
   try { return Number(fs.readFileSync(projectPaths(root).supervisorPidFile, "utf8")) || null; } catch { return null; }
 }
 
+// What a finished run says when asked to go again: new steps are the only way on.
+function completeMessage(project, hasNewSteps) {
+  const plan = project.config.plan;
+  if (hasNewSteps) return `autoclaude: the last run finished, and ${plan} has new steps. Commit them, then \`autoclaude run\` starts a fresh run on them (resume only continues a paused run).`;
+  return `autoclaude: the plan is complete; every step in ${plan} is verified. To continue, add steps to ${plan}, commit them, then \`autoclaude run\`.`;
+}
+
+function hasUnfinishedStep(project) {
+  const plan = loadPlan(project);
+  return !!(plan.parsed && firstUnfinished(plan.parsed));
+}
+
 async function cmdRun(args, io) {
+  let checkOnly = false;
+  for (const a of args) {
+    if (a === "--check") checkOnly = true;
+    else throw new Error(`unknown option ${a}`);
+  }
   const project = requireProject(io);
   if (!project) return 1;
   const { root } = project;
@@ -232,22 +274,38 @@ async function cmdRun(args, io) {
     io.out(`autoclaude: this project already has a supervisor (pid ${pid}, window ${state.windowTitle || "?"}). Watch it with \`autoclaude status\`.`);
     return 1;
   }
-  if (state.status === STATUS.complete) {
-    io.out("autoclaude: the plan is complete; add steps to it, then `autoclaude run` again");
+  // A finished plan the owner has added steps to is a fresh run; without new steps there is
+  // nothing to do.
+  const continuing = state.status === STATUS.complete;
+  if (continuing && !hasUnfinishedStep(project)) {
+    io.out(completeMessage(project, false));
     return 1;
   }
   // A new run gets the full preflight; bringing back the supervisor of a run already under way
   // (after a reboot, or a closed window) checks only the tools and the folder's trust, because
   // mid-step the working tree is legitimately dirty.
-  const fresh = state.status === STATUS.idle;
+  const fresh = state.status === STATUS.idle || continuing;
   const skip = fresh ? [] : ["plan", "git", "checks", "playwright", "dev server", "usage"];
   const pf = await preflight(project, { env: io.env, devServer: fresh, skip });
-  io.out("autoclaude: preflight");
+  io.out(`autoclaude: preflight${fresh ? "" : ` (a run is under way, ${describeState(state)}, so only the tools and the folder's trust are checked)`}`);
   io.out(formatPreflight(pf));
+  const what = continuing ? "continue the finished plan with its new steps" : fresh ? "start the run" : `bring back the ${state.status} run`;
+  if (checkOnly) {
+    io.out(pf.ok ? `autoclaude: preflight passed; \`autoclaude run\` would ${what}` : "autoclaude: preflight failed; fix the FAIL lines above before `autoclaude run`");
+    return pf.ok ? 0 : 1;
+  }
   if (!pf.ok) { io.out("autoclaude: not starting; fix the FAIL lines above and run it again"); return 1; }
+  // Back to idle, so the supervisor launches /autoclaude:start, which sets up the new run.
+  if (continuing) {
+    updateState(root, (s) => {
+      s.status = STATUS.idle; s.pauseReason = null; s.pauseRequested = false; s.currentStep = null;
+      s.haltSession = false; s.builderSessionId = null;
+    });
+  }
   registerProject(root);
   const title = `ac-${path.basename(root).toLowerCase().replace(/[^a-z0-9]+/g, "-")}`;
-  const r = openConsoleWindow({
+  const open = io.deps.openConsoleWindow || openConsoleWindow;
+  const r = open({
     title,
     cwd: root,
     program: process.execPath,
@@ -255,7 +313,12 @@ async function cmdRun(args, io) {
     logFile: path.join(projectPaths(root).logsDir, "supervisor.log"),
     env: io.env
   });
-  io.out(`autoclaude: ${fresh ? "starting the run" : `bringing back the ${state.status} run`} in a new window, ${title} (${r.method}).`);
+  if (r.method === "tmux" && r.ok === false) {
+    io.out(`autoclaude: could not start the tmux session ${title}: ${String(r.stderr || "").trim() || "tmux failed"}`);
+    io.out("  Nothing is running. Fix that and run `autoclaude run` again.");
+    return 1;
+  }
+  io.out(`autoclaude: ${continuing ? "continuing the finished plan with its new steps" : fresh ? "starting the run" : `bringing back the ${state.status} run`} in a new window, ${title} (${r.method}).`);
   io.out("  Watch:  the window, or `autoclaude status` from any terminal. Leave the window open; an RDP disconnect is fine, logging off is not.");
   io.out("  Stop:   `autoclaude pause` (after the current step is verified) or `autoclaude pause --now`.");
   io.out("  Notes:  `autoclaude note \"...\"` any time; they reach Claude at the next step or resume.");
@@ -294,6 +357,83 @@ function cmdNudge(args, io) {
   return 0;
 }
 
+// ---------- checks / guard-test ----------
+
+// The project's checks, run the way the gate runs them: the dev server first when a check needs
+// it, then every check in order, stopping at the first failure.
+async function cmdChecks(args, io) {
+  if (args.length) throw new Error(`unknown option ${args[0]}`);
+  const project = requireProject(io);
+  if (!project) return 1;
+  const { root, config } = project;
+  if (!config.checks.length) {
+    io.out("autoclaude: no checks are configured (the \"checks\" list in autoclaude.config.json is empty)");
+    return 0;
+  }
+  const restart = io.deps.restartDevServer || restartDevServer;
+  const stop = io.deps.stopDevServer || stopDevServer;
+  io.out(`autoclaude: running ${config.checks.length} check(s) in ${root}`);
+  const needsServer = config.checks.some((c) => c.needsDevServer);
+  let devServerReady = false;
+  let stopAfter = false;
+  if (needsServer && config.devServer.command && config.devServer.url) {
+    // Like the preflight: a server that was already recorded (a run's) is left running after.
+    stopAfter = !devServerInfo({ root });
+    const ds = await restart(config.devServer, { root, env: io.env });
+    devServerReady = !!ds.ok;
+    io.out(ds.ok ? `  dev server: ${ds.reused ? "already answering" : "started"} at ${config.devServer.url}` : `  dev server: FAILED to start: ${ds.error}`);
+  } else if (needsServer) {
+    io.out("  dev server: not configured (devServer.command and devServer.url), so a check that needs it fails");
+  }
+  const secs = (ms) => `${Math.round((ms || 0) / 1000)} s`;
+  const line = (r) => {
+    if (r.skipped) return `  skip ${r.name}: not run, an earlier check failed`;
+    if (r.ok) return `  ok   ${r.name} (${secs(r.durationMs)}): ${r.command}`;
+    return `  FAIL ${r.name} (${r.reason || "failed"}${r.ran ? `, ${secs(r.durationMs)}` : ""}): ${r.command}`;
+  };
+  let result;
+  try {
+    result = await runChecks(config.checks, { cwd: root, env: io.env, devServerReady, onProgress: (r) => io.out(line(r)) });
+  } finally {
+    if (stopAfter) stop({ root });
+  }
+  for (const r of result.results) if (r.skipped) io.out(line(r));
+  if (result.ok) {
+    io.out(`autoclaude: all ${result.results.length} check(s) passed`);
+    return 0;
+  }
+  const f = result.failed;
+  if (f.tail) {
+    const tail = f.tail.split("\n").slice(-30);
+    io.out(`  last ${tail.length} line(s) of "${f.name}":`);
+    for (const l of tail) io.out(`    ${l}`);
+  }
+  io.out(`autoclaude: check "${f.name}" failed`);
+  return 1;
+}
+
+// What the PreToolUse tool guard would decide for a command during a run here, for the Bash
+// tool and the PowerShell tool. The project need not be running. Always exit 0 once decided.
+async function cmdGuardTest(args, io) {
+  const command = args.join(" ").trim();
+  if (!command) { io.err('autoclaude: usage: autoclaude guard-test "<command>"'); return 2; }
+  const project = requireProject(io);
+  if (!project) return 1;
+  // Imported here so a broken guard script can never stop the other commands.
+  const { decide } = await import("../scripts/tool-guard.js");
+  io.out(`autoclaude: during a run in ${project.root}, the tool guard decides for: ${command}`);
+  for (const tool of ["Bash", "PowerShell"]) {
+    let reason = null;
+    try {
+      reason = decide({ hook_event_name: "PreToolUse", cwd: project.root, tool_name: tool, tool_input: { command } }, { root: project.root, config: project.config });
+    } catch (e) {
+      reason = `the guard itself failed (${e.message})`;
+    }
+    io.out(`  ${tool}: ${reason ? `denied: ${reason}` : "allowed"}`);
+  }
+  return 0;
+}
+
 // ---------- uninstall ----------
 
 // Removes AutoClaude's machine-level pieces. The plugin itself is removed with Claude Code's own
@@ -305,7 +445,8 @@ async function cmdUninstall(args, io) {
   const l = await import("./launcher.js");
   const uninstallWatchdog = io.deps.uninstallWatchdog || ((o) => w.uninstallWatchdog(o));
   const uninstallStatusline = io.deps.uninstallStatusline || (() => s.uninstallStatusline());
-  const removeFromUserPath = io.deps.removeFromUserPath || removeDirFromUserPath;
+  const win = io.deps.isWindows ?? isWindows;
+  const removeFromUserPath = io.deps.removeFromUserPath || ((d) => removeDirFromUserPath(d, win));
   let ok = true;
   io.out("autoclaude: removing AutoClaude from this machine");
 
@@ -322,9 +463,14 @@ async function cmdUninstall(args, io) {
   const files = ["autoclaude", "autoclaude.cmd", l.LAUNCHER_NAME, l.LAUNCHER_SIDECAR, "autoclaude-watchdog.vbs"].map((f) => path.join(dir, f)).filter((f) => fs.existsSync(f));
   for (const f of files) fs.rmSync(f, { force: true });
   io.out(`  command shims: ${files.length ? `removed ${files.length} file(s) from ${dir}` : "none found"}`);
-  try { if (fs.existsSync(dir) && fs.readdirSync(dir).length === 0) fs.rmdirSync(dir); } catch {}
-  const p = removeFromUserPath(dir);
-  io.out(`  PATH: ${p}`);
+  if (win) {
+    // On Windows the folder is AutoClaude's own (%LOCALAPPDATA%\autoclaude\bin), and so is its
+    // PATH entry. Elsewhere it is ~/.local/bin, shared with other tools: the folder and PATH stay.
+    try { if (fs.existsSync(dir) && fs.readdirSync(dir).length === 0) fs.rmdirSync(dir); } catch {}
+    io.out(`  PATH: ${removeFromUserPath(dir)}`);
+  } else {
+    io.out(`  PATH: unchanged (${dir} is shared with other tools, so it stays)`);
+  }
 
   const machine = machinePaths().dir;
   if (purge) {
@@ -341,10 +487,10 @@ async function cmdUninstall(args, io) {
   return ok ? 0 : 1;
 }
 
-// Takes `dir` out of the user's PATH. Windows: the user environment through PowerShell, as
-// install-cli added it. Elsewhere install-cli only printed a profile line, so this does too.
-function removeDirFromUserPath(dir) {
-  if (!isWindows) return `remove ${dir} from PATH in your shell profile if you added it`;
+// Takes `dir` out of the user's PATH on Windows: the user environment through PowerShell, as
+// install-cli added it. Elsewhere the folder is ~/.local/bin, which other tools use too.
+function removeDirFromUserPath(dir, win = isWindows) {
+  if (!win) return `unchanged (${dir} is shared with other tools, so it stays)`;
   const ps = `$d='${dir.replace(/'/g, "''")}'; $p=[Environment]::GetEnvironmentVariable('Path','User'); $parts=@($p -split ';' | Where-Object { $_ -and ($_.TrimEnd('\\') -ne $d.TrimEnd('\\')) }); if ($parts.Count -eq @($p -split ';' | Where-Object { $_ }).Count) { 'absent' } else { [Environment]::SetEnvironmentVariable('Path', ($parts -join ';'), 'User'); 'removed' }`;
   const r = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", ps], { encoding: "utf8", windowsHide: true });
   if (r.status !== 0) return `could not update the user PATH (${String(r.stderr || r.error).trim().slice(0, 200)}); remove ${dir} from it by hand`;
@@ -406,6 +552,24 @@ async function cmdStart(args, io) {
     if (!pf.ok) { io.out("autoclaude: not starting; fix the FAIL lines above and run it again"); return 1; }
   }
   const branch = config.branch.replace("{planSlug}", planSlug(plan.parsed));
+  // A finished plan continued with new steps finds the run branch of the last run still there.
+  // Checking it out as it is would drop steps committed elsewhere (say, on main after a merge).
+  const onBranch = await git.currentBranch(root, { env: gitEnv });
+  if (onBranch !== branch && (await git.branchExists(root, branch, { env: gitEnv }))) {
+    const merged = await git.git(root, ["merge-base", "--is-ancestor", branch, "HEAD"], { env: gitEnv });
+    if (merged.ok) {
+      // Everything on the old run branch is already here, so moving it forward loses nothing.
+      const moved = await git.git(root, ["branch", "-f", branch, "HEAD"], { env: gitEnv });
+      if (!moved.ok) { io.out(`autoclaude: could not move ${branch} forward to ${onBranch}: ${moved.stderr.trim()}`); return 1; }
+    } else {
+      const there = await git.git(root, ["show", `${branch}:${config.plan.replace(/\\/g, "/")}`], { env: gitEnv });
+      const theirs = there.ok ? stepById(parsePlan(there.stdout), first.id) : null;
+      if (!theirs || theirs.marker === MARKERS.done) {
+        io.out(`autoclaude: not starting; the run branch ${branch} is left from an earlier run, and its ${config.plan} does not have ${first.id} to do. Merge ${onBranch || "this branch"} into ${branch}, or rename the old one (git branch -m ${branch} ${branch}-old), then run again.`);
+        return 1;
+      }
+    }
+  }
   const co = await git.checkoutBranch(root, branch, { create: true, env: gitEnv });
   if (!co.ok) { io.out(`autoclaude: could not check out ${branch}: ${co.stderr}`); return 1; }
   const ticked = plan.parsed.steps.filter((s) => s.marker === MARKERS.done).map((s) => s.id);
@@ -413,7 +577,7 @@ async function cmdStart(args, io) {
   const baseCommit = await git.head(root, { env: gitEnv });
   const usage = readUsage({ staleAfterMin: config.usage.staleAfterMin, now: io.now().getTime() });
   updateState(root, (s) => {
-    s.status = STATUS.running; s.pauseReason = null; s.pauseRequested = false; s.currentStep = first.id;
+    s.status = STATUS.running; s.pauseReason = null; s.pauseRequested = false; s.haltSession = false; s.currentStep = first.id;
     s.attempts = {}; s.infraFailures = {}; s.noProgress = 0; s.recoveries = 0; s.tickedByGate = ticked; s.startedAt = now; s.stepStartedAt = now;
     s.headAtLastGate = null; s.toolCallsAtLastGate = 0; s.baseCommit = baseCommit; s.ownerAnswer = null; s.lastBlockedQuestion = null;
     s.usageAtStart = usage.sevenDay && !usage.stale ? usage.sevenDay.pct : null; s.weeklyResetsAt = null;
@@ -476,8 +640,18 @@ function cmdPause(args, io) {
     return 1;
   }
   if (now) {
-    updateState(project.root, (s) => { s.status = STATUS.paused; s.pauseReason = "review"; s.pauseRequested = false; });
-    io.out(`autoclaude: paused now for review (step ${state.currentStep || "?"} stays open with its attempts). Leave notes with \`autoclaude note "..."\`, then \`autoclaude resume\`.`);
+    // The hooks stand down once the run is paused, so the session must not carry on: a live
+    // supervisor ends it on its next poll. The dev server the gate started goes too.
+    const pid = supervisorPid(project.root);
+    const supervised = !!(pid && pidAlive(pid));
+    updateState(project.root, (s) => { s.status = STATUS.paused; s.pauseReason = "review"; s.pauseRequested = false; s.haltSession = supervised; });
+    const ds = stopDevServer({ root: project.root });
+    const step = state.currentStep || "the current step";
+    io.out(`autoclaude: paused now for review${ds.stopped ? "; the dev server is stopped" : ""}.`);
+    if (supervised) io.out(`  The supervisor (pid ${pid}) ends the builder session on its next check, within ${project.config.supervisor.pollSec} s.`);
+    else io.out("  No supervisor is running for this project, so nothing ends the builder session: if a Claude session is still working on the run, stop it by hand (Esc, then /exit).");
+    io.out(`  Work in progress stays in the working tree. On \`autoclaude resume\`, ${step} starts again with fresh attempts.`);
+    io.out("  Leave notes first with `autoclaude note \"...\"` if you want Claude to change course.");
     return 0;
   }
   if (state.pauseRequested) {
@@ -526,11 +700,11 @@ async function cmdResume(args, io) {
     return 0;
   }
   if (state.status === STATUS.complete) {
-    io.out("autoclaude: the plan is complete; nothing to resume (add steps to the plan and run `autoclaude start`)");
+    io.out(completeMessage(project, hasUnfinishedStep(project)));
     return 1;
   }
   if (state.status === STATUS.idle) {
-    io.out("autoclaude: no run has been started yet; use `autoclaude run` (Phase 6) to start one");
+    io.out("autoclaude: no run has been started yet; use `autoclaude run` to start one");
     return 1;
   }
   if ((state.uncommitted || []).length) {
@@ -552,10 +726,39 @@ async function cmdResume(args, io) {
 
 // ---------- answer ----------
 
-function nextDecisionId(text) {
+// The text with every fenced code block left out: the template's "Entry format" example holds a
+// D-001 that is not a real entry (it made the first real answer D-002).
+export function outsideFences(text) {
+  const out = [];
+  let fence = null;
+  for (const line of String(text || "").split(/\r?\n/)) {
+    if (!fence) {
+      const open = line.match(/^ {0,3}(`{3,}|~{3,})/);
+      if (open) fence = open[1];
+      else out.push(line);
+    } else {
+      const close = line.match(/^ {0,3}(`{3,}|~{3,})\s*$/);
+      if (close && close[1][0] === fence[0] && close[1].length >= fence.length) fence = null;
+    }
+  }
+  return out.join("\n");
+}
+
+export function nextDecisionId(text) {
   let max = 0;
-  for (const m of String(text || "").matchAll(/\bD-(\d{3,})\b/g)) max = Math.max(max, Number(m[1]));
+  for (const m of outsideFences(text).matchAll(/\bD-(\d{3,})\b/g)) max = Math.max(max, Number(m[1]));
   return `D-${String(max + 1).padStart(3, "0")}`;
+}
+
+// The file with one entry appended in the project template's format (docs/DECISIONS.md "Entry
+// format"): `## D-### (YYYY-MM-DD, <step>) Title`, then `- Field: value` lines. The template's
+// "(none yet)" placeholder goes when the first entry lands.
+export function appendDecisionEntry(existing, { id, date, step, title, fields }) {
+  let text = existing === null || existing === undefined ? "# DECISIONS\n" : String(existing);
+  text = text.replace(/^(## Entries[ \t]*\r?\n)\s*\(none yet\)[ \t]*(\r?\n|$)/m, "$1");
+  if (!text.endsWith("\n")) text += "\n";
+  const body = fields.map(([k, v]) => `- ${k}: ${String(v).replace(/\s*\r?\n\s*/g, " ")}`).join("\n");
+  return `${text}\n## ${id} (${date}, ${step}) ${title}\n${body}\n`;
 }
 
 function cmdAnswer(args, io) {
@@ -579,9 +782,12 @@ function cmdAnswer(args, io) {
   const question = state.lastBlockedQuestion || "(the question was not recorded)";
   const file = path.join(project.root, project.config.docs.decisions);
   const existing = readText(file, null);
-  if (existing === null) { ensureDir(path.dirname(file)); appendLine(file, "# DECISIONS\n"); }
   const id = nextDecisionId(existing || "");
-  appendLine(file, `\n## ${id} (${at.slice(0, 10)}, ${step}) Owner answer to a blocked question\n\n- Question: ${question}\n- Answer: ${text}\n- Decided by: the owner, with \`autoclaude answer\`\n`);
+  ensureDir(path.dirname(file));
+  writeFileAtomic(file, appendDecisionEntry(existing, {
+    id, date: at.slice(0, 10), step, title: "Owner answer to a blocked question",
+    fields: [["Question", question], ["Answer", text], ["Decided by", "the owner, with `autoclaude answer`"]]
+  }));
   const changes = resumeRun(project, state, { ownerAnswer: { step, question, answer: text, at, decisionId: id }, lastBlockedQuestion: null });
   io.out(`autoclaude: answer recorded in ${project.config.docs.decisions} as ${id}; the run is going again on ${loadState(project.root).currentStep || "?"}.`);
   io.out("  Claude gets the answer at its next session start and in the gate's next message.");
@@ -666,20 +872,34 @@ function cmdInstallCli(args, io) {
 
 const mask = (s) => (s ? s.slice(0, Math.min(12, s.length)) + "..." + s.slice(-4) : "(not set)");
 
+// An ntfy topic is the secret itself (anyone who knows it can read and post): show the host and
+// the first 3 characters of the topic only.
+export function maskNtfyUrl(url) {
+  if (!url) return "(not set)";
+  const m = String(url).match(/^(https?:\/\/[^/]+\/)(.*)$/i);
+  if (!m) return mask(String(url));
+  return `${m[1]}${m[2].slice(0, 3)}...`;
+}
+
 function cmdNotifySetup(args, io) {
   const file = machinePaths().notifyFile;
   const values = {};
+  // Giving a URL picks its channel (the last one given wins); an explicit --channel always wins.
+  let explicitChannel = null;
+  let impliedChannel = null;
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
     const next = () => { const v = args[++i]; if (v === undefined) throw new Error(`${a} needs a value`); return v; };
-    if (a === "--channel") values.channel = next().toLowerCase();
-    else if (a === "--ntfy") values.ntfy_url = next();
+    if (a === "--channel") explicitChannel = next().toLowerCase();
+    else if (a === "--ntfy") { values.ntfy_url = next(); impliedChannel = "ntfy"; }
     else if (a === "--ntfy-token") values.ntfy_token = next();
-    else if (a === "--discord") values.discord_webhook = next();
-    else if (a === "--clear") { values.channel = null; values.ntfy_url = null; values.ntfy_token = null; values.discord_webhook = null; }
+    else if (a === "--discord") { values.discord_webhook = next(); impliedChannel = "discord"; }
+    else if (a === "--clear") { values.channel = null; values.ntfy_url = null; values.ntfy_token = null; values.discord_webhook = null; impliedChannel = null; }
     else if (a === "--show") { /* handled below */ }
     else throw new Error(`unknown option ${a}`);
   }
+  if (explicitChannel) values.channel = explicitChannel;
+  else if (impliedChannel) values.channel = impliedChannel;
   if (values.channel && !["ntfy", "discord", "stdout"].includes(values.channel)) throw new Error("--channel must be ntfy, discord or stdout");
   if (values.ntfy_url && !/^https?:\/\//.test(values.ntfy_url)) throw new Error("--ntfy needs a full topic URL such as https://ntfy.sh/your-topic");
   if (values.discord_webhook && !/^https:\/\/(discord\.com|discordapp\.com)\/api\/webhooks\//.test(values.discord_webhook)) throw new Error("--discord needs a Discord webhook URL");
@@ -687,10 +907,11 @@ function cmdNotifySetup(args, io) {
   const resolved = resolveChannel({}, io.env, file);
   io.out(`autoclaude: notification settings for this machine are in ${file} (never commit this file)`);
   io.out(`  channel: ${resolved.channel}${stored.channel ? "" : " (auto)"}`);
-  io.out(`  ntfy_url: ${stored.ntfy_url || "(not set)"}`);
+  io.out(`  ntfy_url: ${maskNtfyUrl(stored.ntfy_url)}`);
   io.out(`  ntfy_token: ${stored.ntfy_token ? "(set)" : "(not set)"}`);
   io.out(`  discord_webhook: ${mask(stored.discord_webhook)}`);
-  if (resolved.channel === "stdout") io.out("  nothing will reach a phone until --ntfy or --discord is set (or the plugin's userConfig, which hook processes read)");
+  if (resolved.channel === "stdout" && stored.channel === "stdout") io.out("  stdout is chosen: alerts only go to the log (`--channel ntfy` or `--channel discord` changes that)");
+  else if (resolved.channel === "stdout") io.out("  nothing will reach a phone until --ntfy or --discord is set (or the plugin's userConfig, which hook processes read)");
   return 0;
 }
 

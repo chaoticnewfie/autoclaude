@@ -1,14 +1,17 @@
 // The supervisor (PLAN.md P6.3, P6.4, D18): runs in the `ac-<project>` console window, owns the
 // interactive builder session (`claude` with inherited stdio), and every poll decides from files
-// alone whether the session is working, waiting out a usage limit, idle, stalled or gone. It
-// relaunches with `claude --continue ... "/autoclaude:resume"`, which resumes the same
-// conversation; all run state is in files, so nothing is lost. Two relaunches in a row without
-// progress pause the run as stuck and page the owner. Node built-ins only.
+// alone whether the session is working, waiting out a usage limit, idle, stalled or gone. The
+// first launch gives the session its own id (`claude --session-id <uuid>`, kept in state as
+// builderSessionId) and every relaunch is `claude --resume <that id> ... "/autoclaude:resume"`,
+// so it resumes the builder's conversation and never a person's own session in the same folder;
+// all run state is in files, so nothing is lost. Two relaunches in a row without progress pause
+// the run as stuck and page the owner. Node built-ins only.
 //
 // While a session is alive the supervisor never prints to the console (it would corrupt the
 // session's screen); it logs to .autoclaude/logs/supervisor.log.
 import fs from "node:fs";
 import path from "node:path";
+import crypto from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
 import { projectPaths } from "./paths.js";
 import { loadState, updateState, STATUS } from "./state.js";
@@ -22,29 +25,36 @@ import { notify } from "./notify.js";
 import { resumeRun } from "./resume.js";
 import { buildSummary } from "./summary.js";
 import { parsePlan } from "./plan.js";
+import { stopDevServer } from "./devserver.js";
 
 const MIN = 60 * 1000;
 
 // Environment for the builder: nothing from a parent Claude Code session (so it is never treated
 // as nested) and no role marker; CLAUDE_CONFIG_DIR and everything else pass through.
+// AUTOCLAUDE_BUILDER=1 is how the hooks tell the builder from any other session on the machine.
 export function childEnv(env = process.env) {
   const out = { ...env };
   for (const k of Object.keys(out)) {
     if (k === "CLAUDECODE" || k === "CLAUDE_PID" || k === "CLAUDE_EFFORT" || k === "CLAUDE_AGENT_SDK_VERSION" || k === "AUTOCLAUDE_ROLE" || k.startsWith("CLAUDE_CODE_") || k.startsWith("CLAUDE_PLUGIN_")) delete out[k];
   }
+  out.AUTOCLAUDE_BUILDER = "1";
   return out;
 }
 
-export function launchArgs(kind, prompt = null) {
-  if (kind === "start") return ["--permission-mode", "auto", "/autoclaude:start"];
-  return ["--continue", "--permission-mode", "auto", prompt || "/autoclaude:resume"];
+// A start launch names its session (`--session-id`, a fresh UUID each time: Claude Code refuses
+// an id that is already in use). A relaunch resumes that session by id; `--continue` would pick
+// the most recent conversation in the folder, which can be a person's own session. Runs started
+// by a version without builderSessionId fall back to `--continue`.
+export function launchArgs(kind, prompt = null, sessionId = null) {
+  if (kind === "start") return [...(sessionId ? ["--session-id", sessionId] : []), "--permission-mode", "auto", "/autoclaude:start"];
+  return [...(sessionId ? ["--resume", sessionId] : ["--continue"]), "--permission-mode", "auto", prompt || "/autoclaude:resume"];
 }
 
 const ts = (iso) => { const t = iso ? Date.parse(iso) : NaN; return Number.isFinite(t) ? t : null; };
 const mins = (ms) => `${Math.round(ms / MIN)} min`;
 
 // Pure decision. Every input is a plain value; see supervise() for where each comes from.
-// Returns { action: "none" | "relaunch" | "nudge" | "continue" | "pause-stuck" | "pause-weekly" | "resume-weekly" | "exit", reason }.
+// Returns { action: "none" | "relaunch" | "nudge" | "continue" | "pause-stuck" | "pause-weekly" | "resume-weekly" | "halt" | "exit", reason }.
 export function decide(i) {
   const { status, now, childAlive, cfg, sup } = i;
   const s = cfg.supervisor;
@@ -82,6 +92,9 @@ export function decide(i) {
     return { action: "relaunch", reason: want };
   }
   if (status === STATUS.paused) {
+    // `pause --now`: the hooks stand down once the run is paused, so a session left working
+    // would carry on unguarded. End it at once; a resume relaunches it.
+    if (i.haltSession && childAlive) return { action: "halt", reason: "the owner paused the run with --now; ending the session" };
     if (i.pauseReason === "weekly-limit" && cfg.usage.autoResumeAfterWeeklyReset && i.weeklyResetsAt && now > i.weeklyResetsAt + s.rateLimitGraceMin * MIN) {
       return { action: "resume-weekly", reason: "the weekly usage limit has reset" };
     }
@@ -125,6 +138,8 @@ export async function supervise({
   now = () => Date.now(),
   sleep = (ms) => new Promise((r) => setTimeout(r, ms)),
   maxLoops = Infinity,
+  newSessionId = () => crypto.randomUUID(),
+  kill = killTree,
   console: out = console
 } = {}) {
   const p = projectPaths(root);
@@ -149,24 +164,51 @@ export async function supervise({
   const saveSup = () => { try { writeJsonAtomic(supFile, sup); } catch {} };
 
   const doSpawn = spawnChild || ((args, opts) => spawn(claudeBinary(env), args, { ...opts, stdio: "inherit" }));
+  // A `--resume <id>` that dies within this long found no conversation to resume (for example a
+  // start session that ended before it saved anything); the next relaunch then opens a fresh
+  // session under a new id instead of failing the same way until the run pauses as stuck.
+  const RESUME_FAIL_MS = 30 * 1000;
+  let resumeFailedFast = false;
   const launch = (kind, prompt = null) => {
-    const args = launchArgs(kind, prompt);
+    let sessionId = null;
+    let args;
+    if (kind === "start") {
+      sessionId = newSessionId();
+      updateState(root, (s) => { s.builderSessionId = sessionId; });
+      args = launchArgs(kind, prompt, sessionId);
+    } else if (resumeFailedFast) {
+      sessionId = newSessionId();
+      updateState(root, (s) => { s.builderSessionId = sessionId; });
+      log("the builder session could not be resumed; opening a fresh one with the run context");
+      args = ["--session-id", sessionId, "--permission-mode", "auto", prompt || "/autoclaude:resume"];
+    } else {
+      sessionId = loadState(root).builderSessionId || null;
+      args = launchArgs(kind, prompt, sessionId);
+    }
+    resumeFailedFast = false;
+    const resuming = args[0] === "--resume";
     log(`launching claude ${args.join(" ")}`);
     child = doSpawn(args, { cwd: root, env: childEnv(env) });
     childAlive = true;
-    childStartedAt = now();
-    child.on("exit", (code) => { childAlive = false; appendLine(logFile, `${new Date(now()).toISOString()} claude exited (code ${code})`); });
+    const startedAt = childStartedAt = now();
+    child.on("exit", (code) => {
+      childAlive = false;
+      if (resuming && code !== 0 && now() - startedAt < RESUME_FAIL_MS) resumeFailedFast = true;
+      appendLine(logFile, `${new Date(now()).toISOString()} claude exited (code ${code})`);
+    });
     child.on("error", (e) => { childAlive = false; appendLine(logFile, `${new Date(now()).toISOString()} claude could not start: ${e.message}`); });
   };
   const stopChild = async () => {
     if (!child || !childAlive) return;
-    killTree(child.pid);
+    kill(child.pid);
     for (let i = 0; i < 40 && childAlive; i++) await sleep(250);
   };
 
   let state = loadState(root);
   let lastStatus = state.status;
   if (state.status === STATUS.complete) { log("the plan is already complete; nothing to supervise"); return { exit: "complete" }; }
+  // A halt request left by a supervisor that died has no session to end any more.
+  if (state.haltSession) updateState(root, (s) => { s.haltSession = false; });
   if (state.status === STATUS.running) launch("resume");
   else if (state.status === STATUS.idle) launch("start");
   else log(`the run is paused (${state.pauseReason || "?"}); waiting for \`autoclaude resume\``);
@@ -213,7 +255,7 @@ export async function supervise({
       const lastActivityAt = Math.max(ts(beat.at) || 0, childStartedAt || 0, gateSeenAt);
       const stale = t - lastActivityAt > cfg.supervisor.stallMin * MIN;
       const input = {
-        status: state.status, pauseReason: state.pauseReason, now: t, childAlive, cfg, sup,
+        status: state.status, pauseReason: state.pauseReason, haltSession: !!state.haltSession, now: t, childAlive, cfg, sup,
         lastActivityAt, heartbeatCount: beat.count, idle, failure, gateAt: gate, usage, nudge,
         agentStatus: stale && childAlive && child ? agentStatus(child.pid, env) : null,
         weeklyResetsAt: ts(state.weeklyResetsAt) || (usage.sevenDay && usage.sevenDay.resetsAt) || null
@@ -252,9 +294,23 @@ export async function supervise({
         const project = { root, config: cfg };
         resumeRun(project, loadState(root), { weeklyResetsAt: null });
         await notifyOwner({ title: "AutoClaude resumed after the weekly reset", message: `Continuing ${loadState(root).currentStep || "?"}.`, priority: "default" });
+      } else if (d.action === "halt") {
+        await stopChild();
+        // A verification cut short can leave a dev server it had just started.
+        stopDevServer({ root });
+        if (childAlive) log("the session was told to end but had not exited 10 s later; trying again on the next poll");
+        else {
+          updateState(root, (s) => { s.haltSession = false; });
+          log("ended the session; the run stays paused until `autoclaude resume`");
+        }
       } else if (d.action === "exit") {
         log(`${d.reason}; the supervisor is done`);
         break;
+      }
+      if (d.action !== "halt" && state.haltSession && (state.status !== STATUS.paused || !childAlive)) {
+        // Nothing left to end (the session had already exited), or the run was resumed before
+        // this poll: clear the request so it cannot end a later session by surprise.
+        updateState(root, (s) => { if (s.status !== STATUS.paused || !childAlive) s.haltSession = false; });
       }
 
       // Optional morning summary (P6.5), once a day at notify.morningSummaryAt local time.

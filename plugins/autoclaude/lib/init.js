@@ -2,6 +2,7 @@
 // PLAN.md P2.1, P2.4, P2.5, D23, R17. Node built-ins only.
 import fs from "node:fs";
 import path from "node:path";
+import { spawnSync } from "node:child_process";
 import { configTemplate } from "./config.js";
 import { writeJsonAtomic, writeFileAtomic, readText, readJson, ensureDir } from "./fsatomic.js";
 import { projectPaths, pluginRoot, homeDir, isWindows, CONFIG_FILE } from "./paths.js";
@@ -30,9 +31,6 @@ export function detectProject(root) {
   if (has("typecheck")) checks.push({ name: "typecheck", command: "npm run typecheck", timeoutSec: 300 });
   else if (has("tsc")) checks.push({ name: "typecheck", command: "npm run tsc", timeoutSec: 300 });
   if (has("test")) checks.push({ name: "unit", command: "npm test", timeoutSec: 600 });
-  const e2e = ["e2e", "test:e2e", "playwright"].find(has);
-  if (e2e) checks.push({ name: "e2e", command: `npm run ${e2e}`, timeoutSec: 900, needsDevServer: true });
-  if (checks.length === 0) notes.push("no lint, typecheck or test scripts found in package.json: the gate will only run the browser tester until you add checks");
 
   if (has("dev") || has("start")) {
     const name = has("dev") ? "dev" : "start";
@@ -49,7 +47,37 @@ export function detectProject(root) {
   } else {
     notes.push("no dev or start script: devServer left empty (the browser tester needs one for UI steps)");
   }
+
+  // An e2e check needs the dev server; without one the gate would fail it on every step.
+  const e2e = ["e2e", "test:e2e", "playwright"].find(has);
+  if (e2e && devServer.command) checks.push({ name: "e2e", command: `npm run ${e2e}`, timeoutSec: 900, needsDevServer: true });
+  else if (e2e) notes.push(`found "npm run ${e2e}" but no dev server was detected, so it is not a check yet: set devServer in ${CONFIG_FILE}, then add it with "needsDevServer": true`);
+  if (checks.length === 0) notes.push("no lint, typecheck or test scripts found in package.json: the gate will only run the browser tester until you add checks");
   return { checks, devServer, notes, hasPackageJson: true, scripts };
+}
+
+// Plan-like markdown another tool or the owner may already keep, besides PLAN.md.
+const PLAN_LIKE = ["roadmap.md", "todo.md", "next.md"];
+
+// Why a folder counts as an existing project (empty when it is new). Read before the template is
+// copied, so the files init writes itself never count.
+export function existingProjectSignals(root, env = process.env) {
+  const signals = [];
+  const has = (rel) => fs.existsSync(path.join(root, rel));
+  for (const rel of ["PLAN.md", "package.json", "src", "app", "CLAUDE.md", "AGENTS.md"]) if (has(rel)) signals.push(rel);
+  const names = (dir) => { try { return fs.readdirSync(dir); } catch { return []; } };
+  for (const n of names(root)) if (PLAN_LIKE.includes(n.toLowerCase())) signals.push(n);
+  for (const n of names(path.join(root, "docs"))) if (/^plan.*\.md$/i.test(n)) signals.push(`docs/${n}`);
+  if (hasCommittedFiles(root, env)) signals.push("git history");
+  return signals;
+}
+
+// True when HEAD has at least one file under root. False without git, a repo or a commit.
+function hasCommittedFiles(root, env) {
+  const gitCli = findOnPath("git", env);
+  if (!gitCli || !fs.existsSync(root)) return false;
+  const r = spawnSync(gitCli, ["ls-tree", "-r", "--name-only", "HEAD", "--", "."], { cwd: root, env, encoding: "utf8", windowsHide: true, timeout: 30000 });
+  return r.status === 0 && String(r.stdout || "").trim() !== "";
 }
 
 function walk(dir, rel = "", out = []) {
@@ -78,11 +106,14 @@ export function initProject(root, options = {}) {
   root = path.resolve(root);
   ensureDir(root);
   const p = projectPaths(root);
-  const report = { root, created: [], skipped: [], warnings: [], notes: [], detected: null, existingProject: false, registry: null, statusline: null };
+  const report = { root, created: [], skipped: [], warnings: [], notes: [], detected: null, existingProject: false, existingSignals: [], registry: null, statusline: null };
 
-  const hadPlan = fs.existsSync(path.join(root, "PLAN.md"));
-  const hadCode = fs.existsSync(path.join(root, "package.json")) || fs.existsSync(path.join(root, "src")) || fs.existsSync(path.join(root, "app"));
-  report.existingProject = hadPlan || hadCode;
+  report.existingSignals = existingProjectSignals(root, env);
+  report.existingProject = report.existingSignals.length > 0;
+  // A CLAUDE.md that is kept and never mentions AutoClaude is the owner's own, without the run
+  // rules; one written by an earlier init or extended by /autoclaude:plan mentions it.
+  const ownClaudeMd = readText(path.join(root, "CLAUDE.md"), null);
+  report.keptOwnClaudeMd = ownClaudeMd !== null && !/autoclaude/i.test(ownClaudeMd);
 
   // 1. config
   const detected = detectProject(root);
@@ -148,7 +179,7 @@ export function initProject(root, options = {}) {
 
   // 6. machine checks
   if (!findOnPath("node", env)) report.warnings.push("`node` is not on PATH for this shell; hooks need it on the PATH of the claude process");
-  if (!nativeClaudePath()) report.warnings.push("the native Claude Code install was not found (~/.local/bin/claude); unattended runs need it, see docs/USAGE.md");
+  if (!nativeClaudePath()) report.warnings.push("the native Claude Code install was not found (~/.local/bin/claude); unattended runs need it, see the AutoClaude README (docs/USAGE.md in the AutoClaude repository)");
 
   // 7. registry
   try { report.registry = registerProject(root, { now }); } catch (e) { report.warnings.push(`could not update the machine registry: ${e.message}`); }
@@ -181,7 +212,12 @@ export function formatInitReport(r) {
   }
   lines.push("");
   lines.push(`  next: review ${CONFIG_FILE} (the detected commands are guesses), then /autoclaude:plan to write the plan.`);
-  if (r.existingProject) {
+  if (r.keptOwnClaudeMd) {
+    // The owner's CLAUDE.md was kept, so the AutoClaude rules are not in it yet.
+    lines.push("  this project already had its own CLAUDE.md, which init kept as it was: /autoclaude:plan reviews the project's own");
+    lines.push("  rules and adds an AutoClaude section to that file, then reviews the plan against the step format, so every step");
+    lines.push("  has Accept lines and no step needs a human.");
+  } else if (r.existingProject) {
     lines.push("  this project already had code or a plan: have /autoclaude:plan review the plan against the step format and the");
     lines.push("  \"planning for an unattended run\" rules in CLAUDE.md, so every step has Accept lines and no step needs a human.");
   }

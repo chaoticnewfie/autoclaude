@@ -14,4 +14,5 @@ One step whose acceptance can never be met, so the gate must fail it three times
 
 - [ ] **S1.1** Make the impossible test pass without touching it
   - Accept: `node --test test/` exits 0 with `test/impossible.test.js` unchanged (it asserts that 1 equals 2)
+  - Test: test/impossible.test.js
   - Tags: no-ui

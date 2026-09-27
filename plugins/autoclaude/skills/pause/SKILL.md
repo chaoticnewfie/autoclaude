@@ -1,6 +1,6 @@
 ---
 name: pause
-description: Pause the AutoClaude run of this project for review, after the next verified commit (or immediately with "now"). Use when the user types /autoclaude:pause or asks to pause the autopilot to look things over.
+description: Pause the AutoClaude run of this project for review, after the next verified commit, or immediately with "now" (which also ends the builder session and stops the dev server). Use when the user types /autoclaude:pause or asks to pause the autopilot to look things over.
 ---
 
 Run this with the Bash tool. Add `--now` only if the user asked to stop immediately rather than after the current step is verified and committed:
@@ -9,4 +9,6 @@ Run this with the Bash tool. Add `--now` only if the user asked to stop immediat
 node "${CLAUDE_PLUGIN_ROOT}/bin/autoclaude.js" pause
 ```
 
-Show the output verbatim. Then tell the user, in one line, that they can leave notes with `/autoclaude:note` and continue with `/autoclaude:resume`.
+Show the output verbatim. Without `--now` the gate finishes the current step, commits it, then pauses. With `--now` the run pauses at once: the supervisor ends the builder session on its next check, the dev server is stopped, unfinished work stays in the working tree uncommitted, and the step starts again with fresh attempts on resume.
+
+Then tell the user, in one line, that they can leave notes with `/autoclaude:note` and continue with `autoclaude resume` from a terminal (`/autoclaude:resume` in this session runs the same command).

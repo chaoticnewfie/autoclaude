@@ -35,6 +35,10 @@ test("projectSlug lowercases the folder name and turns non-alphanumerics into da
   assert.equal(projectSlug(path.join(os.tmpdir(), "My App_2.0")), "my-app-2-0");
   assert.equal(projectSlug(path.join(os.tmpdir(), "db")), "db");
   assert.equal(projectSlug(path.join(os.tmpdir(), "AutoClaude")), "autoclaude");
+  // Runs collapse to one dash, exactly as `autoclaude run` and the supervisor name the window.
+  const odd = path.join(os.tmpdir(), "My  App -- (v2)");
+  assert.equal(projectSlug(odd), "my-app-v2-");
+  assert.equal(projectSlug(odd), path.basename(odd).toLowerCase().replace(/[^a-z0-9]+/g, "-"));
 });
 
 test("supervisorPid reads the pid file first, then state, else null", () => {
@@ -335,6 +339,7 @@ test("installWatchdog on Linux writes the systemd user units and enables the tim
   const timer = fs.readFileSync(path.join(unitDir, "autoclaude-watchdog.timer"), "utf8");
   assert.equal(r.file, path.join(unitDir, "autoclaude-watchdog.service"));
   assert.match(service, /^Type=oneshot$/m);
+  assert.match(service, /^KillMode=process$/m, "a supervisor the pass starts outlives the pass");
   assert.match(service, /^ExecStart=\/usr\/bin\/node \/home\/someone\/\.claude\/plugins\/autoclaude\/bin\/autoclaude\.js watchdog$/m);
   assert.match(service, /^Environment="PATH=\/usr\/local\/bin:\/usr\/bin:\/bin:\/home\/someone\/\.local\/bin"$/m);
   assert.match(service, /loginctl enable-linger/);
@@ -404,6 +409,13 @@ test("uninstallWatchdog and watchdogStatus on Linux go through systemctl", () =>
   assert.equal(c.installed, true);
   assert.equal(c.status, "cron");
   assert.deepEqual(cron.calls, [["crontab", ["-l"]]]);
+  // The installed line runs the launcher, not the plugin's CLI.
+  const launcherLine = installWatchdog({ ...LINUX, cli: "/home/someone/.claude/autoclaude/bin/autoclaude-launch.mjs", run: fakeRunner().run, platform: "darwin", which: () => null }).cronLine;
+  assert.match(launcherLine, /autoclaude-launch\.mjs watchdog$/);
+  const viaLauncher = fakeRunner(() => ({ code: 0, stdout: `MAILTO=""\n${launcherLine}\n`, stderr: "" }));
+  assert.equal(watchdogStatus({ run: viaLauncher.run, env: LINUX.env, platform: "darwin", which: () => null }).installed, true);
+  const other = fakeRunner(() => ({ code: 0, stdout: "*/5 * * * * /usr/bin/backup.sh\n", stderr: "" }));
+  assert.equal(watchdogStatus({ run: other.run, env: LINUX.env, platform: "darwin", which: () => null }).installed, false);
 });
 
 test("defaultRunner runs a program with an argument array and no shell", () => {

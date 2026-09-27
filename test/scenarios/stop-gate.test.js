@@ -284,6 +284,27 @@ test("tester pass with minor bugs: verified, and the follow-ups land in BLOCKERS
   assert.match(files, /docs\/BLOCKERS\.md/);
 });
 
+test("pause --now during a verification is kept: a pass is committed but the run stays paused; a failure pauses without blocking", async () => {
+  const pauseDuring = (result) => ({ tester: () => { saveState(root, { ...loadState(root), status: "paused", pauseReason: "review", haltSession: true }); return result; } });
+  let root = scratchUi();
+  let { deps: b } = fakeBrowser(pauseDuring(null));
+  writeReady(root, "S1.1");
+  let r = await gate(root, b);
+  assert.equal(r.decision, "allow", JSON.stringify(r.events));
+  let s = loadState(root);
+  assert.deepEqual([s.status, s.pauseReason, s.currentStep, s.haltSession], ["paused", "review", "S1.2", true]);
+  assert.equal(stepById(planOf(root), "S1.1").marker, "x");
+  assert.match(gitLog(root)[0], /^autoclaude\(S1\.1\)/);
+
+  root = scratchUi();
+  ({ deps: b } = fakeBrowser(pauseDuring(testerFail)));
+  writeReady(root, "S1.1");
+  r = await gate(root, b);
+  assert.equal(r.decision, "allow");
+  s = loadState(root);
+  assert.deepEqual([s.status, s.attempts["S1.1"]], ["paused", 1]);
+});
+
 test("tester infrastructure failure: not an attempt the first time, a pause the second time", async () => {
   const root = scratchUi();
   const infra = { status: "infra", failed: "Browser tester could not run (2 tries): timed out; timed out", sections: [{ title: "Browser tester: could not run", body: "x" }], followUps: [] };
@@ -338,6 +359,20 @@ test("a dev server that will not start fails the attempt with its log", async ()
   assert.deepEqual(calls, []);
   assert.match(r.reason, /failed: the dev server did not start: dev server did not answer/);
   assert.match(r.reason, /EADDRINUSE/);
+});
+
+test("a check that needs the dev server in a project without one is reported NOT RUN, and the builder is told why", async () => {
+  const checks = [...PASS, { name: "e2e", command: `${node} -e "process.exit(0)"`, timeoutSec: 60, needsDevServer: true }];
+  const root = scratch("happy", checks);
+  writeReady(root, "S1.1");
+  const r = await gate(root);
+  assert.equal(r.decision, "block");
+  assert.match(r.reason, /S1\.1 attempt 1\/3 failed: check "e2e" did not run: it needs the dev server \(needsDevServer\), but devServer\.command and devServer\.url are not both set in autoclaude\.config\.json/);
+  assert.doesNotMatch(r.reason, /check "e2e" failed/);
+  assert.match(r.reason, /## Check "e2e": NOT RUN/, "the section reaches the builder");
+  const report = fs.readFileSync(path.join(root, ".autoclaude", "reports", "S1.1-1.md"), "utf8");
+  assert.match(report, /## Check "unit": passed/);
+  assert.match(report, /## Check "e2e": NOT RUN\n\n`[^`]+` did not run: it needs the dev server[^\n]*blocked S1\.1/);
 });
 
 // ---------- Phase 5: security reviewer ----------

@@ -54,6 +54,20 @@ test("the per-machine notify file is read last, and writeMachineNotify merges an
   assert.deepEqual(readMachineNotify(path.join(tmpDir(), "missing.json")), {});
 });
 
+test("resolveChannel: a stored channel beats the auto choice, and a userConfig left on auto does not overrule it", () => {
+  const file = path.join(tmpDir(), "notify.json");
+  const both = { ntfy_url: "https://ntfy.sh/t", discord_webhook: "https://discord.com/api/webhooks/1/a" };
+  fs.writeFileSync(file, JSON.stringify({ channel: "discord", ...both }));
+  assert.equal(resolveChannel({}, {}, file).channel, "discord", "auto would have picked ntfy");
+  assert.equal(resolveChannel({}, { CLAUDE_PLUGIN_OPTION_NOTIFY_CHANNEL: "auto" }, file).channel, "discord");
+  assert.equal(resolveChannel({}, { CLAUDE_PLUGIN_OPTION_NOTIFY_CHANNEL: " " }, file).channel, "discord");
+  assert.equal(resolveChannel({ channel: "auto" }, {}, file).channel, "discord");
+  assert.equal(resolveChannel({}, { CLAUDE_PLUGIN_OPTION_NOTIFY_CHANNEL: "ntfy" }, file).channel, "ntfy", "a userConfig that names a channel still wins");
+  assert.equal(resolveChannel({ channel: "stdout" }, {}, file).channel, "stdout");
+  fs.writeFileSync(file, JSON.stringify({ channel: "auto", ...both }));
+  assert.equal(resolveChannel({}, {}, file).channel, "ntfy", "nothing named anywhere: auto prefers ntfy");
+});
+
 test("ntfy: posts title, priority, tags and bearer token, and logs the delivery", async () => {
   const { server, requests, url } = await startServer();
   const dir = tmpDir();

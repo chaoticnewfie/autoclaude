@@ -90,6 +90,41 @@ export function parsePlan(text) {
   return { title, lines, phases, steps, problems };
 }
 
+export const TAGS = Object.freeze(["ui", "no-ui", "security", "db"]);
+// Sentences the project template ships in place of real content; a plan still holding one was
+// never finished by /autoclaude:plan.
+export const TEMPLATE_PLACEHOLDERS = Object.freeze(["Not written yet.", "Nothing decided yet."]);
+// Uppercase only, so a todo app's "todo" is fine; a file name such as TODO.md is not a marker.
+const UNFINISHED_RE = /\b(TBD|TODO)\b(?!\.\w)/;
+const INLINE_CODE_RE = /`[^`]*`/g;
+
+// S1.10 -> [1, 10], so ids compare as numbers, not as text.
+function idNumbers(id) {
+  return id.replace(/^[A-Za-z]+/, "").split(".").map(Number);
+}
+
+function compareIds(a, b) {
+  const x = idNumbers(a);
+  const y = idNumbers(b);
+  for (let i = 0; i < Math.max(x.length, y.length); i++) {
+    const d = (x[i] ?? -1) - (y[i] ?? -1);
+    if (d !== 0) return d;
+  }
+  return 0;
+}
+
+// Line indexes outside ``` and ~~~ fences, the same way parsePlan skips fenced blocks.
+function proseLineIndexes(lines) {
+  const out = [];
+  let fence = null;
+  lines.forEach((line, i) => {
+    const m = line.match(FENCE_RE);
+    if (m) { if (fence === null) fence = m[1]; else if (m[1] === fence) fence = null; return; }
+    if (fence === null) out.push(i);
+  });
+  return out;
+}
+
 // Every rule of section 4.8.1. Returns [{ line, id, message }], empty when the plan is usable.
 export function lintPlan(parsed) {
   const problems = [...parsed.problems];
@@ -108,8 +143,39 @@ export function lintPlan(parsed) {
       const m = s.id.match(/^[A-Za-z]+(\d+)\./);
       if (m && Number(m[1]) !== s.phase.num) problems.push({ line: at, id: s.id, message: `step id ${s.id} does not match its phase number ${s.phase.num}` });
     }
+    for (const t of s.tags) if (!TAGS.includes(t)) problems.push({ line: at, id: s.id, message: `unknown tag "${t}" (use ${TAGS.slice(0, -1).join(", ")} or ${TAGS.at(-1)})` });
+    if (s.tags.includes("ui") && s.tags.includes("no-ui")) problems.push({ line: at, id: s.id, message: "step is tagged both ui and no-ui" });
+    // No browser checks a no-ui step, so a named test has to.
+    if (s.tags.includes("no-ui") && s.test.length === 0) problems.push({ line: at, id: s.id, message: "a no-ui step needs a `- Test:` line naming the test that proves it (no browser checks it)" });
+    const unfinished = [s.title, ...s.accept, ...s.test, ...s.tags, ...s.depends].map((v) => v.replace(INLINE_CODE_RE, "")).find((v) => UNFINISHED_RE.test(v));
+    if (unfinished !== undefined) problems.push({ line: at, id: s.id, message: `step still says ${unfinished.match(UNFINISHED_RE)[1]}; settle it before the run, because nobody answers during it` });
   }
-  return problems;
+
+  const phaseAt = new Map();
+  let prev = null;
+  for (const ph of parsed.phases) {
+    const at = ph.line + 1;
+    if (phaseAt.has(ph.num)) problems.push({ line: at, id: null, message: `phase number ${ph.num} is used twice (first at line ${phaseAt.get(ph.num)})` });
+    else {
+      if (prev && ph.num < prev.num) problems.push({ line: at, id: null, message: `Phase ${ph.num} comes after Phase ${prev.num}; phases must be in ascending order` });
+      phaseAt.set(ph.num, at);
+    }
+    prev = ph;
+    if (ph.steps.length === 0) problems.push({ line: at, id: null, message: `Phase ${ph.num} has no steps (add steps under it or remove the heading)` });
+    for (let i = 1; i < ph.steps.length; i++) {
+      const a = ph.steps[i - 1];
+      const b = ph.steps[i];
+      if (compareIds(b.id, a.id) < 0) problems.push({ line: b.line + 1, id: b.id, message: `step id ${b.id} comes after ${a.id}; step ids must be in ascending order within a phase` });
+    }
+  }
+
+  for (const i of proseLineIndexes(parsed.lines)) {
+    const text = parsed.lines[i].replace(INLINE_CODE_RE, "");
+    for (const p of TEMPLATE_PLACEHOLDERS) {
+      if (text.includes(p)) problems.push({ line: i + 1, id: null, message: `template placeholder "${p}" is still in the plan; /autoclaude:plan replaces it with the real content` });
+    }
+  }
+  return problems.sort((a, b) => a.line - b.line);
 }
 
 export function formatLint(problems) {

@@ -1,6 +1,6 @@
 {
   "name": "autoclaude",
-  "version": "0.9.0",
+  "version": "0.9.1",
   "private": true,
   "description": "AutoClaude plugin runtime. Node built-ins only: no dependencies, ever.",
   "type": "module",

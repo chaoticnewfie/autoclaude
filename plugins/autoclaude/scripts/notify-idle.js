@@ -6,7 +6,8 @@
 //     PermissionRequest hook should have answered it and something is off.
 //   - idle_prompt alone does not page: the supervisor fixes that case within minutes, and a page
 //     for it would be a false alarm (success criterion "Quiet").
-// Silent when no run is active and for nested checker runs. Never throws.
+// Silent when no run is active, for nested checker runs, and for a person's own session in the
+// project while a supervised run is going (only the builder's prompts matter here). Never throws.
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -26,6 +27,8 @@ async function main() {
   if (!root) return;
   const state = loadState(root);
   if (state.status !== "running") return;
+  const { isBuilderSession } = await import("../lib/builder.js");
+  if (!isBuilderSession(root)) return;
   const { writeJsonAtomic, readJson, appendLine } = await import("../lib/fsatomic.js");
   const p = projectPaths(root);
   const type = input.notification_type || "unknown";

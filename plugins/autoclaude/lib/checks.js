@@ -5,6 +5,8 @@
 import { runCommand } from "./proc.js";
 
 export const TAIL_LINES = 150;
+// A check with no timeoutSec in the config gets this one, so a hung command cannot hold the gate.
+export const DEFAULT_CHECK_TIMEOUT_SEC = 900;
 
 // The last n lines of a string, joined with "\n". CRLF is normalised and trailing newlines
 // do not count as lines, so a tail never ends with an empty line.
@@ -14,7 +16,7 @@ export function tailLines(text, n = TAIL_LINES) {
   return clean.split("\n").slice(-n).join("\n");
 }
 
-// Runs `checks` ({ name, command, timeoutSec, needsDevServer? }) in order and stops at the
+// Runs `checks` ({ name, command, timeoutSec?, needsDevServer? }) in order and stops at the
 // first failure. Resolves to { ok, results, failed }: results in the original order (checks
 // after the failure are included with skipped: true), failed is the failing result or null.
 // Never throws for a failing command; a spawn error becomes a failed result with a reason.
@@ -40,7 +42,7 @@ export async function runChecks(checks, options = {}) {
 
 // Runs one check through the shell with its timeout. Resolves to a result, never rejects.
 async function runOne(check, { cwd, env }) {
-  const timeoutSec = Number(check.timeoutSec) > 0 ? Number(check.timeoutSec) : 0;
+  const timeoutSec = Number(check.timeoutSec) > 0 ? Number(check.timeoutSec) : DEFAULT_CHECK_TIMEOUT_SEC;
   let r;
   try {
     r = await runCommand(check.command, { cwd, env, timeoutMs: timeoutSec * 1000 });

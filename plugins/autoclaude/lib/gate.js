@@ -3,7 +3,8 @@
 // without parsing stdout. Every side effect goes through the libs; nothing here is Windows-specific.
 import fs from "node:fs";
 import path from "node:path";
-import { findProjectRoot, projectPaths } from "./paths.js";
+import { findProjectRoot, projectPaths, pluginRoot } from "./paths.js";
+import { isBuilderSession } from "./builder.js";
 import { loadState, saveState, STATUS } from "./state.js";
 import { loadConfig } from "./config.js";
 import { parsePlan, lintPlan, stepById, nextStep, firstUnfinished, isPhaseEnd, setMarker, stepText, progress, planSlug, MARKERS } from "./plan.js";
@@ -28,10 +29,24 @@ export function cliCommand(env = process.env) {
   const dirs = (env.PATH || env.Path || "").split(path.delimiter);
   const hasShim = dirs.some((d) => d && fs.existsSync(path.join(d, "autoclaude")));
   if (hasShim) return "autoclaude";
-  return `node "${path.resolve(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1")), "..", "bin", "autoclaude.js").replace(/\\/g, "/")}"`;
+  // pluginRoot() goes through fileURLToPath: a URL pathname would print %20 for a space.
+  return `node "${path.join(pluginRoot(), "bin", "autoclaude.js").replace(/\\/g, "/")}"`;
 }
 
 function nowIso(deps) { return (deps.now ? deps.now() : new Date()).toISOString(); }
+
+// Why a configured check did not run, in words the builder can act on. The usual case is a
+// needsDevServer check in a project with no dev server set up, which the builder cannot fix by
+// editing the (read-only) config.
+export function notRunReason(result, config, cli = "autoclaude", step = null) {
+  const why = result.reason || "no reason recorded";
+  const ds = config.devServer || {};
+  const needs = (config.checks || []).some((c) => c.name === result.name && c.needsDevServer);
+  if (needs && !(ds.command && ds.url)) {
+    return `it needs the dev server (needsDevServer), but devServer.command and devServer.url are not both set in autoclaude.config.json, which is read-only during a run. If the step cannot pass without it, run \`${cli} blocked ${step ? step.id : "<step>"} "<what the check needs>"\``;
+  }
+  return why;
+}
 
 // Non-blocking security findings, one row each in the security findings file (the template's
 // table: Date | Severity | File | Issue | Fix | Status), committed with the step.
@@ -94,6 +109,12 @@ function allow(events) {
   return { decision: "allow", reason: null, events };
 }
 
+// The state as it is on disk now, when the owner paused it while this gate was verifying.
+function pausedMeanwhile(root) {
+  const now = loadState(root);
+  return now.status === STATUS.paused ? now : null;
+}
+
 export async function runGate(input, deps = {}) {
   const events = [];
   const ev = (type, detail = {}) => events.push({ type, ...detail });
@@ -105,6 +126,8 @@ export async function runGate(input, deps = {}) {
   if (!root) { ev("no-project"); return allow(events); }
   const state = loadState(root);
   if (state.status !== STATUS.running) { ev("not-running", { status: state.status }); return allow(events); }
+  // A person's own session in the project while a supervised run is going stops normally.
+  if (!isBuilderSession(root, env)) { ev("not-builder"); return allow(events); }
 
   const cfgLoad = loadConfig(root);
   if (cfgLoad.errors.length) { ev("config-error"); logLine(root, `config errors, allowing stop: ${JSON.stringify(cfgLoad.errors)}`); return allow(events); }
@@ -209,8 +232,12 @@ export async function runGate(input, deps = {}) {
   let checkResults = null;
   if (!failure) {
     checkResults = await runChecks(config.checks, { cwd: root, env, devServerReady });
-    for (const r of checkResults.results) if (r.ran) sections.push({ title: `Check "${r.name}": ${r.code === 0 && !r.timedOut ? "passed" : "FAILED"}`, body: `\`${r.command}\` in ${Math.round(r.durationMs / 1000)} s${r.code === 0 && !r.timedOut ? "" : `\n\n${checkFailureSection(r).body}`}` });
-    if (!checkResults.ok) failure = `check "${checkResults.failed.name}" failed`;
+    for (const r of checkResults.results) {
+      if (r.ran) sections.push({ title: `Check "${r.name}": ${r.code === 0 && !r.timedOut ? "passed" : "FAILED"}`, body: `\`${r.command}\` in ${Math.round(r.durationMs / 1000)} s${r.code === 0 && !r.timedOut ? "" : `\n\n${checkFailureSection(r).body}`}` });
+      else if (!r.skipped) sections.push({ title: `Check "${r.name}": NOT RUN`, body: `\`${r.command}\` did not run: ${notRunReason(r, config, cli, step)}.` });
+    }
+    const f = checkResults.failed;
+    if (f) failure = f.ran ? `check "${f.name}" failed` : `check "${f.name}" did not run: ${notRunReason(f, config, cli, step)}`;
   }
 
   const followUps = [];
@@ -275,9 +302,16 @@ export async function runGate(input, deps = {}) {
       await say({ title: `AutoClaude paused: ${step.id} failed ${attempt} times`, message: `${failure}\nReport: ${report.relPath}\nFix it or adjust the plan, then \`${cli} resume\`.`, priority: "high" });
       return allow(events);
     }
+    const meanwhile = pausedMeanwhile(root);
+    if (meanwhile) {
+      saveState(root, { ...state, attempts, status: STATUS.paused, pauseReason: meanwhile.pauseReason || "review", haltSession: !!meanwhile.haltSession });
+      stopDevServer({ root });
+      ev("paused", { reason: "owner", during: "verification" });
+      return allow(events);
+    }
     const owner = ownerInput(state, config);
     saveState(root, owner.mark({ ...state, attempts }));
-    const failingSections = sections.filter((s) => /FAILED|failed/.test(s.title));
+    const failingSections = sections.filter((s) => /FAILED|failed|NOT RUN/.test(s.title));
     return block(owner.text + summarize({ headline: `${step.id} attempt ${attempt}/${config.retries.maxAttemptsPerStep} failed: ${failure}. Fix the causes, then run \`${cli} ready ${step.id}\` again.`, sections: failingSections, reportPath: report.relPath, maxChars: MAX_REASON - owner.text.length }), events);
   }
 
@@ -324,6 +358,15 @@ export async function runGate(input, deps = {}) {
     ev("paused", { reason: "commit-failed" });
     const why = commitError.split(/\r?\n/)[0].slice(0, 300);
     await say({ title: `AutoClaude paused: ${step.id} passed but was not committed`, message: `git said: ${why}\nThe work is safe in the working tree. Fix git on this machine (is it on PATH where the run was started?), then \`${cli} resume\`, which commits it first.`, priority: "high" });
+    return allow(events);
+  }
+  // The owner paused (`pause --now`) while this verification ran. The step passed and is
+  // committed, but the run stays paused: saving `base` would have set it back to running.
+  const meanwhile = next ? pausedMeanwhile(root) : null;
+  if (meanwhile) {
+    saveState(root, { ...base, currentStep: next.id, status: STATUS.paused, pauseReason: meanwhile.pauseReason || "review", haltSession: !!meanwhile.haltSession, pauseRequested: false, stepStartedAt: null });
+    stopDevServer({ root });
+    ev("paused", { reason: "owner", during: "verification" });
     return allow(events);
   }
   if (!next) return await complete(root, base, config, parsed, ev, events, say, deps);

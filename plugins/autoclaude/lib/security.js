@@ -147,13 +147,42 @@ function fill(template, values) {
   return template.replace(/\{\{([A-Z_]+)\}\}/g, (m, k) => (Object.prototype.hasOwnProperty.call(values, k) ? String(values[k]) : m));
 }
 
-export function buildSecurityPrompt({ template, step, parsed, base, diff, root }) {
+export const CONSTRAINTS_MAX_CHARS = 6000;
+const CONSTRAINTS_CUT = "\n[... cut here; Read the rest of this section in the plan ...]";
+
+// The body of the plan's "## Constraints & decisions" section, up to the next "## " heading (its
+// "###" subsections included, headings inside code fences ignored), at most maxChars long. The
+// reviewer needs it to tell the owner's deliberate choices (no login, 127.0.0.1 only) from
+// mistakes; without it such a choice failed every attempt as a high finding.
+export function constraintsSection(planText, maxChars = CONSTRAINTS_MAX_CHARS) {
+  const lines = String(planText || "").replace(/\r\n?/g, "\n").split("\n");
+  const start = lines.findIndex((l) => /^##\s+Constraints\s*(?:&|and)\s*decisions\b/i.test(l));
+  if (start < 0) return "";
+  let end = lines.length;
+  let fence = null;
+  for (let i = start + 1; i < lines.length; i++) {
+    const m = /^\s*(```|~~~)/.exec(lines[i]);
+    if (m) { fence = fence === null ? m[1] : fence === m[1] ? null : fence; continue; }
+    if (fence === null && /^##\s/.test(lines[i])) { end = i; break; }
+  }
+  const text = lines.slice(start + 1, end).join("\n").trim();
+  if (text.length <= maxChars) return text;
+  const budget = Math.max(0, maxChars - CONSTRAINTS_CUT.length);
+  const cut = text.lastIndexOf("\n", budget);
+  return text.slice(0, cut > 0 ? cut : budget).replace(/\s+$/, "") + CONSTRAINTS_CUT;
+}
+
+export function buildSecurityPrompt({ template, step, parsed, base, diff, root, planText = null, planFile = "PLAN.md" }) {
+  const text = planText !== null ? planText : parsed && Array.isArray(parsed.lines) ? parsed.lines.join("\n") : "";
+  const constraints = constraintsSection(text);
   return fill(template, {
     STEP_ID: step.id,
     STEP_TEXT: stepText(parsed, step),
     BASE: base || "HEAD",
     DIFF: diff,
-    PROJECT_ROOT: String(root).replace(/\\/g, "/")
+    PROJECT_ROOT: String(root).replace(/\\/g, "/"),
+    PLAN_FILE: planFile,
+    CONSTRAINTS: constraints || "(The plan has no \"Constraints & decisions\" section.)"
   });
 }
 
@@ -181,7 +210,7 @@ export async function runSecurityReview({ root, config, step, parsed, state = nu
   const base = await securityBase(root, state, env);
   const diff = await reviewDiff(root, base, env);
   const template = readText(path.join(pluginRoot(), "prompts", "security.md"), "");
-  const prompt = buildSecurityPrompt({ template, step, parsed, base, diff, root });
+  const prompt = buildSecurityPrompt({ template, step, parsed, base, diff, root, planFile: config.plan });
   // The reviewer works inside its report folder; --add-dir keeps the project readable.
   const args = buildArgs({ model: s.model, maxTurns: MAX_TURNS, schema: SECURITY_SCHEMA, mcpConfig: null, allowedTools: SECURITY_TOOLS, extraArgs: ["--add-dir", root] });
   const before = await untrackedSet(root, env);

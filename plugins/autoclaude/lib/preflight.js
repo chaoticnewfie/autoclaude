@@ -7,7 +7,7 @@ import os from "node:os";
 import path from "node:path";
 import { readJson, readText } from "./fsatomic.js";
 import { claudeUserConfigFile, homeDir, isWindows, trustKeyFor } from "./paths.js";
-import { parsePlan, lintPlan, firstUnfinished } from "./plan.js";
+import { parsePlan, lintPlan, firstUnfinished, MARKERS } from "./plan.js";
 import { findOnPath } from "./proc.js";
 import { claudeBinary } from "./headless.js";
 import { readUsage } from "./usage.js";
@@ -41,18 +41,19 @@ export function checkRunnable(command, root, env = process.env) {
   return { ok: true };
 }
 
-export async function preflight(project, { env = process.env, devServer = true, userConfigFile = claudeUserConfigFile(), now = Date.now(), skip = [] } = {}) {
+export async function preflight(project, { env = process.env, devServer = true, userConfigFile = claudeUserConfigFile(), now = Date.now(), skip = [], platform = process.platform } = {}) {
   const { root, config } = project;
   const items = [];
   const add = (name, status, detail = "") => { if (!skip.includes(name)) items.push({ name, status, detail }); };
 
   // Plan
   const planText = readText(path.join(root, config.plan), null);
+  let next = null;
   if (planText === null) add("plan", "fail", `${config.plan} not found`);
   else {
     const parsed = parsePlan(planText);
     const problems = lintPlan(parsed);
-    const next = firstUnfinished(parsed);
+    next = firstUnfinished(parsed);
     if (problems.length) add("plan", "fail", `${problems.length} lint problem(s); run \`autoclaude lint-plan\``);
     else if (!next) add("plan", "fail", "every step is already verified");
     else add("plan", "ok", `${parsed.steps.length} steps, next ${next.id}`);
@@ -75,6 +76,12 @@ export async function preflight(project, { env = process.env, devServer = true, 
   add("node", findOnPath("node", env) ? "ok" : "fail", findOnPath("node", env) || "`node` is not on PATH; the hooks need it");
   const claude = claudeBinary(env);
   add("claude", claude ? "ok" : "fail", claude || "Claude Code is not installed natively (Windows: irm https://claude.ai/install.ps1 | iex)");
+  // Linux and macOS: without tmux the supervisor falls back to a background process, and the
+  // interactive builder session it starts then has no terminal to run in.
+  if (platform !== "win32") {
+    const tmux = findOnPath("tmux", env);
+    add("tmux", tmux ? "ok" : "fail", tmux || "`tmux` is not on PATH; on Linux and macOS the run needs it to give the builder session a terminal (apt install tmux, or brew install tmux)");
+  }
 
   // First-run onboarding and workspace trust (read-only, D28)
   let cfg = null;
@@ -90,29 +97,40 @@ export async function preflight(project, { env = process.env, devServer = true, 
     add("trust", "fail", `Claude Code has not been opened here yet. Run \`claude\` once in ${top}, pick a theme if asked, accept the trust dialog, then \`/exit\`.`);
   } else add("trust", "ok", "onboarding done and the folder is trusted");
 
-  // Checks
-  const bad = config.checks.map((c) => ({ c, r: checkRunnable(c.command, root, env) })).filter((x) => !x.r.ok);
+  // Checks. One with needsDevServer fails every step when no dev server is configured.
+  const hasDevServer = Boolean(config.devServer.command && config.devServer.url);
+  const bad = [];
+  for (const c of config.checks) {
+    const r = checkRunnable(c.command, root, env);
+    if (!r.ok) bad.push(`${c.name}: ${r.detail}`);
+    if (c.needsDevServer && !hasDevServer) bad.push(`${c.name}: needsDevServer is true but devServer.command and devServer.url are not both set, so this check would fail every step`);
+  }
   if (config.checks.length === 0) add("checks", "warn", "no checks configured; only the browser tester and the reviewers verify steps");
-  else if (bad.length) add("checks", "fail", bad.map((x) => `${x.c.name}: ${x.r.detail}`).join("; "));
+  else if (bad.length) add("checks", "fail", bad.join("; "));
   else add("checks", "ok", config.checks.map((c) => c.name).join(", "));
 
-  // Browser tester needs: a dev server and Playwright's Chromium, when any step has a UI
-  const uiSteps = project.parsed ? project.parsed.steps.some((s) => !s.tags.includes("no-ui")) : false;
-  const needsBrowser = config.tester.enabled && uiSteps;
-  if (needsBrowser) {
+  // Browser tester. The gate opens a browser only with the tester on, a dev server configured and
+  // a step left that has a UI, so Playwright's Chromium is needed only then.
+  const uiLeft = project.parsed ? project.parsed.steps.some((s) => s.marker !== MARKERS.done && !s.tags.includes("no-ui")) : false;
+  const testerWanted = config.tester.enabled && uiLeft;
+  if (testerWanted && hasDevServer) {
     const dir = playwrightBrowsersDir(env);
     let found = false;
     try { found = fs.readdirSync(dir).some((d) => /^chromium/i.test(d)); } catch {}
     add("playwright", found ? "ok" : "fail", found ? dir : `no Chromium under ${dir}; run \`npx playwright install chromium\``);
   }
-  if (config.devServer.command && config.devServer.url) {
+  if (hasDevServer) {
     if (devServer) {
       const before = devServerInfo({ root });
       const ds = await restartDevServer(config.devServer, { root, env });
       if (!before) stopDevServer({ root });
-      add("dev server", ds.ok ? "ok" : "fail", ds.ok ? `answers at ${config.devServer.url}${ds.reused ? " (already running)" : ""}` : `${ds.error}`);
+      if (ds.ok) add("dev server", "ok", `answers at ${config.devServer.url}${ds.reused ? " (already running)" : ""}`);
+      // A new project's first steps are often the ones that write the server, so it cannot answer
+      // yet. That is fine while the next step needs no browser.
+      else if (next && next.tags.includes("no-ui")) add("dev server", "warn", `not running yet (${ds.error}); the next step, ${next.id}, is no-ui. The gate starts the dev server for each step that needs it and fails that step if it cannot`);
+      else add("dev server", "fail", `${ds.error}`);
     }
-  } else if (needsBrowser) {
+  } else if (testerWanted) {
     add("dev server", "warn", "no devServer configured, so UI steps will not be checked in a browser");
   }
 

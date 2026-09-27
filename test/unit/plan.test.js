@@ -29,6 +29,7 @@ Some prose between steps that should be ignored.
 - [x] **S2.1** Products list
   - Accept: /products lists 3 seeded items
     - a nested bullet under the accept line
+  - Test: test/products.test.js
   - Tags: no-ui
 - [!] **S2.2** Product page
   - Accept: /products/1 shows the name
@@ -62,7 +63,7 @@ test("nextStep, firstUnfinished, isPhaseEnd and stepText", () => {
   assert.equal(isPhaseEnd(p, "S2.2"), true);
   assert.equal(isPhaseEnd(p, "nope"), false);
   const text = stepText(p, stepById(p, "S2.1"));
-  assert.equal(text.split("\n").length, 4);
+  assert.equal(text.split("\n").length, 5);
   assert.match(text, /a nested bullet under the accept line/);
   assert.match(text, /Tags: no-ui/);
   assert.doesNotMatch(text, /S2\.2/);
@@ -122,6 +123,76 @@ test("lint: duplicate ids, missing Accept, unknown marker, step outside a phase,
   expect(/S2\.9: Depends refers to unknown step S7\.7/);
   assert.equal(problems.length, 6);
   assert.match(formatLint(problems), /line 3 \(S0\.1\)/);
+});
+
+test("lint: tags, no-ui without Test, id and phase order, repeated and empty phases, placeholders, TBD and TODO", () => {
+  const bad = `# Rules plan
+
+## Goal
+
+Not written yet.
+
+\`\`\`
+Not written yet. (inside a fence: fine)
+- [ ] **S9.1** not a step either
+\`\`\`
+
+Mentioning \`Nothing decided yet.\` in inline code is fine.
+
+## Phase 1: One
+- [ ] **S1.2** Second first
+  - Accept: a
+  - Tags: UI, fancy
+- [ ] **S1.1** First second
+  - Accept: b
+  - Tags: ui, no-ui
+- [ ] **S1.3** Pure logic
+  - Accept: c
+  - Tags: no-ui, db
+- [ ] **S1.10** Ten after three is fine
+  - Accept: d
+  - Test: test/ten.test.js
+  - Tags: no-ui, security
+
+## Phase 3: Three
+- [ ] **S3.1** Pick a library TBD
+  - Accept: works with the TODO list app, see \`TODO\` and TODO.md
+  - Test: test/three.test.js
+  - Tags: no-ui
+- [ ] **S3.2** Fine
+  - Accept: the page still says TODO somewhere
+
+## Phase 2: Two, out of order
+- [ ] **S2.1** Fine
+  - Accept: e
+
+## Phase 3: Three again
+
+### Constraints
+
+Nothing decided yet.
+`;
+  const problems = lintPlan(parsePlan(bad));
+  const messages = problems.map((p) => `${p.line} ${p.id}: ${p.message}`);
+  const expect = (re) => assert.ok(messages.some((m) => re.test(m)), `expected ${re}, got:\n${messages.join("\n")}`);
+  expect(/^5 null: template placeholder "Not written yet\." is still in the plan/);
+  expect(/^45 null: template placeholder "Nothing decided yet\." is still in the plan/);
+  expect(/S1\.2: unknown tag "fancy" \(use ui, no-ui, security or db\)/);
+  expect(/S1\.1: step id S1\.1 comes after S1\.2; step ids must be in ascending order within a phase/);
+  expect(/S1\.1: step is tagged both ui and no-ui/);
+  expect(/S1\.1: a no-ui step needs a `- Test:` line/);
+  expect(/S1\.3: a no-ui step needs a `- Test:` line/);
+  expect(/S3\.1: step still says TBD/);
+  expect(/S3\.2: step still says TODO/);
+  expect(/null: Phase 2 comes after Phase 3; phases must be in ascending order/);
+  expect(/null: phase number 3 is used twice \(first at line 29\)/);
+  expect(/null: Phase 3 has no steps/);
+  assert.equal(problems.length, 12, messages.join("\n"));
+  assert.deepEqual(problems.map((p) => p.line), [...problems.map((p) => p.line)].sort((a, b) => a - b), "problems come in line order");
+
+  // "todo" in a todo app, a TODO.md file name and TODO inside inline code are not markers.
+  const fine = "# T plan\n\n## Phase 1: A\n- [ ] **S1.1** Edit a todo's text\n  - Accept: `TODO` stays, TODO.md is read\n  - Test: test/todo.test.js\n  - Tags: no-ui, db\n";
+  assert.deepEqual(lintPlan(parsePlan(fine)), []);
 });
 
 test("a plan with no steps lints as unusable, and headings end a step", () => {

@@ -1,9 +1,12 @@
 // PostToolUse hook (async): while a run is active, count tool calls so the gate and the
-// supervisor can tell "working" from "stalled". Silent and instant otherwise.
+// supervisor can tell "working" from "stalled". Only the builder's tool calls count: a person's
+// own session in the project would otherwise make a stalled run look busy. Silent and instant
+// otherwise.
 import fs from "node:fs";
 import { findProjectRoot } from "../lib/paths.js";
 import { loadState, STATUS } from "../lib/state.js";
 import { bumpHeartbeat } from "../lib/protocol.js";
+import { isBuilderSession } from "../lib/builder.js";
 
 try {
   if (process.env.AUTOCLAUDE_ROLE) throw 0; // nested tester or reviewer: not builder progress
@@ -12,5 +15,5 @@ try {
   let input = {};
   try { input = JSON.parse(raw); } catch {}
   const root = findProjectRoot(input.cwd || process.cwd());
-  if (root && loadState(root).status === STATUS.running) bumpHeartbeat(root);
+  if (root && loadState(root).status === STATUS.running && isBuilderSession(root)) bumpHeartbeat(root);
 } catch {}

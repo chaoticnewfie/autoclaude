@@ -14,5 +14,8 @@ Description=AutoClaude backstop watchdog (relaunches a dead supervisor)
 
 [Service]
 Type=oneshot
+# A supervisor the pass starts must outlive it: by default systemd kills every process left in
+# the unit's cgroup when the oneshot pass exits.
+KillMode=process
 Environment="PATH={{PATH}}"
 ExecStart={{NODE}} {{CLI}} watchdog

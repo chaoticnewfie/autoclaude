@@ -47,10 +47,10 @@ export function templatesDir() {
   return path.join(pluginRoot(), "templates", "watchdog");
 }
 
-// "C:\Code\My App" -> "my-app". The supervisor window is titled ac-<slug>.
+// "C:\Code\My App" -> "my-app". The supervisor window (or tmux session) is titled ac-<slug>, and
+// `autoclaude run` and the supervisor build that title the same way, so the names must match.
 export function projectSlug(root) {
-  const slug = path.basename(path.resolve(String(root))).toLowerCase().replace(/[^a-z0-9]/g, "-");
-  return slug || "project";
+  return path.basename(path.resolve(String(root))).toLowerCase().replace(/[^a-z0-9]+/g, "-");
 }
 
 function positivePid(v) {
@@ -411,7 +411,8 @@ export function watchdogStatus({ run = defaultRunner, env = process.env, platfor
   if (platform !== "win32") {
     if (!which("systemctl", env)) {
       const r = run("crontab", ["-l"]);
-      const installed = r.code === 0 && /autoclaude\.js['"]?\s+watchdog/.test(str(r.stdout));
+      // The line runs the launcher (D42); an older install ran the plugin's CLI directly.
+      const installed = r.code === 0 && /autoclaude(?:\.js|-launch\.mjs)['"]?\s+watchdog/.test(str(r.stdout));
       return { ...none, installed, status: installed ? "cron" : null };
     }
     const t = parseKeyValues(run("systemctl", ["--user", "show", TIMER_NAME, "--property=LoadState,ActiveState,NextElapseUSecRealtime,LastTriggerUSec"]).stdout);

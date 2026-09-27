@@ -3,7 +3,9 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { initProject, detectProject, formatInitReport, playwrightMcpConfig } from "../../plugins/autoclaude/lib/init.js";
+import { spawnSync } from "node:child_process";
+import { initProject, detectProject, formatInitReport, playwrightMcpConfig, existingProjectSignals } from "../../plugins/autoclaude/lib/init.js";
+import { gitEnv } from "../fixtures/prepare.js";
 
 const tmp = (p) => fs.mkdtempSync(path.join(os.tmpdir(), p));
 
@@ -93,6 +95,73 @@ test("initProject on an existing project keeps its files, appends to .gitignore,
     assert.equal(cfg.devServer.url, "http://127.0.0.1:3005");
     assert.deepEqual(cfg.checks.map((c) => c.name), ["unit"]);
     assert.match(formatInitReport(r), /already had code or a plan/);
+  });
+});
+
+test("detectProject adds no e2e check without a dev server, and says why", () => {
+  const root = tmp("autoclaude-init-noe2e-");
+  fs.writeFileSync(path.join(root, "package.json"), JSON.stringify({ scripts: { test: "vitest run", e2e: "playwright test" } }));
+  const d = detectProject(root);
+  assert.equal(d.devServer.command, null);
+  assert.deepEqual(d.checks.map((c) => c.name), ["unit"]);
+  assert.ok(d.notes.some((n) => /found "npm run e2e" but no dev server was detected, so it is not a check yet/.test(n)), d.notes.join("\n"));
+});
+
+test("existingProjectSignals: agent docs, plan-like markdown and git history count; a bare folder does not", () => {
+  const env = gitEnv();
+  const bare = tmp("autoclaude-init-sig-");
+  assert.deepEqual(existingProjectSignals(bare, env), []);
+  for (const f of ["CLAUDE.md", "AGENTS.md", "ROADMAP.md", "todo.md", "NEXT.md"]) {
+    const root = tmp("autoclaude-init-sig-");
+    fs.writeFileSync(path.join(root, f), "x\n");
+    assert.deepEqual(existingProjectSignals(root, env), [f]);
+  }
+  const docs = tmp("autoclaude-init-sig-");
+  fs.mkdirSync(path.join(docs, "docs"));
+  fs.writeFileSync(path.join(docs, "docs", "DECISIONS.md"), "x\n");
+  assert.deepEqual(existingProjectSignals(docs, env), []);
+  fs.writeFileSync(path.join(docs, "docs", "plan-v2.md"), "x\n");
+  assert.deepEqual(existingProjectSignals(docs, env), ["docs/plan-v2.md"]);
+
+  // A repository counts once a commit holds files, even when nothing else is there.
+  const repo = tmp("autoclaude-init-sig-git-");
+  const git = (...args) => spawnSync("git", args, { cwd: repo, env, encoding: "utf8" });
+  git("init", "-q");
+  assert.deepEqual(existingProjectSignals(repo, env), [], "no commit yet");
+  git("config", "user.name", "T");
+  git("config", "user.email", "t@localhost");
+  fs.mkdirSync(path.join(repo, "lib"));
+  fs.writeFileSync(path.join(repo, "lib", "main.py"), "print(1)\n");
+  git("add", "-A");
+  git("commit", "-q", "-m", "first");
+  fs.rmSync(path.join(repo, "lib"), { recursive: true });
+  assert.deepEqual(existingProjectSignals(repo, env), ["git history"]);
+  // A new subfolder of a repository is still a new project.
+  const sub = path.join(repo, "newapp");
+  fs.mkdirSync(sub);
+  assert.deepEqual(existingProjectSignals(sub, env), []);
+});
+
+test("init keeps the owner's CLAUDE.md and says /autoclaude:plan adds an AutoClaude section to it", () => {
+  withConfigDir(() => {
+    const template = fakeTemplate();
+    const root = tmp("autoclaude-init-own-");
+    fs.writeFileSync(path.join(root, "CLAUDE.md"), "# House rules\n\nUse tabs.\n");
+    const r = initProject(root, { template, statusline: false });
+    assert.equal(r.existingProject, true);
+    assert.deepEqual(r.existingSignals, ["CLAUDE.md"]);
+    assert.ok(r.skipped.includes("CLAUDE.md"));
+    assert.equal(r.keptOwnClaudeMd, true);
+    const text = formatInitReport(r);
+    assert.match(text, /already had its own CLAUDE\.md, which init kept as it was: \/autoclaude:plan reviews the project's own/);
+    assert.match(text, /adds an AutoClaude section to that file/);
+    assert.doesNotMatch(text, /"planning for an unattended run" rules in CLAUDE\.md/);
+
+    // A CLAUDE.md that already has the AutoClaude rules gets the usual review hint.
+    fs.writeFileSync(path.join(root, "CLAUDE.md"), "# House rules\n\n## During an AutoClaude run\n");
+    const again = initProject(root, { template, statusline: false });
+    assert.equal(again.keptOwnClaudeMd, false);
+    assert.match(formatInitReport(again), /already had code or a plan/);
   });
 });
 

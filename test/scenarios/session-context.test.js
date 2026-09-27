@@ -83,3 +83,29 @@ test("the hook mirrors plugin notify options into the per-machine file, even wit
   const file = path.join(r.configDir, "autoclaude", "notify.json");
   assert.deepEqual(JSON.parse(fs.readFileSync(file, "utf8")), { discord_webhook: "https://discord.com/api/webhooks/9/xyz", channel: "discord" });
 });
+
+test("the mirror only fills keys notify.json lacks: a value set with notify-setup is never overwritten", () => {
+  const root = project();
+  const configDir = fs.mkdtempSync(path.join(os.tmpdir(), "autoclaude-ctx-cfg-"));
+  const file = path.join(configDir, "autoclaude", "notify.json");
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, JSON.stringify({ channel: "ntfy", ntfy_url: "https://ntfy.example/set-by-owner", discord_webhook: "" }));
+  const r = runHook(root, { CLAUDE_PLUGIN_OPTION_NOTIFY_CHANNEL: "discord", CLAUDE_PLUGIN_OPTION_NTFY_URL: "https://ntfy.example/from-userconfig", CLAUDE_PLUGIN_OPTION_DISCORD_WEBHOOK: "https://discord.com/api/webhooks/9/xyz" }, configDir);
+  assert.equal(r.code, 0, r.stderr);
+  assert.deepEqual(JSON.parse(fs.readFileSync(file, "utf8")), { channel: "ntfy", ntfy_url: "https://ntfy.example/set-by-owner", discord_webhook: "https://discord.com/api/webhooks/9/xyz" }, "an empty value counts as missing");
+  const before = fs.readFileSync(file, "utf8");
+  runHook(root, { CLAUDE_PLUGIN_OPTION_NOTIFY_CHANNEL: "stdout" }, configDir);
+  assert.equal(fs.readFileSync(file, "utf8"), before, "nothing missing: the file is not rewritten");
+});
+
+test("under a live supervisor, a session without AUTOCLAUDE_BUILDER gets nothing and is not recorded as the run's session", () => {
+  const root = project();
+  saveState(root, { ...defaultState(), status: "running", currentStep: "S1.2" });
+  fs.writeFileSync(path.join(root, ".autoclaude", "supervisor.pid"), String(process.pid));
+  const other = runHook(root, { AUTOCLAUDE_BUILDER: "" });
+  assert.equal(other.stdout, "");
+  assert.equal(JSON.parse(fs.readFileSync(path.join(root, ".autoclaude", "state.json"), "utf8")).sessionId, null);
+  const builder = runHook(root, { AUTOCLAUDE_BUILDER: "1" });
+  assert.match(JSON.parse(builder.stdout).hookSpecificOutput.additionalContext, /AutoClaude run in progress/);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(root, ".autoclaude", "state.json"), "utf8")).sessionId, "sess-1");
+});

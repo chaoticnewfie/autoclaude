@@ -19,9 +19,9 @@ file the supervisor polls on a share.
 
 **What.** `autoclaude run` puts the supervisor in a tmux session when tmux exists, so `tmux attach`
 works there.
-**Why it waits.** Windows first. The supervisor design does not need tmux anywhere.
-**Trigger.** Someone runs it on Linux and wants to watch from another terminal.
-**Path.** Detect `tmux` on PATH, wrap the same command; everything else unchanged.
+**Status (2026-09-27).** Built in Phase 6, and since D43 tmux is required on Linux and macOS:
+the background fallback gave the interactive builder no terminal. The Linux and macOS paths are
+unit-tested only; the first run on either is the trigger to verify them live.
 
 ## 3. A real pseudo-terminal (node-pty)
 
@@ -119,3 +119,14 @@ one step for hours without calling `ready` is not caught, and has not been seen 
 builder to hand in or block, then a pause with a high alert.
 **No rework.** The state already records `stepStartedAt`, and the supervisor's `decide` gains one
 rule.
+
+## 16. Protected paths (`guard.protect`)
+
+**What.** A list of project files the run may not edit (an owner's own roadmap, deploy scripts),
+enforced by the tool guard for Edit, Write and shell writes, like the plan and the config are.
+**Why it waits.** The plan skill now writes such files into the project's CLAUDE.md run section
+and the plan's Out of scope, and the builder follows those rules. No run has edited one yet.
+**Trigger.** A run edits a file the owner listed as off limits.
+**Path.** `guard.protect: ["ROADMAP.md", "scripts/deploy.sh"]` in the config; the guard's
+`isProtected` and `writesTo` checks already exist for the plan and config and take a list.
+**No rework.** The guard already has the mechanism; the config gains one key.

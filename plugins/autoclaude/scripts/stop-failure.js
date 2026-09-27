@@ -3,7 +3,8 @@
 // means Claude Code is waiting out a usage limit (the supervisor leaves it alone until the reset),
 // anything else means the session is sitting idle and gets relaunched on the next pass.
 // Nothing here notifies; the supervisor pages only when it cannot recover. The full hook input is
-// logged, because its exact fields are not documented beyond the matcher values.
+// logged, because its exact fields are not documented beyond the matcher values. Only the
+// builder session writes the marker (lib/builder.js).
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -24,6 +25,8 @@ async function main() {
   const { loadState } = await import("../lib/state.js");
   const root = findProjectRoot(input.cwd || process.cwd());
   if (!root || loadState(root).status !== "running") return;
+  const { isBuilderSession } = await import("../lib/builder.js");
+  if (!isBuilderSession(root)) return; // someone else's session: its errors are not the run's
   const { writeJsonAtomic, appendLine } = await import("../lib/fsatomic.js");
   const p = projectPaths(root);
   const type = failureType(input);

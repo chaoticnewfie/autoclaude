@@ -4,7 +4,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
-import { SECURITY_SCHEMA, SECURITY_TOOLS, securityWanted, securityBase, reviewDiff, evaluateSecurity, securitySection, runSecurityReview } from "../../plugins/autoclaude/lib/security.js";
+import { fileURLToPath } from "node:url";
+import { SECURITY_SCHEMA, SECURITY_TOOLS, securityWanted, securityBase, reviewDiff, evaluateSecurity, securitySection, runSecurityReview, constraintsSection, buildSecurityPrompt, CONSTRAINTS_MAX_CHARS } from "../../plugins/autoclaude/lib/security.js";
 import { parsePlan, stepById } from "../../plugins/autoclaude/lib/plan.js";
 import { mergeConfig } from "../../plugins/autoclaude/lib/config.js";
 import { prepareFixture, gitEnv } from "../fixtures/prepare.js";
@@ -242,4 +243,66 @@ test("runSecurityReview: no retry when the gate deadline is too close", async ()
   const { r, calls } = await review([infra("timed out")], { deadlineMs: 1000, now: () => (t += 10) });
   assert.deepEqual([r.status, calls.length], ["infra", 1]);
   assert.match(r.failed, /no time left for a retry/);
+});
+
+const DECIDED = `# Kiosk plan
+
+## Goal
+
+A kiosk.
+
+## Constraints & decisions
+
+- No login: the kiosk is on a trusted LAN and anyone at the screen may use it.
+- The server listens on 127.0.0.1 only.
+
+### Data
+
+- SQLite file in data/.
+
+\`\`\`
+## not a heading inside a fence
+\`\`\`
+
+## Phase 1: Things
+- [ ] **S1.1** List things
+  - Accept: /things lists 3 items
+`;
+
+test("constraintsSection: from the heading to the next ## heading, subsections kept, bounded", () => {
+  const text = constraintsSection(DECIDED);
+  assert.match(text, /^- No login: the kiosk is on a trusted LAN/);
+  assert.match(text, /### Data\n\n- SQLite file in data\//, "### subsections belong to the section");
+  assert.match(text, /## not a heading inside a fence/, "a ## line inside a code fence does not end it");
+  assert.doesNotMatch(text, /Phase 1|Goal/);
+  assert.equal(constraintsSection(PLAN), "", "no section");
+  assert.equal(constraintsSection(DECIDED.replace(/\n/g, "\r\n")).includes("\r"), false, "CRLF plans work");
+  const long = `## Constraints & decisions\n\n${Array.from({ length: 400 }, (_, i) => `- decision ${i} ${"x".repeat(30)}`).join("\n")}\n\n## Phase 1: A\n`;
+  const cut = constraintsSection(long);
+  assert.ok(cut.length <= CONSTRAINTS_MAX_CHARS, `length ${cut.length}`);
+  assert.match(cut, /^- decision 0 /);
+  assert.match(cut, /\[\.\.\. cut here; Read the rest of this section in the plan \.\.\.\]$/);
+});
+
+test("the security prompt shows the plan's Constraints & decisions and says how to treat them", () => {
+  const template = fs.readFileSync(fileURLToPath(new URL("../../plugins/autoclaude/prompts/security.md", import.meta.url)), "utf8");
+  const p = parsePlan(DECIDED);
+  const prompt = buildSecurityPrompt({ template, step: stepById(p, "S1.1"), parsed: p, base: "ac-phase-1", diff: "(diff)", root: "/proj", planFile: "PLAN.md" });
+  assert.match(prompt, /## The owner's decisions \(the "Constraints & decisions" section of PLAN\.md\)\n\n- No login: the kiosk is on a trusted LAN/);
+  assert.match(prompt, /The server listens on 127\.0\.0\.1 only\./);
+  assert.match(prompt, /Decisions recorded here are the owner's choices/);
+  assert.match(prompt, /Report a finding against one only when it is unsafe in a way the decision does not account for, and never rate a documented decision high just for existing\./);
+  assert.ok(prompt.indexOf("owner's decisions") < prompt.indexOf("(diff)"), "the decisions come before the diff");
+  assert.doesNotMatch(prompt, /\{\{[A-Z_]+\}\}/);
+  const none = buildSecurityPrompt({ template, step: S("S1.2"), parsed, base: null, diff: "(diff)", root: "/proj" });
+  assert.match(none, /\(The plan has no "Constraints & decisions" section\.\)/);
+});
+
+test("runSecurityReview passes the fixture plan's decisions to the reviewer", async () => {
+  const root = fixture();
+  const planText = fs.readFileSync(path.join(root, "PLAN.md"), "utf8");
+  const p = parsePlan(planText);
+  const { run, calls } = fakeRun([ok(verdictOf([]))]);
+  await runSecurityReview({ root, config, step: p.steps[0], parsed: p, state: null, env, attempt: 1, run });
+  assert.match(calls[0].prompt, /## The owner's decisions[^\n]*\n\n- Stack: Node 24 built-ins only/);
 });

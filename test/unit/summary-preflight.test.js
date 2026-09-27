@@ -74,17 +74,104 @@ test("preflight on a fixture: every problem is reported, trust is read from the 
   assert.equal(again.git.status, "fail");
   assert.match(formatPreflight(r), /FAIL git: the working tree has 1 uncommitted change/);
   fs.unlinkSync(path.join(root, "stray.txt"));
-  r = await preflight(project, { env, userConfigFile, skip: ["notify", "usage"] });
+  // platform win32: the tmux item (Linux and macOS only) must not depend on the test machine.
+  r = await preflight(project, { env, userConfigFile, skip: ["notify", "usage"], platform: "win32" });
   assert.equal(r.ok, true, formatPreflight(r));
 
   // A shell without git on PATH (seen live: the run window inherited one) fails preflight, even
   // for a run already under way, which skips the repository checks but not the tools.
   const noGit = { ...env, PATH: path.dirname(process.execPath) };
-  r = await preflight(project, { env: noGit, userConfigFile, skip: ["plan", "git", "checks", "playwright", "devserver", "usage", "notify"] });
+  r = await preflight(project, { env: noGit, userConfigFile, skip: ["plan", "git", "checks", "playwright", "dev server", "usage", "notify"] });
   const tools = Object.fromEntries(r.items.map((i) => [i.name, i]));
   assert.equal(r.ok, false);
   assert.equal(tools["git-cli"].status, "fail");
   assert.match(formatPreflight(r), /FAIL git-cli: `git` is not on PATH; the gate commits every verified step/);
   r = await preflight(project, { env: noGit, userConfigFile });
   assert.match(formatPreflight(r), /FAIL git: `git` is not on PATH, so the repository cannot be checked/);
+});
+
+// A scratch project for the item-level preflight tests below. Only the named items are compared.
+function pfProject(plan, config = {}) {
+  const root = tmp("autoclaude-pf-item-");
+  fs.writeFileSync(path.join(root, "PLAN.md"), plan);
+  return { root, config: mergeConfig(config) };
+}
+const QUIET = ["usage", "notify", "trust", "git", "git-cli", "node", "claude"];
+const itemsOf = (r) => Object.fromEntries(r.items.map((i) => [i.name, i]));
+const UI_PLAN = "# P plan\n\n## Phase 1: A\n- [ ] **S1.1** Page\n  - Accept: a\n  - Tags: ui\n";
+const NO_UI_FIRST = "# P plan\n\n## Phase 1: A\n- [ ] **S1.1** Server\n  - Accept: a\n  - Test: test/a.test.js\n  - Tags: no-ui\n- [ ] **S1.2** Page\n  - Accept: b\n  - Tags: ui\n";
+const UI_DONE = "# P plan\n\n## Phase 1: A\n- [x] **S1.1** Page\n  - Accept: a\n  - Tags: ui\n- [ ] **S1.2** Logic\n  - Accept: b\n  - Test: test/b.test.js\n  - Tags: no-ui\n";
+const SERVER = { command: "npm run dev", url: "http://127.0.0.1:4173", healthPath: "/", startTimeoutSec: 5 };
+
+test("preflight needs Chromium only with the tester on, a dev server set and an unfinished UI step", async () => {
+  const browsers = tmp("autoclaude-pf-pw-");
+  const env = gitEnv({ ...process.env, PLAYWRIGHT_BROWSERS_PATH: browsers });
+  const userConfigFile = path.join(tmp("autoclaude-pf-cfg-"), ".claude.json");
+  const run = (project) => preflight(project, { env, userConfigFile, devServer: false, skip: QUIET, platform: "win32" }).then(itemsOf);
+
+  // No dev server: the gate never opens a browser, so Chromium is not required.
+  let items = await run(pfProject(UI_PLAN));
+  assert.equal(items.playwright, undefined);
+  assert.equal(items["dev server"].status, "warn");
+  assert.match(items["dev server"].detail, /no devServer configured, so UI steps will not be checked in a browser/);
+
+  items = await run(pfProject(UI_PLAN, { devServer: SERVER }));
+  assert.equal(items.playwright.status, "fail");
+  assert.match(items.playwright.detail, /no Chromium under .*npx playwright install chromium/);
+  fs.mkdirSync(path.join(browsers, "chromium-1200"));
+  items = await run(pfProject(UI_PLAN, { devServer: SERVER }));
+  assert.equal(items.playwright.status, "ok");
+
+  assert.equal((await run(pfProject(UI_PLAN, { devServer: SERVER, tester: { enabled: false } }))).playwright, undefined, "tester off");
+  assert.equal((await run(pfProject(UI_DONE, { devServer: SERVER }))).playwright, undefined, "the only UI step is already verified");
+});
+
+test("preflight: a dev server that cannot answer is a WARN while the next step is no-ui, a FAIL otherwise", async () => {
+  const env = gitEnv({ ...process.env, PATH: path.dirname(process.execPath) + path.delimiter + (process.env.PATH || "") });
+  const userConfigFile = path.join(tmp("autoclaude-pf-cfg-"), ".claude.json");
+  // A command that exits at once and a port nothing listens on: the server never answers.
+  const dead = { command: `${JSON.stringify(process.execPath)} -e 0`, url: "http://127.0.0.1:9", healthPath: "/", startTimeoutSec: 1 };
+  const skip = [...QUIET, "playwright"];
+
+  let r = await preflight(pfProject(NO_UI_FIRST, { devServer: dead }), { env, userConfigFile, skip, platform: "win32" });
+  const warn = itemsOf(r)["dev server"];
+  assert.equal(warn.status, "warn");
+  assert.match(warn.detail, /^not running yet \(dev server did not answer/);
+  assert.match(warn.detail, /the next step, S1\.1, is no-ui\. The gate starts the dev server for each step that needs it and fails that step if it cannot/);
+  assert.equal(r.ok, true, formatPreflight(r));
+
+  r = await preflight(pfProject(UI_PLAN, { devServer: dead }), { env, userConfigFile, skip, platform: "win32" });
+  assert.equal(itemsOf(r)["dev server"].status, "fail");
+  assert.equal(r.ok, false);
+});
+
+test("preflight: a check that needs the dev server FAILs, by name, when no dev server is configured", async () => {
+  const env = gitEnv(process.env);
+  const userConfigFile = path.join(tmp("autoclaude-pf-cfg-"), ".claude.json");
+  const e2e = { name: "e2e", command: `${JSON.stringify(process.execPath)} -e 0`, needsDevServer: true };
+  const unit = { name: "unit", command: `${JSON.stringify(process.execPath)} -e 0` };
+  let items = itemsOf(await preflight(pfProject(UI_PLAN, { checks: [unit, e2e] }), { env, userConfigFile, devServer: false, skip: QUIET, platform: "win32" }));
+  assert.equal(items.checks.status, "fail");
+  assert.match(items.checks.detail, /^e2e: needsDevServer is true but devServer\.command and devServer\.url are not both set, so this check would fail every step$/);
+  items = itemsOf(await preflight(pfProject(UI_PLAN, { checks: [unit, e2e], devServer: SERVER }), { env, userConfigFile, devServer: false, skip: QUIET, platform: "win32" }));
+  assert.equal(items.checks.status, "ok");
+});
+
+test("preflight on Linux and macOS requires tmux; on Windows there is no tmux item", async () => {
+  const userConfigFile = path.join(tmp("autoclaude-pf-cfg-"), ".claude.json");
+  const project = pfProject(UI_PLAN);
+  const skip = [...QUIET, "plan", "checks", "playwright", "dev server"];
+  const without = tmp("autoclaude-pf-notmux-");
+  let r = await preflight(project, { env: { PATH: without }, userConfigFile, skip, platform: "linux" });
+  assert.equal(itemsOf(r).tmux.status, "fail");
+  assert.match(formatPreflight(r), /FAIL tmux: `tmux` is not on PATH; on Linux and macOS the run needs it/);
+  assert.equal(r.ok, false);
+
+  const withTmux = tmp("autoclaude-pf-tmux-");
+  for (const f of ["tmux", "tmux.exe"]) fs.writeFileSync(path.join(withTmux, f), "");
+  r = await preflight(project, { env: { PATH: withTmux }, userConfigFile, skip, platform: "darwin" });
+  assert.equal(itemsOf(r).tmux.status, "ok");
+
+  r = await preflight(project, { env: { PATH: without }, userConfigFile, skip, platform: "win32" });
+  assert.equal(itemsOf(r).tmux, undefined);
 });

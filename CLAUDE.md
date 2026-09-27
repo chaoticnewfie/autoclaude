@@ -73,6 +73,10 @@ Phase 7 (planner, docs, the blind DB rehearsal, release). Never open the DB proj
 13. **Stop at every CHECKPOINT in `PLAN.md`** and show Scott the demo it describes before starting
     the next phase. A Phase 0 finding that contradicts the plan updates the plan and gets a
     `docs/DECISIONS.md` entry.
+14. **Bump the plugin version with every plugin change.** Claude Code caches a marketplace
+    install by the version in `plugins/autoclaude/.claude-plugin/plugin.json`; a pushed change
+    under the same version never reaches installed copies. Raise it (and
+    `plugins/autoclaude/package.json`) in any commit that changes `plugins/autoclaude/`.
 
 ## Tech stack (fixed, do not deviate without being asked)
 

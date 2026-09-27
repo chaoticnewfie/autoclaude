@@ -3,7 +3,8 @@
 // Never throws and never prints anything else: an unexpected error (including a missing
 // library) is logged to .autoclaude/logs/gate.log and the stop is allowed; the supervisor then
 // notices an idle session and relaunches it. This hook runs in every session on the machine, so
-// the fast path (no run active) must stay silent.
+// the fast path (no run active) must stay silent, and a person's own session opened in the
+// project during a supervised run must be able to stop normally (lib/builder.js).
 // While the gate works it keeps .autoclaude/gate.json, so the supervisor never mistakes a long
 // verification (checks, browser tester, security review) for a stalled session.
 import fs from "node:fs";
@@ -24,7 +25,8 @@ try {
   const { findProjectRoot } = await import("../lib/paths.js");
   const { loadState } = await import("../lib/state.js");
   root = findProjectRoot(input.cwd || process.cwd());
-  if (root && loadState(root).status === "running" && !process.env.AUTOCLAUDE_ROLE) {
+  const running = root && loadState(root).status === "running" && !process.env.AUTOCLAUDE_ROLE;
+  if (running && (await import("../lib/builder.js")).isBuilderSession(root)) {
     marker = path.join(root, ".autoclaude", "gate.json");
     try { fs.writeFileSync(marker, JSON.stringify({ pid: process.pid, at: new Date().toISOString() })); } catch { marker = null; }
     const { runGate } = await import("../lib/gate.js");

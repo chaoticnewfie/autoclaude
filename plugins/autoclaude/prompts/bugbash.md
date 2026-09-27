@@ -8,7 +8,7 @@ The app is running at {{URL}}. Use the Playwright browser tools. You may use Rea
 
 ## What to do
 
-1. For each feature, first use it normally, the way its Accept lines describe. Record one criterion per feature: `text` is "<step id> <feature title>: works under normal use", `result` is pass or fail, `evidence` is what you did and saw. A criterion fails only when the feature does not work under normal use.
+1. For each feature, first use it normally, the way its Accept lines describe, following its `Note:` lines, if any (how to log in, how to create test data). Record one criterion per feature: `text` is "<step id> <feature title>: works under normal use", `result` is pass or fail, `evidence` is what you did and saw. A criterion fails only when the feature does not work under normal use.
 2. Then try to break it: empty input, long input, special characters and emoji, leading and trailing spaces, double clicks, submitting twice quickly, reloading in the middle of a flow, the back button, and the features used together in an unusual order.
 3. Record every problem as a bug with exact `repro` steps, `expected` and `actual`, and pick the severity carefully:
    - high: a feature does not work for a normal user doing normal things, data is lost or corrupted, or an error leaves the user unable to carry on.

@@ -1,6 +1,7 @@
 // PermissionRequest hook (PLAN.md P5.3, D9). While a run is active nobody is there to answer a
 // permission prompt, so every prompt is answered "deny" with guidance instead of waiting all
-// night. Silent when no run is active (the normal prompt appears), and for nested checker runs.
+// night. Silent when no run is active (the normal prompt appears), for nested checker runs, and
+// for a person's own session in the project while a supervised run is going (they answer it).
 // The output shape was verified live in Phase 0 (VERIFY.md P0.6).
 import fs from "node:fs";
 import path from "node:path";
@@ -20,6 +21,8 @@ async function main() {
   const { loadState } = await import("../lib/state.js");
   const root = findProjectRoot(input.cwd || process.cwd());
   if (!root || loadState(root).status !== "running") return;
+  const { isBuilderSession } = await import("../lib/builder.js");
+  if (!isBuilderSession(root)) return;
 
   const tool = input.tool_name || "the action";
   let cli = "autoclaude";

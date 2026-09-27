@@ -11,7 +11,7 @@ description: Set this project up for AutoClaude - config, the doc set, the statu
 node "${CLAUDE_PLUGIN_ROOT}/bin/autoclaude.js" init
 ```
 
-3. Show the output verbatim. Then open `autoclaude.config.json` and confirm the detected `checks` and `devServer` with the user; fix anything wrong with the Edit tool. Every command in `checks` must exit non-zero on failure.
+3. Show the output verbatim. Then open `autoclaude.config.json` and show the detected `checks` and `devServer`: they are guesses. `/autoclaude:plan` settles them with the user and runs them with `autoclaude checks`, the way the gate does. Every command in `checks` must exit non-zero on failure.
 
 4. If the output says the project already had code or a plan, recommend a plan review now: `/autoclaude:plan` reads the existing plan, lists every step that would stall an unattended run (no Accept line, a decision left open, needs a secret or a human), and rewrites it into the step format. Do not start a run before that review.
 
@@ -23,4 +23,4 @@ node "${CLAUDE_PLUGIN_ROOT}/bin/autoclaude.js" install-cli
 
 Tell the user that terminals opened before this, including this session's own shell, do not see the new command: they open a new terminal for `autoclaude run`. Until then, call it as `node "${CLAUDE_PLUGIN_ROOT}/bin/autoclaude.js" <command>`.
 
-6. Finish by pointing at `CLAUDE.md` in the project (the rules a run follows) and `/autoclaude:plan` for a new plan.
+6. Finish by pointing at `CLAUDE.md` in the project (the rules a run follows) and at `/autoclaude:plan` as the next step in every case: it writes or reviews the plan, sets the checks, the dev server and the guard rules, commits, and hands over a project ready for `autoclaude run`.

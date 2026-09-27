@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import os from "node:os";
 import path from "node:path";
-import { runChecks, tailLines, TAIL_LINES } from "../../plugins/autoclaude/lib/checks.js";
+import { runChecks, tailLines, TAIL_LINES, DEFAULT_CHECK_TIMEOUT_SEC } from "../../plugins/autoclaude/lib/checks.js";
 
 const node = JSON.stringify(process.execPath);
 const passing = (name = "pass") => ({ name, command: `${node} -e "console.log('ok from ${name}')"`, timeoutSec: 60 });
@@ -115,4 +115,12 @@ test("runChecks with no checks passes with an empty result list", async () => {
   assert.deepEqual(r, { ok: true, results: [], failed: null });
   const r2 = await runChecks(undefined);
   assert.equal(r2.ok, true);
+});
+
+test("a check without timeoutSec runs under the 900 s default instead of no limit", async () => {
+  assert.equal(DEFAULT_CHECK_TIMEOUT_SEC, 900);
+  const { timeoutSec, ...noTimeout } = passing("untimed");
+  const r = await runChecks([noTimeout]);
+  assert.equal(r.ok, true);
+  assert.equal(r.results[0].ran, true);
 });

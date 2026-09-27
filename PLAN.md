@@ -474,13 +474,13 @@ autoclaude/
   - Accept: ending the child from the script kills the whole process tree (`taskkill /T /F` on Windows, the process group elsewhere), leaving no orphan `node` or `claude`
   - Accept: the window survives an RDP disconnect and reconnect; documented what happens on log-off and on sleep
   - Accept: documented whether the `idle_prompt` Notification hook and the `StopFailure` hook fire in that window, and what `rate_limit` looks like in the StopFailure input while auto-continue is waiting
+- [x] **P0.9** Reconcile (VERIFY.md has a row per step; every change is in this plan and in `docs/DECISIONS.md` D26 to D31)
+  - Accept: `VERIFY.md` has a Pass/Changed/Blocked row for every Phase 0 step
+  - Accept: every "Changed" row is reflected in this plan and in `docs/DECISIONS.md`
 - [x] **P0.10** Spike plugin hooks on Windows (VERIFY.md: exec form, `${CLAUDE_PLUGIN_ROOT}`, spaces, EPERM retry)
   - Accept: a local-marketplace plugin whose `hooks.json` runs `node "${CLAUDE_PLUGIN_ROOT}/scripts/x.js"` fires on Windows, with `${CLAUDE_PLUGIN_ROOT}` expanded and the stdin JSON readable
   - Accept: documented which shell runs hook commands on Windows, whether `node` resolves there, and how a plugin path with spaces behaves
   - Accept: `fs.renameSync` over a file another process holds open is tried, and the retry strategy for `EPERM` and `EBUSY` is documented
-- [x] **P0.9** Reconcile (VERIFY.md has a row per step; every change is in this plan and in `docs/DECISIONS.md` D26 to D31)
-  - Accept: `VERIFY.md` has a Pass/Changed/Blocked row for every Phase 0 step
-  - Accept: every "Changed" row is reflected in this plan and in `docs/DECISIONS.md`
 
 **CHECKPOINT 0:** Walk Scott through `VERIFY.md` and any changes to the plan.
 

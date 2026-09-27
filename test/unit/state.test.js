@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { defaultState, loadState, saveState, updateState, isRunning, describeState, STATUS } from "../../plugins/autoclaude/lib/state.js";
+import { defaultState, loadState, saveState, updateState, isRunning, describeState, STATUS, PAUSE_REASONS } from "../../plugins/autoclaude/lib/state.js";
 
 const tmpDir = () => fs.mkdtempSync(path.join(os.tmpdir(), "autoclaude-state-"));
 
@@ -46,4 +46,11 @@ test("describeState reads well", () => {
   assert.equal(describeState({ ...defaultState(), status: "paused", pauseReason: "review" }), "paused (review)");
   assert.equal(describeState({ ...defaultState(), status: "running", pauseRequested: true }), "running, pause requested after the next verified commit");
   assert.equal(describeState({ ...defaultState(), status: "complete" }), "complete");
+});
+
+test("defaults carry the builder session fields, and PAUSE_REASONS lists the reasons really set", () => {
+  const s = defaultState();
+  assert.equal(s.builderSessionId, null);
+  assert.equal(s.haltSession, false);
+  assert.deepEqual([...PAUSE_REASONS].sort(), ["blocked", "commit-failed", "infra", "review", "security", "step-failed", "stuck", "weekly-limit"]);
 });

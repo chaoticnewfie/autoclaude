@@ -9,4 +9,4 @@ Take the user's answer exactly as written and run this with the Bash tool, quoti
 node "${CLAUDE_PLUGIN_ROOT}/bin/autoclaude.js" answer "<the answer>"
 ```
 
-Show the output verbatim. If it says nothing is waiting for an answer, run `node "${CLAUDE_PLUGIN_ROOT}/bin/autoclaude.js" status` and show that instead. Do not act on the answer yourself in this session; it is for the run.
+Show the output verbatim. If it says nothing is waiting for an answer, run `node "${CLAUDE_PLUGIN_ROOT}/bin/autoclaude.js" status` and show that instead. In the run's own builder session (the one that asked the question, with the "AutoClaude run in progress" context), carry on with the step using the answer once the run is going again. In any other session, do not act on the answer yourself; it is for the run.

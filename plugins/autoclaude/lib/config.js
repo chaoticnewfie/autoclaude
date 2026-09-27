@@ -36,6 +36,9 @@ export const DEFAULTS = Object.freeze({
 });
 
 const PAUSE_AT = ["never", "phase-end", "every-step"];
+// The Stop hook's own timeout in hooks.json. Claude Code kills the gate after this many seconds,
+// so a longer gate.timeoutSec would never be honoured.
+export const MAX_GATE_TIMEOUT_SEC = 1800;
 const BLOCK_ON = ["high", "medium", "low", "none"];
 const SECURITY_WHEN = ["phase-end", "tag:security", "every-step", "never"];
 
@@ -97,7 +100,8 @@ export function validateConfig(cfg) {
         names.add(c.name);
       }
       expect(`${p}.command`, c.command, "string");
-      positive(`${p}.timeoutSec`, c.timeoutSec);
+      // Optional: lib/checks.js runs a check without one under its default timeout.
+      if (c.timeoutSec !== undefined) positive(`${p}.timeoutSec`, c.timeoutSec);
       if (c.needsDevServer !== undefined) expect(`${p}.needsDevServer`, c.needsDevServer, "boolean");
     });
   }
@@ -131,7 +135,10 @@ export function validateConfig(cfg) {
     expect("git.tagPhaseEnds", cfg.git.tagPhaseEnds, "boolean");
     expect("git.push", cfg.git.push, "boolean");
   }
-  if (expect("gate", cfg.gate, "object")) positive("gate.timeoutSec", cfg.gate.timeoutSec);
+  if (expect("gate", cfg.gate, "object")) {
+    positive("gate.timeoutSec", cfg.gate.timeoutSec);
+    if (typeof cfg.gate.timeoutSec === "number" && cfg.gate.timeoutSec > MAX_GATE_TIMEOUT_SEC) err("gate.timeoutSec", `at most ${MAX_GATE_TIMEOUT_SEC} (the Stop hook's timeout in hooks.json), got ${cfg.gate.timeoutSec}`);
+  }
   if (expect("notify", cfg.notify, "object") && cfg.notify.morningSummaryAt !== null) {
     if (typeof cfg.notify.morningSummaryAt !== "string" || !/^([01]\d|2[0-3]):[0-5]\d$/.test(cfg.notify.morningSummaryAt)) err("notify.morningSummaryAt", "expected null or a time like 07:30");
   }

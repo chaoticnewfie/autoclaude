@@ -13,6 +13,12 @@ dist/
 # Logs
 *.log
 
+# Test and coverage output. Everything the app, the dev server or the tests write inside the
+# project belongs here (a local database file, uploads): the gate commits with `git add -A`.
+coverage/
+test-results/
+playwright-report/
+
 # OS junk
 .DS_Store
 Thumbs.db

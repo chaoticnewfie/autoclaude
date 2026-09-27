@@ -70,3 +70,13 @@ test("loadConfig: missing file, broken JSON, and a good file", () => {
   assert.equal(r.config.gate.timeoutSec, 60);
   assert.equal(r.config.tester.model, "sonnet");
 });
+
+test("gate.timeoutSec may not exceed the Stop hook's 1800 s; a check's timeoutSec is optional", () => {
+  assert.deepEqual(validateConfig(mergeConfig({ gate: { timeoutSec: 1800 } })), []);
+  const over = validateConfig(mergeConfig({ gate: { timeoutSec: 1801 } }));
+  assert.deepEqual(over.map((e) => e.path), ["gate.timeoutSec"]);
+  assert.match(over[0].message, /at most 1800/);
+  assert.deepEqual(validateConfig(mergeConfig({ checks: [{ name: "unit", command: "npm test" }] })), []);
+  const bad = validateConfig(mergeConfig({ checks: [{ name: "unit", command: "npm test", timeoutSec: 0 }] }));
+  assert.deepEqual(bad.map((e) => e.path), ["checks[0].timeoutSec"]);
+});

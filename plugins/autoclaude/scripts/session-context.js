@@ -3,8 +3,9 @@
 //   - it must be fast and silent when no AutoClaude run is active in the session's project,
 //   - it must never throw (an exception would print noise into someone's session).
 // While a run is active it injects prompts/context.md, the current step, the tail of the
-// progress file and any pending owner notes. It also mirrors the plugin's notify userConfig
-// into the per-machine notify.json (D32), and records the session id in state.json.
+// progress file and any pending owner notes, and records the session id in state.json; both
+// only for the builder session (lib/builder.js). It also fills missing keys of the per-machine
+// notify.json from the plugin's notify userConfig (D32), in every session.
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -14,17 +15,22 @@ import { loadConfig } from "../lib/config.js";
 import { parsePlan, stepById, nextStep, stepText } from "../lib/plan.js";
 import { readText, appendLine } from "../lib/fsatomic.js";
 import { readMachineNotify, writeMachineNotify } from "../lib/notify.js";
+import { isBuilderSession } from "../lib/builder.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
-function mirrorNotifyConfig(env) {
+// Fills notify.json from the plugin userConfig only where notify.json has no value yet: a value
+// set with `autoclaude notify-setup` is the owner's later choice and is never overwritten here.
+export function mirrorNotifyConfig(env) {
   const map = { CLAUDE_PLUGIN_OPTION_NOTIFY_CHANNEL: "channel", CLAUDE_PLUGIN_OPTION_NTFY_URL: "ntfy_url", CLAUDE_PLUGIN_OPTION_NTFY_TOKEN: "ntfy_token", CLAUDE_PLUGIN_OPTION_DISCORD_WEBHOOK: "discord_webhook" };
-  const values = {};
-  for (const [k, key] of Object.entries(map)) if (env[k] && String(env[k]).trim()) values[key] = String(env[k]).trim();
-  if (Object.keys(values).length === 0) return;
   const current = readMachineNotify();
-  const changed = Object.entries(values).some(([k, v]) => current[k] !== v);
-  if (changed) writeMachineNotify(values);
+  const missing = {};
+  for (const [k, key] of Object.entries(map)) {
+    const v = env[k] ? String(env[k]).trim() : "";
+    const has = current[key] !== undefined && current[key] !== null && String(current[key]).trim() !== "";
+    if (v && !has) missing[key] = v;
+  }
+  if (Object.keys(missing).length) writeMachineNotify(missing);
 }
 
 export function buildContext({ root, state, config, planText, progressText, promptTemplate, cli = "autoclaude", now = new Date() }) {
@@ -72,6 +78,9 @@ async function main() {
   if (!root) return;
   const state = loadState(root);
   if (state.status !== STATUS.running) return;
+  // A person's own session in the project during a supervised run gets no run rules, and its id
+  // is never recorded as the run's session.
+  if (!isBuilderSession(root)) return;
 
   const cfg = loadConfig(root);
   if (cfg.errors.length) return;

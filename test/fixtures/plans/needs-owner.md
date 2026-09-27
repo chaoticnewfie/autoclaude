@@ -15,4 +15,5 @@ When a todo is added, the owner hears about it.
 - [ ] **S1.1** Tell the owner when a todo is added
   - Accept: adding a todo through `POST /api/todos` notifies the owner through the owner's chosen notification service, using the owner's account for that service
   - Accept: a unit test covers the notification call
+  - Test: test/todos.test.js
   - Tags: no-ui

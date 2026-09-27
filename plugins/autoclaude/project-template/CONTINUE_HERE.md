@@ -6,35 +6,33 @@ History lives in `docs/SESSION_LOG.md` and `PROGRESS.md`, not here.
 
 ## Last updated
 
-{{DATE}}, by `autoclaude init`. Nothing has been built yet.
+{{DATE}}, by `autoclaude init`. Nothing has been planned or built yet.
 
 ## Where things are
 
 - The doc set is in place: `CLAUDE.md`, `PLAN.md`, `PROGRESS.md`, this file and `docs/`. Every
   log is empty.
-- `PLAN.md` has a "Phase 1: TODO" heading and no steps. `autoclaude lint-plan` reports no steps
-  and `autoclaude start` refuses to run. That is intended: a run cannot start on placeholders.
-- `CLAUDE.md` still has TODO lines under "Tech stack", "Commands" and rule 12 (the backup
-  command).
-- `autoclaude.config.json` holds whatever `init` detected. Its commands have to match the
-  Commands section of `CLAUDE.md` once that is filled in.
+- `PLAN.md` is still the template: placeholders and a "Phase 1: TODO" heading with no steps.
+  `autoclaude lint-plan` fails and a run cannot start. That is intended: a run never starts on
+  placeholders.
+- `CLAUDE.md` still has TODO lines under "Tech stack", "Commands" and the backup rule.
+- `autoclaude.config.json` holds what `init` guessed for `checks` and `devServer`.
 - Nothing new is committed yet. Whatever the project had before `init` ran is untouched; `init`
   never overwrites an existing file.
 
 ## The exact next step
 
-1. Fill in the TODO lines in `CLAUDE.md` (Tech stack, Commands, the backup rule) and check the
-   commands in `autoclaude.config.json` against them.
-2. Run `/autoclaude:plan`. It interviews the owner, settles the decisions up front, writes the
-   goal, the constraints and the "When something is unclear" defaults into `PLAN.md`, and fills
-   Phase 1 with steps in the step format. In a project that already had a plan, it reviews that
-   plan first and rewrites it into the step format.
-3. Run `autoclaude lint-plan` until it passes, commit, push, then `autoclaude start`.
+1. Run `/autoclaude:plan` in a Claude Code session opened in this folder. With the owner it
+   settles the decisions, fills the TODO lines in `CLAUDE.md`, sets and runs the checks, the dev
+   server and the guard rules, writes the plan, commits everything and rewrites this file.
+2. Do what the plan's "Before the run" section lists.
+3. Start the run with `autoclaude run` from a new terminal opened in this folder. Never
+   `autoclaude start`: the run window calls that itself.
 
 ## Notes
 
 - If this file still says "by `autoclaude init`" and the project has clearly moved on, the file
   was not rewritten after a prompt. Fix that first: it is a rule, not a nicety.
-- TODO lines are for the owner. A run never guesses at them.
+- A run never guesses at a placeholder; `/autoclaude:plan` fills them in with the owner.
 - Add `.env.example` with placeholders before the first step that needs configuration. Real
   values stay in `.env`, which is gitignored.

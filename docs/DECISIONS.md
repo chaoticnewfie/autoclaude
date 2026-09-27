@@ -473,3 +473,55 @@ the plugin from the clone.
 
 **Rejected.** Copying the template into the machine folder at install time: there is no install
 hook, and a stale copy would outlive plugin updates.
+
+### D43 Fixes from the Phase 7 review, before the rehearsal (2026-09-27)
+
+Six reviewers (two fact-checkers, a newcomer reading only the docs, two dry runs of the plan
+skill on scratch projects, and a completeness critic) found these; four agents fixed them.
+
+- **The builder is one known session.** The supervisor starts it with
+  `claude --session-id <uuid>`, stores the id in state, and relaunches with `--resume <id>`
+  (supersedes "relaunch is always `--continue`" in D40, which could continue a person's own
+  session opened in the same folder). The builder's environment carries `AUTOCLAUDE_BUILDER=1`.
+  While a supervisor is alive, every hook ignores any other session in the project: no rules
+  injected, no gate on its stops, no guard, no heartbeats. Without a supervisor (a run started by
+  hand) any session is the builder, as before. A `--resume` that dies within 30 seconds (no
+  conversation saved yet) is followed by a fresh session under a new id. Both flags were checked
+  headless before relying on them.
+- **The guard covers the PowerShell tool.** On Windows the builder also has a PowerShell tool,
+  which the PreToolUse matcher did not list, so every rule, `guard.deny` included, could be
+  bypassed through it. The guard patterns were hardened (git global options, `+refspec` and
+  `--mirror`, split `rm` flags, quoted paths, deletes judged against the project root, the
+  `.autoclaude` folder itself, `git checkout`/`git restore` of the plan). They remain best-effort
+  text checks; a standard user account is the real boundary.
+- **Paths with spaces.** The tool guard compared a URL-encoded path to decide whether it was the
+  entry script, so under a profile such as `C:\Users\John Smith` it silently did nothing. All
+  entry checks use `fileURLToPath`; a scenario test spawns the guard from a copied plugin folder
+  with a space and a tilde in its path.
+- **`pause --now` ends the session.** Before, it only changed the state, and the builder carried
+  on through its turn with every guard off. Now the supervisor ends the session and the dev
+  server stops; resume relaunches it.
+- **A finished plan can be continued**: add steps, commit, `autoclaude run`.
+- **Preflight fits new projects**: Chromium only when a dev server is configured; a dev server
+  that does not start yet is a warning when the next step is `no-ui`; a `needsDevServer` check
+  without a dev server fails; tmux is required on Linux and macOS (the background mode gave the
+  interactive builder no terminal).
+- **Lint checks more**: unknown tags, `ui` with `no-ui`, `no-ui` steps without `Test:`, id and
+  phase order, duplicate or empty phases, template placeholders, TBD and TODO in steps.
+- **The security reviewer sees the plan's Constraints & decisions**, so a documented design
+  choice (no login on a local-only app) is not failed as a high finding on every attempt.
+- **One decision entry format**: `## D-### (YYYY-MM-DD, step) title` with Question, Choice, Why,
+  Rejected, Reverse by; `autoclaude answer` writes the same, and the template's example no
+  longer makes the first real id D-002.
+- **New commands** the plan skill relies on: `autoclaude run --check` (preflight only),
+  `autoclaude checks` (the checks exactly as the gate runs them, in cmd.exe on Windows), and
+  `autoclaude guard-test "<command>"`.
+- **The plan skill was rewritten** around what the dry runs showed: every case sets checks, the
+  dev server and guard rules; a new project gets a committed skeleton with a green baseline;
+  every Accept line of a UI step must be observable in the browser; tester needs go in `- Note:`
+  lines; runtime output is gitignored; the project CLAUDE.md always gets a "During an AutoClaude
+  run" section; the hand-over rewrites CONTINUE_HERE.md and runs `autoclaude run --check`.
+
+**Rejected.** Documenting around the bugs instead of fixing them, and a `guard.protect` path list
+for files the run must not edit (the CLAUDE.md run section and Out of scope cover it for now;
+logged in DEFERRED.md if a run ever edits one).

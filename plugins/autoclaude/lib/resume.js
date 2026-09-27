@@ -46,6 +46,8 @@ export function resumeRun(project, state, extra = {}) {
   if (id !== (state.currentStep || null)) changes.push(`current step is now ${id || "none (every step is done)"}`);
   updateState(root, (s) => {
     s.status = STATUS.running; s.pauseReason = null; s.pauseRequested = false; s.recoveries = 0; s.noProgress = 0;
+    // A `pause --now` the supervisor had not acted on yet must not end the resumed session later.
+    s.haltSession = false;
     s.tickedByGate = ticked;
     s.currentStep = id;
     if (id) { s.attempts = { ...s.attempts, [id]: 0 }; s.infraFailures = { ...(s.infraFailures || {}), [id]: 0 }; }

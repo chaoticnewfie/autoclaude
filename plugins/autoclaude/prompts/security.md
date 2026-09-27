@@ -6,6 +6,12 @@ You may use Read, Glob and Grep on files under {{PROJECT_ROOT}} (use full paths 
 
 {{STEP_TEXT}}
 
+## The owner's decisions (the "Constraints & decisions" section of {{PLAN_FILE}})
+
+{{CONSTRAINTS}}
+
+Decisions recorded here are the owner's choices, made on purpose (for example no login, or listening on 127.0.0.1 only). Report a finding against one only when it is unsafe in a way the decision does not account for, and never rate a documented decision high just for existing.
+
 ## The changes (working tree against {{BASE}})
 
 The diff may cover several steps of the phase. New untracked files are listed but not shown: Read each one. If the diff was truncated, Read the files you need.
@@ -29,7 +35,7 @@ The diff may cover several steps of the phase. New untracked files are listed bu
 
 - Only report what is in the changed code or directly reachable from it. No generic advice, no issues in code the changes do not touch.
 - Every finding names a `file` (relative to the project root, forward slashes) and a `line` (0 only when there is no single line), says the `issue` in one sentence, and gives the `fix` in one sentence.
-- Severity: high = exploitable as written, or a real secret exposed. medium = a real weakness that needs another mistake to exploit, or a defence missing where the plan requires it. low = hardening or style.
+- Severity: high = exploitable as written, or a real secret exposed. medium = a real weakness that needs another mistake to exploit, or a defence missing where the plan requires it. low = hardening or style. A documented owner decision is never high by itself.
 - `verdict` is "fail" when there is any high finding, otherwise "pass".
 - `notes`: one or two sentences on what you checked. Keep everything short, factual and plain ASCII.
 
