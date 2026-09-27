@@ -339,6 +339,29 @@ product's. The value is in finding what the docs and the planner miss.
 link; the branch is merged only after Scott's review; the repo is private, so the link works here
 through the logged-in GitHub CLI and D20 remains open for anyone else.
 
+### D38 Guardrail details settled in Phase 5
+
+- **Every permission prompt during a run is denied, never approved.** The hook cannot judge what
+  is safe better than auto mode's classifier did; denying with guidance keeps the run moving
+  without widening what it may do. Past 10 denials in an hour (permission prompts and tool-guard
+  blocks together) the owner gets one high-priority message per hour.
+- **Hooks never write notification text to stdout.** `notify()` falls back to stdout when no
+  channel is set; inside a hook that would corrupt the JSON answer, so hooks pass a no-op sink.
+- **The owner's answer is a decision.** `autoclaude answer` appends the next `D-###` with the
+  question and the answer, resets the step's `[?]`, resumes, and hands the answer to the builder
+  twice: at session start and at the top of the gate's next message. Seen live (2026-09-27): Scott
+  typed the answer into the run's own window instead of a terminal; the builder recorded it with
+  `autoclaude answer` itself and carried on. Both paths are supported.
+- **Owner input is delivered once in a gate message and cleared when its step passes.** Notes not
+  yet delivered stay pending, so a note left during a review pause reaches the next step.
+- **Resume trusts the plan as the owner left it** (D33 made concrete): the first unfinished step
+  in plan order is where the run continues; owner ticks and unticks become the record; a failed or
+  blocked step gets fresh attempts.
+- **A step that fails three times on the security review pauses as `security`,** not
+  `step-failed`, so the notification says what kind of problem it is.
+- **The decider runs in the foreground.** Live, the builder started it in the background and
+  spent turns waiting; the context prompt now says to wait for its reply.
+
 ### D31 The launcher spawns `cmd start` from Node, and the supervisor polls `claude agents --json`
 
 **Decision.** `autoclaude run` opens the window through Node's `spawn("cmd.exe", ["/d","/s","/c",
