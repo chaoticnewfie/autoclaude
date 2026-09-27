@@ -49,6 +49,8 @@ test("a dead session wins over a stale verifying marker; a nudge waits for the g
   assert.deepEqual([n.action, n.reason], ["nudge", "the owner asked for: /compact"]);
   assert.deepEqual(launchArgs("resume", "/compact"), ["--continue", "--permission-mode", "auto", "/compact"]);
   assert.deepEqual(launchArgs("resume", "/compact", "id-1"), ["--resume", "id-1", "--permission-mode", "auto", "/compact"]);
+  assert.deepEqual(launchArgs("resume", null, "id-1", "opus"), ["--resume", "id-1", "--model", "opus", "--permission-mode", "auto", "/autoclaude:resume"]);
+  assert.deepEqual(launchArgs("start", null, "id-2", "opus"), ["--session-id", "id-2", "--model", "opus", "--permission-mode", "auto", "/autoclaude:start"]);
 });
 
 test("once a nudged prompt ends at the idle prompt, the run continues at once and it is not a recovery", () => {
@@ -138,7 +140,7 @@ test("supervise: a running run is resumed with --continue; an exited session is 
   const root = fakeProject("running");
   const h = harness(root, { exitAfterLaunch: true });
   await h.run(5);
-  assert.equal(h.launches[0], "--continue --permission-mode auto /autoclaude:resume");
+  assert.equal(h.launches[0], "--continue --model opus --permission-mode auto /autoclaude:resume");
   assert.equal(h.launches.length, 3, "first launch plus two relaunches");
   const s = loadState(root);
   assert.deepEqual([s.status, s.pauseReason], ["paused", "stuck"]);
@@ -153,7 +155,7 @@ test("supervise: a run with a builder session id is resumed by that id, never wi
   const root = fakeProject("running", { builderSessionId: "b-1" });
   const h = harness(root, { exitAfterLaunch: true });
   await h.run(2);
-  assert.deepEqual(h.launches.slice(0, 2), ["--resume b-1 --permission-mode auto /autoclaude:resume", "--resume b-1 --permission-mode auto /autoclaude:resume"]);
+  assert.deepEqual(h.launches.slice(0, 2), ["--resume b-1 --model opus --permission-mode auto /autoclaude:resume", "--resume b-1 --model opus --permission-mode auto /autoclaude:resume"]);
   assert.equal(loadState(root).builderSessionId, "b-1", "a relaunch keeps the id");
 });
 
@@ -161,7 +163,7 @@ test("supervise: an idle run is started with /autoclaude:start under a new sessi
   let root = fakeProject("idle", { builderSessionId: "left-from-an-old-run" });
   let h = harness(root);
   await h.run(1);
-  assert.equal(h.launches[0], "--session-id sess-1 --permission-mode auto /autoclaude:start");
+  assert.equal(h.launches[0], "--session-id sess-1 --model opus --permission-mode auto /autoclaude:start");
   assert.equal(loadState(root).builderSessionId, "sess-1", "recorded before the session starts, so the hooks can know it");
 
   root = fakeProject("paused", { pauseReason: "review" });
@@ -171,7 +173,7 @@ test("supervise: an idle run is started with /autoclaude:start under a new sessi
   await new Promise((r) => setTimeout(r, 30));
   saveState(root, { ...loadState(root), status: "running", pauseReason: null });
   await p;
-  assert.deepEqual(h.launches, ["--continue --permission-mode auto /autoclaude:resume"]);
+  assert.deepEqual(h.launches, ["--continue --model opus --permission-mode auto /autoclaude:resume"]);
   assert.equal(loadState(root).supervisorPid, process.pid);
   assert.match(loadState(root).windowTitle, /^ac-autoclaude-sup-/);
 });
@@ -186,7 +188,7 @@ test("supervise: pause --now ends the live session and clears the request; resum
   assert.deepEqual(h.kills, [h.children[0].pid], "the live session was ended");
   saveState(root, { ...loadState(root), status: "running", pauseReason: null });
   await p;
-  assert.deepEqual(h.launches, ["--resume b-7 --permission-mode auto /autoclaude:resume", "--resume b-7 --permission-mode auto /autoclaude:resume"]);
+  assert.deepEqual(h.launches, ["--resume b-7 --model opus --permission-mode auto /autoclaude:resume", "--resume b-7 --model opus --permission-mode auto /autoclaude:resume"]);
   const log = fs.readFileSync(path.join(root, ".autoclaude", "logs", "supervisor.log"), "utf8");
   assert.match(log, /halt: the owner paused the run with --now; ending the session/);
   assert.match(log, /ended the session; the run stays paused until `autoclaude resume`/);
@@ -220,9 +222,9 @@ test("supervise: a nudge restarts with its prompt, and when that ends idle the r
   fs.writeFileSync(path.join(rt, "idle"), JSON.stringify({ type: "idle_prompt", at: new Date(h.clock() + 1000).toISOString() }));
   await p;
   assert.deepEqual(h.launches, [
-    "--resume b-2 --permission-mode auto /autoclaude:resume",
-    "--resume b-2 --permission-mode auto /compact",
-    "--resume b-2 --permission-mode auto /autoclaude:resume"
+    "--resume b-2 --model opus --permission-mode auto /autoclaude:resume",
+    "--resume b-2 --model opus --permission-mode auto /compact",
+    "--resume b-2 --model opus --permission-mode auto /autoclaude:resume"
   ]);
   const log = fs.readFileSync(path.join(rt, "logs", "supervisor.log"), "utf8");
   assert.match(log, /nudge: the owner asked for: [/]compact/);
@@ -246,7 +248,7 @@ test("supervise: a long verification counts as activity, so its end is not mista
   const sleep = async (ms) => { clock += ms; if (++polls === 10) fs.rmSync(gateFile, { force: true }); await new Promise((r) => setImmediate(r)); };
   const out = { lines: [], log(x) { this.lines.push(x); } };
   await supervise({ root, env: { PATH: process.env.PATH, CLAUDE_CONFIG_DIR: fs.mkdtempSync(path.join(os.tmpdir(), "autoclaude-sup-cfg-")) }, spawnChild, agentStatus: () => "idle", say: async () => {}, now: () => clock, sleep, maxLoops: 12, console: out });
-  assert.deepEqual(launches, ["--continue --permission-mode auto /autoclaude:resume"], "no relaunch in the two polls after the gate ended");
+  assert.deepEqual(launches, ["--continue --model opus --permission-mode auto /autoclaude:resume"], "no relaunch in the two polls after the gate ended");
   assert.doesNotMatch(fs.readFileSync(path.join(rt, "logs", "supervisor.log"), "utf8"), /relaunch/);
 });
 
@@ -257,9 +259,9 @@ test("supervise: a --resume that dies at once opens a fresh session under a new 
   fs.writeFileSync(path.join(root, "autoclaude.config.json"), JSON.stringify({ version: 1, supervisor: { pollSec: 10, idleRelaunchMin: 15, stallMin: 45, resumeGraceMin: 2, rateLimitGraceMin: 10, maxRecoveries: 5 } }));
   const h = harness(root, { exitAfterLaunch: true });
   await h.run(2);
-  assert.equal(h.launches[0], "--resume sess-old --permission-mode auto /autoclaude:resume");
-  assert.equal(h.launches[1], "--session-id sess-1 --permission-mode auto /autoclaude:resume", "a fresh session, not the same failing resume");
-  assert.equal(h.launches[2], "--resume sess-1 --permission-mode auto /autoclaude:resume", "the new id is the one resumed from then on");
+  assert.equal(h.launches[0], "--resume sess-old --model opus --permission-mode auto /autoclaude:resume");
+  assert.equal(h.launches[1], "--session-id sess-1 --model opus --permission-mode auto /autoclaude:resume", "a fresh session, not the same failing resume");
+  assert.equal(h.launches[2], "--resume sess-1 --model opus --permission-mode auto /autoclaude:resume", "the new id is the one resumed from then on");
   assert.equal(loadState(root).builderSessionId, "sess-1");
   assert.match(fs.readFileSync(path.join(root, ".autoclaude", "logs", "supervisor.log"), "utf8"), /could not be resumed; opening a fresh one/);
 });

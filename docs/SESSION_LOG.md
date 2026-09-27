@@ -251,3 +251,18 @@ One entry per working session: what was done, what was committed. Append only.
   settings, safety, troubleshooting, updating, a command list) and linked it from the top of
   README.md. He first described a copy that `init` would put into every project, then asked for
   just this one file in the repo instead. No plugin change, so no version bump.
+
+## 2026-09-27 (Code VM) - Model policy (0.9.3)
+
+- Scott: never Haiku; the newest Sonnet is the floor for very basic work; the newest Opus is the
+  main model and the ceiling. Nothing in the plugin used Haiku; the Haiku he saw came from
+  `--model haiku` verification calls during testing. Now (D44): `builder.model` (new, passed as
+  `--model` on every launch), the decider agent, `tester.model` (was sonnet) and `security.model`
+  all default to `opus`; config validation refuses anything but opus/sonnet aliases or full
+  claude-opus-*/claude-sonnet-* ids. Saved as a memory and in repo rule 10 for building sessions.
+- Scott also asked that AutoClaude's files not end up in the project repos it builds. AutoClaude
+  never pushes (git.push is false, the guard denies the builder's pushes, the gate never pushes)
+  and `.autoclaude/` is gitignored, but the config, the run records and the doc set are committed
+  on the run branch and reach GitHub when the owner merges and pushes. Which of them should stay
+  local-only is his call; asked.
+- 266 tests pass.

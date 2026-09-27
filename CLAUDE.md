@@ -15,8 +15,8 @@ what order lives in [PLAN.md](PLAN.md). Where things are right now lives in
 ## Status, in one line
 
 Phase 7 in progress (2026-09-27): the plan skill, README and USAGE are done and reviewed (P7.1,
-P7.2), version 0.9.2 installs and runs from GitHub, and an onboarding rehearsal by link reached
-the preflight. 265 tests pass. Next: P7.3, Scott's blind all-day rehearsal on his DB project;
+P7.2), version 0.9.3 installs and runs from GitHub, and an onboarding rehearsal by link reached
+the preflight. 266 tests pass. Next: P7.3, Scott's blind all-day rehearsal on his DB project;
 this machine has no AutoClaude installed on purpose. Never open the DB project (D37).
 
 ## Definition of done: every prompt, no exceptions
@@ -64,7 +64,9 @@ this machine has no AutoClaude installed on purpose. Never open the DB project (
 10. **Agents: reasonable, and stopped when done.** Subagents and workflows are welcome when they
     add value one context cannot. Not 70 of them. The failure to avoid is burning a 5-hour usage
     window in 10 minutes by mistake, so keep fan-out proportional to the value and the risk, and
-    stop or cancel agents the moment they are no longer needed.
+    stop or cancel agents the moment they are no longer needed. Models: the newest Opus is the
+    main model, the newest Sonnet the floor for trivial work, never Haiku, in spikes and live
+    checks as much as in the product (D44).
 11. **Line endings.** `.gitattributes` forces LF; `.ps1`, `.bat` and `.cmd` keep CRLF.
     `.editorconfig`: 2-space indent, utf-8, LF, final newline.
 12. **Shell hygiene on Windows.** Use the Bash tool for git commits with multi-line messages.

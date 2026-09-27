@@ -206,6 +206,7 @@ All in autoclaude.config.json in the project. Change them only while no run is g
 | "usage": { "autoResumeAfterWeeklyReset": true } | carry on by itself after the weekly reset     |
 | "git": { "push": false }                | whether Claude may push during a run                  |
 | "notify": { "morningSummaryAt": "07:30" } | a daily progress message                            |
+| "builder" / "tester" / "security": { "model": "opus" } | which Claude model each part uses. Opus (the newest) is the default everywhere; "sonnet" is the lowest allowed; Haiku is refused |
 | "checks": [ ... ]                       | the test and lint commands run after every step       |
 | "devServer": { ... }                    | how to start your app for the browser checks          |
 | "guard": { "deny": [ ... ] }            | extra commands the run must never execute             |

@@ -8,9 +8,12 @@ export const DEFAULTS = Object.freeze({
   version: 1,
   plan: "PLAN.md",
   branch: "autoclaude/{planSlug}",
+  // Models (D44): Opus is the main model and the ceiling, Sonnet the floor, never Haiku. The
+  // aliases always mean the newest model of that family.
+  builder: { model: "opus" },
   devServer: { command: null, url: null, healthPath: "/", startTimeoutSec: 90 },
   checks: [],
-  tester: { enabled: true, model: "sonnet", maxTurns: 40, timeoutSec: 900 },
+  tester: { enabled: true, model: "opus", maxTurns: 40, timeoutSec: 900 },
   security: { when: ["phase-end", "tag:security"], blockOn: "high", model: "opus", timeoutSec: 900 },
   bugBash: { atPhaseEnd: true },
   retries: { maxAttemptsPerStep: 3, maxNoProgressStops: 3, maxMinutesPerStep: 120 },
@@ -41,6 +44,11 @@ const PAUSE_AT = ["never", "phase-end", "every-step"];
 export const MAX_GATE_TIMEOUT_SEC = 1800;
 const BLOCK_ON = ["high", "medium", "low", "none"];
 const SECURITY_WHEN = ["phase-end", "tag:security", "every-step", "never"];
+
+// Opus or Sonnet only: the aliases (optionally with the [1m] context suffix) or a full id.
+export function allowedModel(v) {
+  return typeof v === "string" && (/^(opus|sonnet)(\[1m\])?$/i.test(v.trim()) || /^claude-(opus|sonnet)-/i.test(v.trim()));
+}
 
 function isPlainObject(v) {
   return v !== null && typeof v === "object" && !Array.isArray(v);
@@ -106,16 +114,20 @@ export function validateConfig(cfg) {
     });
   }
 
+  const model = (p, v) => {
+    if (expect(p, v, "string") && !allowedModel(v)) err(p, `"${v}" is not allowed: use opus (the default) or sonnet, which always mean the newest of each, or a full claude-opus-* or claude-sonnet-* id. Haiku is below AutoClaude's floor`);
+  };
+  if (expect("builder", cfg.builder, "object")) model("builder.model", cfg.builder.model);
   if (expect("tester", cfg.tester, "object")) {
     expect("tester.enabled", cfg.tester.enabled, "boolean");
-    expect("tester.model", cfg.tester.model, "string");
+    model("tester.model", cfg.tester.model);
     positive("tester.maxTurns", cfg.tester.maxTurns);
     positive("tester.timeoutSec", cfg.tester.timeoutSec);
   }
   if (expect("security", cfg.security, "object")) {
     if (expect("security.when", cfg.security.when, "array")) cfg.security.when.forEach((w, i) => oneOf(`security.when[${i}]`, w, SECURITY_WHEN));
     oneOf("security.blockOn", cfg.security.blockOn, BLOCK_ON);
-    expect("security.model", cfg.security.model, "string");
+    model("security.model", cfg.security.model);
     positive("security.timeoutSec", cfg.security.timeoutSec);
   }
   if (expect("bugBash", cfg.bugBash, "object")) expect("bugBash.atPhaseEnd", cfg.bugBash.atPhaseEnd, "boolean");

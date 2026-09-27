@@ -5,7 +5,7 @@
 ## Where things are
 
 **Phase 7: P7.1 (plan skill) and P7.2 (docs) are done; P7.3, Scott's blind rehearsal, is next.**
-Phases 0 to 6 done. Version 0.9.2 is on GitHub (`main`), 265 tests pass, remote in sync.
+Phases 0 to 6 done. Version 0.9.3 is on GitHub (`main`), 265 tests pass, remote in sync.
 
 This round (see `docs/SESSION_LOG.md` and D41 to D43):
 - The repo stays private, shared by invitation, no license; the rehearsal runs all day (D41).
@@ -62,5 +62,7 @@ Then CHECKPOINT 7 (review of the run with Scott) and P7.4 (version 1.0.0, tag, C
 - Bump the plugin version with every plugin change (CLAUDE.md rule 14).
 
 ## Decisions Scott still owns
+
+- Which AutoClaude files stay out of a project's git history (asked 2026-09-27; see SESSION_LOG).
 
 - Whether the project template ships the fuller docs set as stubs (default: core files only).

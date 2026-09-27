@@ -45,9 +45,13 @@ export function childEnv(env = process.env) {
 // an id that is already in use). A relaunch resumes that session by id; `--continue` would pick
 // the most recent conversation in the folder, which can be a person's own session. Runs started
 // by a version without builderSessionId fall back to `--continue`.
-export function launchArgs(kind, prompt = null, sessionId = null) {
-  if (kind === "start") return [...(sessionId ? ["--session-id", sessionId] : []), "--permission-mode", "auto", "/autoclaude:start"];
-  return [...(sessionId ? ["--resume", sessionId] : ["--continue"]), "--permission-mode", "auto", prompt || "/autoclaude:resume"];
+// The builder's model (builder.model, Opus by default, D44) is passed on every launch, so it never
+// depends on the owner's own Claude Code default.
+export function launchArgs(kind, prompt = null, sessionId = null, model = null) {
+  const m = model ? ["--model", model] : [];
+  if (kind === "start") return [...(sessionId ? ["--session-id", sessionId] : []), ...m, "--permission-mode", "auto", "/autoclaude:start"];
+  if (kind === "fresh") return ["--session-id", sessionId, ...m, "--permission-mode", "auto", prompt || "/autoclaude:resume"];
+  return [...(sessionId ? ["--resume", sessionId] : ["--continue"]), ...m, "--permission-mode", "auto", prompt || "/autoclaude:resume"];
 }
 
 const ts = (iso) => { const t = iso ? Date.parse(iso) : NaN; return Number.isFinite(t) ? t : null; };
@@ -168,6 +172,7 @@ export async function supervise({
   // start session that ended before it saved anything); the next relaunch then opens a fresh
   // session under a new id instead of failing the same way until the run pauses as stuck.
   const RESUME_FAIL_MS = 30 * 1000;
+  const builderModel = () => { try { return cfgNow().builder.model || null; } catch { return null; } };
   let resumeFailedFast = false;
   const launch = (kind, prompt = null) => {
     let sessionId = null;
@@ -175,15 +180,15 @@ export async function supervise({
     if (kind === "start") {
       sessionId = newSessionId();
       updateState(root, (s) => { s.builderSessionId = sessionId; });
-      args = launchArgs(kind, prompt, sessionId);
+      args = launchArgs(kind, prompt, sessionId, builderModel());
     } else if (resumeFailedFast) {
       sessionId = newSessionId();
       updateState(root, (s) => { s.builderSessionId = sessionId; });
       log("the builder session could not be resumed; opening a fresh one with the run context");
-      args = ["--session-id", sessionId, "--permission-mode", "auto", prompt || "/autoclaude:resume"];
+      args = launchArgs("fresh", prompt, sessionId, builderModel());
     } else {
       sessionId = loadState(root).builderSessionId || null;
-      args = launchArgs(kind, prompt, sessionId);
+      args = launchArgs(kind, prompt, sessionId, builderModel());
     }
     resumeFailedFast = false;
     const resuming = args[0] === "--resume";

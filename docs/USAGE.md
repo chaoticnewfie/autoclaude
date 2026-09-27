@@ -494,9 +494,10 @@ the supervisor.
   "version": 1,
   "plan": "PLAN.md",
   "branch": "autoclaude/{planSlug}",
+  "builder": { "model": "opus" },
   "devServer": { "command": null, "url": null, "healthPath": "/", "startTimeoutSec": 90 },
   "checks": [],
-  "tester": { "enabled": true, "model": "sonnet", "maxTurns": 40, "timeoutSec": 900 },
+  "tester": { "enabled": true, "model": "opus", "maxTurns": 40, "timeoutSec": 900 },
   "security": { "when": ["phase-end", "tag:security"], "blockOn": "high", "model": "opus", "timeoutSec": 900 },
   "bugBash": { "atPhaseEnd": true },
   "retries": { "maxAttemptsPerStep": 3, "maxNoProgressStops": 3, "maxMinutesPerStep": 120 },
@@ -519,6 +520,7 @@ the supervisor.
 |---|---|
 | `plan` | The plan file, if it is not `PLAN.md` |
 | `branch` | The run branch; `{planSlug}` comes from the plan's `#` title |
+| `builder.model`, `tester.model`, `security.model` | The models for the builder (and its decider), the browser tester and bug bash, and the security reviewer. All default to `opus`. Allowed: `opus` or `sonnet`, which always mean the newest of each, or a full `claude-opus-*` or `claude-sonnet-*` id. Haiku is refused |
 | `devServer` | How to start the app for the browser checks: `command`, the `url` it serves, the `healthPath` that answers when it is up, and how long to wait. A wrong URL fails every UI step; an empty one skips the browser checks |
 | `checks` | Commands the gate runs on every step, in order, stopping at the first failure: `{ "name", "command", "timeoutSec", "needsDevServer" }`. `name` and `command` are required; `timeoutSec` defaults to 900; `needsDevServer: true` starts the dev server first and needs `devServer` set. Each must exit non-zero on failure. They run in `cmd.exe` on Windows and `/bin/sh` elsewhere; `autoclaude checks` runs them the same way |
 | `tester` | The browser tester: model, turn budget (`maxTurns` tool calls; the bug bash gets one and a half times that), time limit |

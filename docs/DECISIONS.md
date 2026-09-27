@@ -525,3 +525,21 @@ skill on scratch projects, and a completeness critic) found these; four agents f
 **Rejected.** Documenting around the bugs instead of fixing them, and a `guard.protect` path list
 for files the run must not edit (the CLAUDE.md run section and Out of scope cover it for now;
 logged in DEFERRED.md if a run ever edits one).
+
+### D44 Models: Opus is the main model, Sonnet the floor, never Haiku (2026-09-27)
+
+**Decision.** Every model AutoClaude chooses defaults to `opus`: the builder session (new
+`builder.model`, passed as `--model` on every launch and relaunch, so it no longer depends on the
+owner's own Claude Code default), its decider agent (`model: opus`), the browser tester and bug
+bash (`tester.model`, was `sonnet`) and the security reviewer. Config validation accepts only
+`opus`, `sonnet` (the aliases, which always resolve to the newest model of each family, with an
+optional `[1m]`) or a full `claude-opus-*` / `claude-sonnet-*` id, and refuses Haiku.
+
+**Why.** Scott: "We don't ever need to use haiku, sonnet is okay if something is very basic but
+id set whatever the newest sonnet is as the floor for models usage. and whatever the newest Opus
+is as the celing and the main model used." Aliases rather than pinned ids, because he asked for
+whatever is newest. The Haiku usage he saw came from `--model haiku` verification calls made while
+testing AutoClaude, not from the product; building sessions no longer use it either.
+
+**Rejected.** Keeping Sonnet for the tester to save usage: the tester is the step's independent
+verification, not basic work.

@@ -68,7 +68,20 @@ test("loadConfig: missing file, broken JSON, and a good file", () => {
   assert.deepEqual(r.errors, []);
   assert.equal(r.config.plan, "docs/plan.md");
   assert.equal(r.config.gate.timeoutSec, 60);
-  assert.equal(r.config.tester.model, "sonnet");
+  assert.deepEqual([r.config.builder.model, r.config.tester.model, r.config.security.model], ["opus", "opus", "opus"]);
+});
+
+test("models: Opus by default everywhere, Sonnet allowed as the floor, never Haiku (D44)", () => {
+  assert.deepEqual(validateConfig(mergeConfig({ builder: { model: "sonnet" }, tester: { model: "sonnet" }, security: { model: "claude-opus-5-5" } })), []);
+  assert.deepEqual(validateConfig(mergeConfig({ tester: { model: "opus[1m]" } })), []);
+  for (const bad of ["haiku", "claude-haiku-4-5-20251001", "gpt-4", ""]) {
+    const errs = validateConfig(mergeConfig({ tester: { model: bad } }));
+    assert.equal(errs.length, 1, bad);
+    assert.equal(errs[0].path, "tester.model");
+    assert.match(errs[0].message, /Haiku is below AutoClaude's floor/);
+  }
+  assert.equal(validateConfig(mergeConfig({ builder: { model: "haiku" } }))[0].path, "builder.model");
+  assert.equal(validateConfig(mergeConfig({ security: { model: "haiku" } }))[0].path, "security.model");
 });
 
 test("gate.timeoutSec may not exceed the Stop hook's 1800 s; a check's timeoutSec is optional", () => {
