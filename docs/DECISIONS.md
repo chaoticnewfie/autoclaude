@@ -200,6 +200,24 @@ disabled in the child (no recursion), `--json-schema` returned `structured_outpu
 subscription login was used. `--bare` also skips keychain and credential reads and the run
 failed with `is_error: true`. Stripping `CLAUDE*` variables made no difference and is not done.
 
+### D32 Notification settings live in a per-machine file as well as in plugin userConfig
+
+**Decision.** `autoclaude notify-setup` writes `<claude config dir>/autoclaude/notify.json`
+(`channel`, `ntfy_url`, `ntfy_token`, `discord_webhook`, file mode 600 where the OS honours it).
+`resolveChannel` reads explicit options first, then the `CLAUDE_PLUGIN_OPTION_*` environment,
+then that file. The SessionStart hook (Phase 2) mirrors the plugin userConfig values into the
+file so either way of configuring works everywhere.
+
+**Why.** Plugin userConfig reaches only hook processes as environment variables; sensitive
+values go to the OS secure store, which Node built-ins cannot read. The CLI (`notify-test`,
+`status`) and the supervisor are not hook processes and still have to notify. Verified
+2026-09-27: a Discord webhook set with `claude plugin install --config discord_webhook=...`
+is absent from `settings.json` (good) and invisible to the CLI (the gap).
+
+**Rejected.** Reading the OS credential store (native code or PowerShell on every call).
+Sending every notification through a hook process (the supervisor would need a session).
+Storing the channel in the project (secrets in repos, and it is per machine anyway).
+
 ### D31 The launcher spawns `cmd start` from Node, and the supervisor polls `claude agents --json`
 
 **Decision.** `autoclaude run` opens the window through Node's `spawn("cmd.exe", ["/d","/s","/c",

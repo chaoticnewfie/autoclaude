@@ -496,7 +496,7 @@ autoclaude/
 - [x] **P1.4** CLI skeleton `bin/autoclaude.js` with `status`, `pause`, `note`, `resume`, `lint-plan`, `usage`, `install-cli` (2026-09-27: `test/unit/cli.test.js`; `install-cli` wrote `%LOCALAPPDATA%\autoclaude\bin\autoclaude.cmd` and added it to the user PATH on the Code VM)
   - Accept: `autoclaude install-cli` writes a shim into a per-user bin directory (`%LOCALAPPDATA%\autoclaude\bin\autoclaude.cmd` on Windows, `~/.local/bin/autoclaude` elsewhere), adds that directory to the user PATH without admin rights (Windows: `HKCU\Environment`), and prints what to reopen
   - Accept: `autoclaude status` shows state, current step, attempts, usage and last progress time
-- [ ] **P1.5** `lib/notify.js` and `userConfig`
+- [x] **P1.5** `lib/notify.js` and `userConfig` (2026-09-27: two Discord test messages reached Scott, one through the userConfig environment path and one through the per-machine `notify.json` written by `autoclaude notify-setup`, D32; stdout fallback and log covered by tests)
   - Accept: `plugin.json` declares `ntfy_url`, `ntfy_token` (sensitive), `discord_webhook` (sensitive) and `notify_channel`
   - Accept: `autoclaude notify-test` delivers a message to Scott's phone through the configured channel
   - Accept: with no channel configured, it falls back to stdout plus `logs/notify.log`

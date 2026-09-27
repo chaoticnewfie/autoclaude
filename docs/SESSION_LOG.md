@@ -65,4 +65,11 @@ One entry per working session: what was done, what was committed. Append only.
   this repo's own PLAN.md, which is why P8.1 to P8.3 gained Accept lines.
 - Found: `cachedUsageUtilization` vanished from `~/.claude.json` after an interactive session
   rewrote it (D27 amended).
-- P1.5 (phone delivery) waits for Scott's ntfy topic or Discord webhook. Then CHECKPOINT 1.
+- Scott provided a Discord webhook. First test went through the userConfig environment path
+  (HTTP 204, confirmed on his phone), but Node then crashed on exit (forced `process.exit` while
+  the HTTP client was closing); fixed by setting `process.exitCode` and draining the response.
+  Found that plugin userConfig reaches only hook processes, so the CLI and supervisor get a
+  per-machine `notify.json` via `autoclaude notify-setup` (D32); second test sent from the CLI
+  with no environment, HTTP 204. The webhook is in the OS secure store and in that file, never in
+  the repo or the log. CLI tests now run under a throwaway `CLAUDE_CONFIG_DIR`.
+- P1.5 ticked. Phase 1 complete; CHECKPOINT 1 presented.

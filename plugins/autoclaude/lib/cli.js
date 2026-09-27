@@ -9,7 +9,7 @@ import { loadConfig, formatConfigErrors } from "./config.js";
 import { loadState, updateState, describeState, STATUS } from "./state.js";
 import { parsePlan, lintPlan, formatLint, stepById, nextStep, progress } from "./plan.js";
 import { readUsage, formatUsage } from "./usage.js";
-import { notify } from "./notify.js";
+import { notify, readMachineNotify, writeMachineNotify, resolveChannel } from "./notify.js";
 import { readText, readJson, appendLine, ageMs, ensureDir } from "./fsatomic.js";
 import { isPidAlive, findOnPath } from "./proc.js";
 
@@ -29,6 +29,9 @@ Project commands (run inside a project):
 Machine commands:
   usage                 Show the 5-hour and 7-day usage percentages Claude Code last reported
   install-cli [--no-path]  Put an \`autoclaude\` shim on your PATH
+  notify-setup [--channel ntfy|discord|stdout] [--ntfy <topic url>] [--ntfy-token <token>]
+               [--discord <webhook url>] [--show] [--clear]
+                        Store the notification channel for this machine (outside any repo)
   notify-test [message] Send a test notification through the configured channel
   version | help
 
@@ -61,6 +64,7 @@ export async function runCli(argv, rawIo = {}) {
       case "lint-plan": return cmdLintPlan(rest, io);
       case "usage": return cmdUsage(rest, io);
       case "install-cli": return cmdInstallCli(rest, io);
+      case "notify-setup": return cmdNotifySetup(rest, io);
       case "notify-test": return cmdNotifyTest(rest, io);
       default:
         io.err(`autoclaude: unknown command "${cmd}". Run "autoclaude help".`);
@@ -300,7 +304,37 @@ function cmdInstallCli(args, io) {
   return 0;
 }
 
-// ---------- notify-test ----------
+// ---------- notify-setup / notify-test ----------
+
+const mask = (s) => (s ? s.slice(0, Math.min(12, s.length)) + "..." + s.slice(-4) : "(not set)");
+
+function cmdNotifySetup(args, io) {
+  const file = machinePaths().notifyFile;
+  const values = {};
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    const next = () => { const v = args[++i]; if (v === undefined) throw new Error(`${a} needs a value`); return v; };
+    if (a === "--channel") values.channel = next().toLowerCase();
+    else if (a === "--ntfy") values.ntfy_url = next();
+    else if (a === "--ntfy-token") values.ntfy_token = next();
+    else if (a === "--discord") values.discord_webhook = next();
+    else if (a === "--clear") { values.channel = null; values.ntfy_url = null; values.ntfy_token = null; values.discord_webhook = null; }
+    else if (a === "--show") { /* handled below */ }
+    else throw new Error(`unknown option ${a}`);
+  }
+  if (values.channel && !["ntfy", "discord", "stdout"].includes(values.channel)) throw new Error("--channel must be ntfy, discord or stdout");
+  if (values.ntfy_url && !/^https?:\/\//.test(values.ntfy_url)) throw new Error("--ntfy needs a full topic URL such as https://ntfy.sh/your-topic");
+  if (values.discord_webhook && !/^https:\/\/(discord\.com|discordapp\.com)\/api\/webhooks\//.test(values.discord_webhook)) throw new Error("--discord needs a Discord webhook URL");
+  const stored = Object.keys(values).length ? writeMachineNotify(values, file) : readMachineNotify(file);
+  const resolved = resolveChannel({}, io.env, file);
+  io.out(`autoclaude: notification settings for this machine are in ${file} (never commit this file)`);
+  io.out(`  channel: ${resolved.channel}${stored.channel ? "" : " (auto)"}`);
+  io.out(`  ntfy_url: ${stored.ntfy_url || "(not set)"}`);
+  io.out(`  ntfy_token: ${stored.ntfy_token ? "(set)" : "(not set)"}`);
+  io.out(`  discord_webhook: ${mask(stored.discord_webhook)}`);
+  if (resolved.channel === "stdout") io.out("  nothing will reach a phone until --ntfy or --discord is set (or the plugin's userConfig, which hook processes read)");
+  return 0;
+}
 
 async function cmdNotifyTest(args, io) {
   const message = args.join(" ").trim() || `AutoClaude test notification from ${io.env.COMPUTERNAME || io.env.HOSTNAME || "this machine"} at ${io.now().toISOString()}`;
@@ -308,6 +342,6 @@ async function cmdNotifyTest(args, io) {
   const r = await notify({ title: "AutoClaude test", message, priority: "default", tags: ["white_check_mark"] }, { logFile, stdout: io.stdoutStream, env: io.env });
   if (r.ok && !r.fallback) io.out(`autoclaude: sent through ${r.channel}${r.status ? ` (HTTP ${r.status})` : ""}. Log: ${logFile}`);
   else io.out(`autoclaude: ${r.channel} delivery failed (${r.error}); printed above instead. Log: ${logFile}`);
-  if (r.channel === "stdout") io.out("  no channel is configured: set ntfy_url or discord_webhook with /plugin configure autoclaude@autoclaude-local");
+  if (r.channel === "stdout") io.out("  no channel is configured: run `autoclaude notify-setup --discord <webhook>` or `--ntfy <topic url>` (and /plugin configure autoclaude@autoclaude-local for hook processes)");
   return r.ok ? 0 : 1;
 }

@@ -33,6 +33,7 @@ export function machinePaths() {
     dir,
     usageFile: path.join(dir, "usage.json"),
     registryFile: path.join(dir, "registry.json"),
+    notifyFile: path.join(dir, "notify.json"),
     statuslineScript: path.join(dir, "statusline.js"),
     logsDir: path.join(dir, "logs")
   };

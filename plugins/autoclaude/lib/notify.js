@@ -1,18 +1,53 @@
 // Notifications: ntfy, a Discord webhook, or stdout plus a log file. Node built-ins only
 // (the global fetch). Channel settings come from plugin userConfig, which Claude Code exports
 // to hook processes as CLAUDE_PLUGIN_OPTION_<KEY>, or from explicit options (CLI, tests).
-import { appendLine } from "./fsatomic.js";
+import fs from "node:fs";
+import path from "node:path";
+import { appendLine, readJson, writeJsonAtomic, ensureDir } from "./fsatomic.js";
+import { machinePaths } from "./paths.js";
 
 export const PRIORITY = Object.freeze({ high: "high", default: "default", low: "low" });
 const NTFY_PRIORITY = { high: "5", default: "3", low: "2" };
 const FETCH_TIMEOUT_MS = 10000;
 
-export function resolveChannel(opts = {}, env = process.env) {
-  const pick = (key, envKey) => (opts[key] !== undefined && opts[key] !== null ? String(opts[key]) : env[envKey] || "").trim();
-  const ntfyUrl = pick("ntfyUrl", "CLAUDE_PLUGIN_OPTION_NTFY_URL");
-  const ntfyToken = pick("ntfyToken", "CLAUDE_PLUGIN_OPTION_NTFY_TOKEN");
-  const discordWebhook = pick("discordWebhook", "CLAUDE_PLUGIN_OPTION_DISCORD_WEBHOOK");
-  let channel = pick("channel", "CLAUDE_PLUGIN_OPTION_NOTIFY_CHANNEL").toLowerCase();
+// Per-machine channel file (D32): <claude config dir>/autoclaude/notify.json, written by
+// `autoclaude notify-setup` or mirrored from plugin userConfig by the SessionStart hook.
+// Keys: channel, ntfy_url, ntfy_token, discord_webhook. Never inside a project.
+export function readMachineNotify(file = machinePaths().notifyFile) {
+  try {
+    const j = readJson(file, null);
+    return j && typeof j === "object" ? j : {};
+  } catch {
+    return {};
+  }
+}
+
+export function writeMachineNotify(values, file = machinePaths().notifyFile) {
+  const current = readMachineNotify(file);
+  const next = { ...current };
+  for (const [k, v] of Object.entries(values)) {
+    if (v === null || v === "") delete next[k];
+    else if (v !== undefined) next[k] = String(v);
+  }
+  ensureDir(path.dirname(file));
+  writeJsonAtomic(file, next);
+  try { fs.chmodSync(file, 0o600); } catch {}
+  return next;
+}
+
+// Precedence: explicit options, then the plugin userConfig environment (hook processes only),
+// then the per-machine file (CLI and supervisor).
+export function resolveChannel(opts = {}, env = process.env, machineFile = machinePaths().notifyFile) {
+  const machine = opts.noMachineFile ? {} : readMachineNotify(machineFile);
+  const pick = (key, envKey, fileKey) => {
+    if (opts[key] !== undefined && opts[key] !== null) return String(opts[key]).trim();
+    if (env[envKey]) return String(env[envKey]).trim();
+    return String(machine[fileKey] || "").trim();
+  };
+  const ntfyUrl = pick("ntfyUrl", "CLAUDE_PLUGIN_OPTION_NTFY_URL", "ntfy_url");
+  const ntfyToken = pick("ntfyToken", "CLAUDE_PLUGIN_OPTION_NTFY_TOKEN", "ntfy_token");
+  const discordWebhook = pick("discordWebhook", "CLAUDE_PLUGIN_OPTION_DISCORD_WEBHOOK", "discord_webhook");
+  let channel = pick("channel", "CLAUDE_PLUGIN_OPTION_NOTIFY_CHANNEL", "channel").toLowerCase();
   if (!channel || channel === "auto") channel = ntfyUrl ? "ntfy" : discordWebhook ? "discord" : "stdout";
   if (channel === "ntfy" && !ntfyUrl) channel = "stdout";
   if (channel === "discord" && !discordWebhook) channel = "stdout";
@@ -28,13 +63,16 @@ function logLine(logFile, priority, channel, title, message, extra = "") {
 
 async function postWithTimeout(url, init) {
   const signal = AbortSignal.timeout(FETCH_TIMEOUT_MS);
-  return fetch(url, { ...init, signal });
+  const res = await fetch(url, { ...init, signal });
+  // Drain the body so the connection is released before the process winds down.
+  try { await res.text(); } catch {}
+  return res;
 }
 
 // Sends one notification. Never throws: a delivery failure falls back to stdout and is reported
 // in the return value. Returns { channel, ok, status, error, fallback }.
 export async function notify({ title, message, priority = PRIORITY.default, tags = [] }, opts = {}) {
-  const { channel, ntfyUrl, ntfyToken, discordWebhook } = resolveChannel(opts);
+  const { channel, ntfyUrl, ntfyToken, discordWebhook } = resolveChannel(opts, opts.env || process.env, opts.machineFile);
   const stdout = opts.stdout || process.stdout;
   const logFile = opts.logFile || null;
   const text = String(message || "");

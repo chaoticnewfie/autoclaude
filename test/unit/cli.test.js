@@ -24,11 +24,20 @@ function project({ plan = PLAN, config = { version: 1 } } = {}) {
   return root;
 }
 
+// Every CLI test runs against its own empty Claude config dir, so nothing on the developer's
+// machine (usage data, the notify.json channel file, the registry) leaks into a test or gets
+// written by one, and a test can never send a real notification.
 async function run(argv, cwd, extra = {}) {
   const stdout = new Sink();
   const stderr = new Sink();
-  const code = await runCli(argv, { cwd, stdout, stderr, env: { PATH: "", ...extra.env }, ...extra });
-  return { code, out: stdout.text, err: stderr.text };
+  const prev = process.env.CLAUDE_CONFIG_DIR;
+  process.env.CLAUDE_CONFIG_DIR = extra.configDir || fs.mkdtempSync(path.join(os.tmpdir(), "autoclaude-cfg-"));
+  try {
+    const code = await runCli(argv, { cwd, stdout, stderr, env: { PATH: "", ...extra.env }, ...extra });
+    return { code, out: stdout.text, err: stderr.text };
+  } finally {
+    if (prev === undefined) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = prev;
+  }
 }
 
 test("status: not initialized, then initialized with plan progress", async () => {
@@ -132,6 +141,29 @@ test("notify-test with no channel prints to stdout and reports it", async () => 
   assert.equal(r.code, 0, r.out + r.err);
   assert.match(r.out, /\[autoclaude default\] AutoClaude test\nhello/);
   assert.match(r.out, /no channel is configured/);
+});
+
+test("notify-setup stores the channel per machine, masks the webhook, validates input and clears", async () => {
+  const configDir = fs.mkdtempSync(path.join(os.tmpdir(), "autoclaude-cfg-"));
+  let r = await run(["notify-setup", "--discord", "https://discord.com/api/webhooks/123/abcdefghijklmnop", "--channel", "discord"], os.tmpdir(), { configDir });
+  assert.equal(r.code, 0, r.out + r.err);
+  assert.match(r.out, /channel: discord\n/);
+  assert.match(r.out, /discord_webhook: https:\/\/disc\.\.\.mnop/);
+  assert.doesNotMatch(r.out, /abcdefghijklmnop/);
+  const stored = JSON.parse(fs.readFileSync(path.join(configDir, "autoclaude", "notify.json"), "utf8"));
+  assert.equal(stored.discord_webhook, "https://discord.com/api/webhooks/123/abcdefghijklmnop");
+
+  r = await run(["notify-setup", "--show"], os.tmpdir(), { configDir });
+  assert.match(r.out, /channel: discord/);
+
+  r = await run(["notify-setup", "--discord", "https://example.com/not-a-webhook"], os.tmpdir(), { configDir });
+  assert.equal(r.code, 1);
+  assert.match(r.err, /Discord webhook URL/);
+
+  r = await run(["notify-setup", "--clear"], os.tmpdir(), { configDir });
+  assert.equal(r.code, 0);
+  assert.match(r.out, /channel: stdout \(auto\)/);
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(configDir, "autoclaude", "notify.json"), "utf8")), {});
 });
 
 test("help and unknown commands", async () => {
