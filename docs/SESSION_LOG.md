@@ -127,5 +127,9 @@ One entry per working session: what was done, what was committed. Append only.
   writes an extensionless sh shim too (D34); the tool guard denied two plain reads because of a
   `2>/dev/null` on the same line, so its shell rules now match only real writes to protected
   paths (D34, 9 new assertions); `status | head` crashed with EPIPE, now ignored. 108 tests pass.
-- Broken plan (`plans/broken.md` plus a `fixture-unchanged` check so the impossible test cannot
-  be edited into passing): run started 02:14 UTC; result below.
+- **Broken plan: paused after 3 attempts, 02:14 to 02:17 UTC.** Attempts 1 to 3 each failed the
+  unit check, three reports were written, the step is `[!]`, state `paused (step-failed)`, and a
+  high-priority Discord message named the report (HTTP 204). The `fixture-unchanged` check passed
+  every time: the builder did not touch the impossible test. Report 3 shows the failing test
+  output in the first screen, which is the "feedback Claude gets is clear" check of section 6.5.
+- CHECKPOINT 3 met. Phase 3 complete.

@@ -4,61 +4,57 @@
 
 ## Where things are
 
-**Phase 3 is built and scenario-tested. CHECKPOINT 3, the first live run, is next.** Phases 0 to 2 done.
+**Phase 3 is complete and CHECKPOINT 3 is met; waiting on Scott's go for Phase 4.** Phases 0 to 2 done.
 
-| Step | State |
+Two live runs on `spikes/out/todo-live` (details and commit ids in `docs/SESSION_LOG.md`):
+
+| Run | Result |
 |---|---|
-| P3.1 fixture app and plans | Done. `test/fixtures/prepare.js` builds a scratch project from them. |
-| P3.2 ready/blocked protocol and gate skeleton | Done. |
-| P3.3 `lib/devserver.js` | Done (agent-written, 7 tests, Windows detached-wrapper design). |
-| P3.4 `lib/checks.js`, `lib/report.js` | Done (agent-written, 13 tests). |
-| P3.5 to P3.7 pass path, fail path, integrity | Done. |
-| P3.8 scenario tests | Done: 12 scenarios in `test/scenarios/stop-gate.test.js`. |
+| `plans/happy.md` | 3/3 steps verified, one commit each, phase tag, clean tree, Discord summary, 6.5 minutes, no input except one auto-mode permission prompt Scott accepted |
+| `plans/broken.md` | paused after 3 failed attempts, step `[!]`, three reports, high-priority Discord message |
 
-`node scripts/check.js`: syntax 49/49, 107 tests pass. Remote `chaoticnewfie/autoclaude`, branch `main`.
+`node scripts/check.js`: syntax 49/49, 108 tests pass. Remote `chaoticnewfie/autoclaude`, branch `main`.
 
-Hooks now registered in the installed plugin: SessionStart, Stop (the gate, timeout 1800 s),
-PostToolUse (heartbeat, async), PreToolUse (tool guard). They run in every session on this
-machine and are silent unless the session's project has `status: running`.
+Live state on this machine: plugin installed with all four hooks; both CLI shims on the user PATH;
+statusline bridge registered; Discord channel configured; `spikes/out/todo-live` is paused on the
+broken plan (its own git repo, trusted); `spikes/out/todo-demo` is still `running` from the
+CHECKPOINT 2 demo. Both are scratch: delete their `.autoclaude/state.json` (or the folders)
+before the next live run, and re-prepare with `test/fixtures/prepare.js`.
 
-## CHECKPOINT 3: the first live run
+## The exact next step
 
-Scratch project: `C:\AutoClaude\spikes\out\todo-live` (the fixture app + `plans/happy.md`, its
-own git repo with one commit, config: checks lint + unit, dev server `node server.js` at
-http://127.0.0.1:4173 but no check needs it yet; the browser tester arrives in Phase 4).
+**Phase 4, the browser tester** (`PLAN.md` P4.1 to P4.5):
 
-1. It is a nested git repository, so Scott trusts it once: `cd C:\AutoClaude\spikes\out\todo-live`,
-   `claude`, accept the trust dialog, `/exit` without typing anything.
-2. Then, from any shell: `autoclaude start` in that folder (creates branch `autoclaude/todo-fixture`,
-   state running on S1.1).
-3. Launch the builder session in its own window with the spike supervisor and a long hold:
-   `set AC_SPIKE_CWD=C:\AutoClaude\spikes\out\todo-live` then
-   `node C:\AutoClaude\spikes\lib\open-window.mjs ac-live C:\AutoClaude\spikes\out\todo-live "C:\Program Files\nodejs\node.exe" C:\AutoClaude\spikes\p08-supervisor\supervise.mjs 3600000 --permission-mode auto "Begin the current step as the injected AutoClaude context says."`
-   (Phase 6 replaces this with `autoclaude run`.)
-4. Watch: `autoclaude status` in the folder, `.autoclaude/logs/gate.log`, `git log --oneline`
-   on the run branch, `PROGRESS.md`. Expected: three commits `autoclaude(S1.x): ...`, state
-   `complete`, a Discord summary. `plans/broken.md` variant afterwards: pauses after 3 attempts
-   with a high-priority notification.
+1. P4.1 `prompts/tester.md`: reads and browses only, checks every Accept line with evidence,
+   smoke-checks neighbouring features, collects console errors, flags weakened or deleted tests.
+2. P4.2 `lib/tester.js`: spawn `claude -p` with `--model <config.tester.model>`,
+   `--max-turns`, `--strict-mcp-config --mcp-config .autoclaude/mcp.playwright.json`,
+   `--permission-mode dontAsk`, `--allowedTools mcp__playwright` plus read-only file tools,
+   `--settings '{"disableAllHooks":true}'`, `--output-format json --json-schema <verdict>` and
+   `AUTOCLAUDE_ROLE=tester` in the env (VERIFY.md P0.4 and P0.5 have the working flags). A
+   timeout or unparseable output is an infrastructure failure: retry once, then report without
+   consuming an attempt. Save the verdict and screenshots under `.autoclaude/reports/`.
+3. P4.3 wire it through the `deps.tester` seam in `lib/gate.js` (called after the checks pass,
+   skipped for `no-ui` steps); the gate must start the dev server for the tester even when no
+   check needs it (today `needsServer` only looks at checks).
+4. P4.4 phase-end bug bash with `prompts/bugbash.md`; high bugs fail the gate, others go to
+   `docs/BLOCKERS.md`.
+5. P4.5 the `ui-bug.md` scenario: unit tests pass, the tester catches the broken form, the
+   builder fixes it on attempt 2. The fixture copy needs `@playwright/test` installed for its own
+   e2e spec; the tester itself needs only Playwright MCP (Chromium is installed on this VM).
 
-## The exact next step after CHECKPOINT 3
-
-Phase 4, the browser tester: `prompts/tester.md`, `lib/tester.js` (headless `claude -p` with the
-Playwright MCP config that `init` writes, `--settings '{"disableAllHooks":true}'`, sonnet,
-`--json-schema` verdict, `AUTOCLAUDE_ROLE=tester`; infrastructure failures retried once without
-consuming an attempt), wired into `lib/gate.js` through the `deps.tester` seam that already
-exists (it is called after the deterministic checks pass, skipped for `no-ui` steps), the
-phase-end bug bash, and the `ui-bug.md` scenario.
+Phase 5 after that adds the PermissionRequest auto-deny, which removes the one prompt Scott had
+to accept during the happy run.
 
 ## Notes for whoever continues
 
-- The CLI runs the plugin in place; edits apply immediately. `install-cli` has been run on this VM.
-- VS Code's integrated terminal keeps the PATH VS Code started with; restart VS Code fully after
-  installs. Sessions started from a stale VS Code cannot resolve `node` for exec-form hooks.
+- The CLI runs the plugin in place; edits apply immediately. Do not edit `lib/gate.js` or the
+  hook scripts while a live run is in progress on this machine.
+- Restart VS Code fully after installs; its integrated terminal keeps a stale PATH.
 - A scratch project that is its own git repository needs its own workspace trust (D28).
-- `cachedUsageUtilization` in `~/.claude.json` comes and goes; the statusline bridge is primary.
-- Never call `process.exit()` right after a `fetch` in the CLI; set `process.exitCode`.
-- `spikes/out/todo-demo` is still in state running from the CHECKPOINT 2 demo; delete its
-  `.autoclaude/state.json` when it is no longer needed.
+- The spike supervisor (`spikes/p08-supervisor/supervise.mjs` with `AC_SPIKE_CWD`) is the interim
+  runner until Phase 6 delivers `autoclaude run`; close its window with `taskkill /T` on the
+  supervisor pid from `out/supervisor.log`.
 
 ## Decisions Scott still owns
 

@@ -14,9 +14,9 @@ what order lives in [PLAN.md](PLAN.md). Where things are right now lives in
 
 ## Status, in one line
 
-Phase 2 complete (2026-09-27): `init`, the project template, the statusline bridge, context
-injection and the machine registry all work live on a fixture copy; 61 tests pass. CHECKPOINT 2
-is waiting on Scott's look at the status line and the `/compact` re-injection. Next: Phase 3, the gate.
+Phase 3 complete (2026-09-27): the gate ran two live plans unattended, a 3-step happy plan
+(3 commits, tag, summary) and a broken one (3 strikes, pause, page). 108 tests pass. CHECKPOINT 3
+is waiting on Scott's go. Next: Phase 4, the browser tester.
 
 ## Definition of done: every prompt, no exceptions
 
