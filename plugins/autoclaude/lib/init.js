@@ -15,6 +15,27 @@ export function templateDir() {
 }
 
 // Looks at package.json and guesses the checks and the dev server. Every guess is reported.
+// For a dev script that runs a Node file ("node server.js", "node --watch src/app.js"), read that
+// file for its default port (`PORT || 4173`, `.listen(4173`) and a health route ("/health").
+export function serverEntry(root, script) {
+  const m = String(script || "").match(/\bnode\b(?:\s+--?[\w-]+(?:=\S+)?)*\s+("[^"]+"|'[^']+'|[^\s"']+\.(?:m?js|cjs))/);
+  if (!m) return null;
+  const file = path.join(root, m[1].replace(/^["']|["']$/g, ""));
+  let text = "";
+  try { const st = fs.statSync(file); if (st.size > 512 * 1024) return null; text = fs.readFileSync(file, "utf8"); } catch { return null; }
+  const port = (text.match(/PORT\s*(?:\|\||\?\?)\s*(\d{2,5})\b/) || text.match(/\.listen\(\s*(\d{2,5})\b/) || [])[1] || null;
+  const health = (text.match(/["'`](\/health(?:z|check)?)["'`]/) || [])[1] || null;
+  return { file, port, healthPath: health };
+}
+
+// The project's name for the templates: package.json's name (without an npm scope), else the
+// folder's name (the rehearsal's folder name ended up in the plan title and the run branch).
+export function projectName(root) {
+  const pkg = readJson(path.join(root, "package.json"), null);
+  const n = pkg && typeof pkg.name === "string" ? pkg.name.replace(/^@[^/]+\//, "").trim() : "";
+  return n || path.basename(root);
+}
+
 export function detectProject(root) {
   const pkg = readJson(path.join(root, "package.json"), null);
   const notes = [];
@@ -35,15 +56,20 @@ export function detectProject(root) {
   if (has("dev") || has("start")) {
     const name = has("dev") ? "dev" : "start";
     const script = scripts[name];
+    // 127.0.0.1, not localhost: on Windows localhost can resolve to ::1 first, and a server
+    // bound to 127.0.0.1 only never answers there (seen in the onboarding rehearsal).
     let url = null;
-    const port = (script.match(/--port[= ](\d+)/) || script.match(/PORT=(\d+)/) || [])[1];
-    if (port) url = `http://localhost:${port}`;
-    else if (deps.vite || deps["@vitejs/plugin-react"]) url = "http://localhost:5173";
-    else if (deps.next) url = "http://localhost:3000";
-    else if (deps.astro) url = "http://localhost:4321";
-    else if (deps["@sveltejs/kit"]) url = "http://localhost:5173";
-    if (!url) { url = "http://localhost:3000"; notes.push(`dev server: "npm run ${name}" found but its port is unknown; devServer.url is a guess, check it`); }
-    devServer = { command: `npm run ${name}`, url, healthPath: "/", startTimeoutSec: 90 };
+    let healthPath = "/";
+    const entry = serverEntry(root, script);
+    const port = (script.match(/--port[= ](\d+)/) || script.match(/PORT=(\d+)/) || [])[1] || (entry && entry.port);
+    if (port) url = `http://127.0.0.1:${port}`;
+    else if (deps.vite || deps["@vitejs/plugin-react"]) url = "http://127.0.0.1:5173";
+    else if (deps.next) url = "http://127.0.0.1:3000";
+    else if (deps.astro) url = "http://127.0.0.1:4321";
+    else if (deps["@sveltejs/kit"]) url = "http://127.0.0.1:5173";
+    if (entry && entry.healthPath) healthPath = entry.healthPath;
+    if (!url) { url = "http://127.0.0.1:3000"; notes.push(`dev server: "npm run ${name}" found but its port is unknown; devServer.url is a guess, check it`); }
+    devServer = { command: `npm run ${name}`, url, healthPath, startTimeoutSec: 90 };
   } else {
     notes.push("no dev or start script: devServer left empty (the browser tester needs one for UI steps)");
   }
@@ -133,7 +159,7 @@ export function initProject(root, options = {}) {
 
   // 2. template files (never overwrite)
   if (fs.existsSync(template)) {
-    const name = path.basename(root);
+    const name = projectName(root);
     const date = now.toISOString().slice(0, 10);
     for (const rel of walk(template)) {
       const target = path.join(root, rel);
@@ -166,7 +192,7 @@ export function initProject(root, options = {}) {
     const cfgFile = ["playwright.config.ts", "playwright.config.js", "playwright.config.mjs"].find((f) => fs.existsSync(path.join(root, f)));
     if (cfgFile) report.skipped.push(cfgFile);
     else {
-      const url = detected.devServer.url || "http://localhost:3000";
+      const url = detected.devServer.url || "http://127.0.0.1:3000";
       writeFileAtomic(path.join(root, "playwright.config.js"), `// Added by autoclaude init. Adjust baseURL and the test directory to taste.\nexport default {\n  testDir: "e2e",\n  use: { baseURL: "${url}", headless: true },\n  reporter: "list"\n};\n`);
       ensureDir(path.join(root, "e2e"));
       if (!fs.existsSync(path.join(root, "e2e", "smoke.spec.js"))) {

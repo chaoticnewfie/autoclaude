@@ -195,3 +195,50 @@ One entry per working session: what was done, what was committed. Append only.
 - Notifications from the run: a high "paused: the bug bash cannot run" and the default
   "plan complete" summary, both accepted by Discord. Idle markers paged nobody, as designed.
 - 204 tests pass. P6.1 to P6.6 ticked. CHECKPOINT 6 presented.
+
+## 2026-09-27 (Code VM) - Phase 7: plan skill, docs, and a review round before the rehearsal
+
+- Scott settled D20: the repo stays private, shared with invited collaborators, no license; the
+  rehearsal runs during the day (D41).
+- Writing the install docs exposed that a GitHub install could not work: `init` read the project
+  template from the repo root, and the shim and watchdog stored a versioned plugin path. Fixed
+  (D42): the template ships inside the plugin, and a launcher finds the current install each
+  time. The marketplace is now named `autoclaude`. A scripted install from GitHub into a
+  throwaway config proved it, including a simulated update.
+- Built the `/autoclaude:plan` skill, README.md, docs/USAGE.md and `autoclaude uninstall`.
+- A review workflow (6 agents: two fact-checkers, a newcomer reading only the docs, two dry runs
+  of the plan skill on scratch projects, a completeness critic) found real bugs, not just doc
+  gaps. The worst: the tool guard ignored Claude Code's PowerShell tool, and did nothing at all
+  from a path with a space; any session opened in a project during a run was treated as the
+  builder, and `--continue` could resume the wrong conversation; `pause --now` left the builder
+  working with every guard off; a finished plan could not be extended; new projects could not
+  pass the dev server preflight. A fix workflow (4 agents, disjoint files) fixed them all, plus
+  follow-ups done here: a failed `--resume` opens a fresh session, and a `pause --now` during a
+  verification survives the gate's final save (D43).
+- Verified live on this VM, version 0.9.1: `test/live/gh-install.live.mjs` installed from GitHub
+  into a config folder with a space and a tilde, 9/9 (init from the cache copy, the launcher, the
+  installed guard denying pushes from both shell tools, a simulated update). A real
+  `autoclaude run` on the fixture's 3-step plan: the builder started under a chosen session id; a
+  separate Claude session run in the project meanwhile was ignored by every hook (heartbeat
+  unchanged) while the builder's own hooks worked; `pause --now` ended the builder within 20 s;
+  `resume` relaunched it with `--resume <id>` and the context was re-injected; the plan
+  completed 3/3 in 12 minutes, the bug bash wrapped up at its turn limit with a pass.
+- Then `autoclaude uninstall` and `claude plugin uninstall` took this machine back to no
+  AutoClaude, keeping only the Discord setting, for the onboarding rehearsal.
+- 264 tests pass.
+- Onboarding rehearsal by link on a scratch "existing project" outside the repo (headless
+  `claude -p`, told only the repo URL, notes instead of questions): 13 minutes, 45 turns. It read
+  the private repo with gh, installed the plugin from GitHub and the CLI, followed the init and
+  plan skills by reading them, reviewed the owner's list and rules, planned 6 steps, set checks,
+  the dev server and 13 tested deny rules (including the Proxmox host this VM has a root key
+  for), committed, and stopped at `autoclaude run --check` with only `FAIL trust`, which a
+  headless session can never give. Its notes led to 0.9.2: the run rules override the user's
+  own `~/.claude/CLAUDE.md`; init reads a Node server's port and `/health` route, uses 127.0.0.1,
+  and names the project from package.json; the plan skill reads the user-level rules and warns
+  against writing deny patterns from a shell; USAGE notes on trust and on network access.
+- `autoclaude uninstall` run through its own `.cmd` shim printed "The system cannot find the
+  path specified" (cmd rereads a batch file it is running); the shim is now deleted two seconds
+  after the command exits. Checked in real cmd, exit codes intact.
+- The machine is back to no AutoClaude (plugin, marketplace, command, status line bridge and
+  watchdog removed; the Discord setting kept; the registry emptied) for Scott's blind rehearsal.
+- 265 tests pass. P7.1 and P7.2 ticked.

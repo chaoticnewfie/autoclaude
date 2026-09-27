@@ -14,10 +14,10 @@ what order lives in [PLAN.md](PLAN.md). Where things are right now lives in
 
 ## Status, in one line
 
-Phase 6 complete (2026-09-27): `autoclaude run`, the supervisor, the Task Scheduler watchdog,
-`nudge` and the summaries work; a live chaos run recovered from all six failures without Scott
-and exposed five bugs, all fixed. 204 tests pass. CHECKPOINT 6 is waiting on Scott's go. Next:
-Phase 7 (planner, docs, the blind DB rehearsal, release). Never open the DB project (D37).
+Phase 7 in progress (2026-09-27): the plan skill, README and USAGE are done and reviewed (P7.1,
+P7.2), version 0.9.2 installs and runs from GitHub, and an onboarding rehearsal by link reached
+the preflight. 265 tests pass. Next: P7.3, Scott's blind all-day rehearsal on his DB project;
+this machine has no AutoClaude installed on purpose. Never open the DB project (D37).
 
 ## Definition of done: every prompt, no exceptions
 
@@ -113,6 +113,14 @@ Phase 7 (planner, docs, the blind DB rehearsal, release). Never open the DB proj
   the hooks and the gate. The VS Code tool shells here lack node, and the PowerShell one lacks git
   too. Start live runs from a fresh terminal, or prepend both; a run started with node but no git
   could not commit.
+- A directory marketplace (a clone added by path) loads the plugin from the clone, but
+  `installed_plugins.json` still lists a cache copy made at install time, which goes stale. A
+  GitHub marketplace runs from `plugins/cache/<marketplace>/autoclaude/<version>/`, and only a
+  version bump makes `claude plugin update` fetch new code (rule 14).
+- Only an interactive `claude` in a folder records workspace trust; `claude -p` and SDK sessions
+  never do, so a headless onboarding always ends at `FAIL trust`.
+- `test/live/gh-install.live.mjs` installs from GitHub into a throwaway config (path with a space
+  and a tilde) and checks the installed copy end to end, without touching the real config.
 - The only `claude` binary on that VM is the VS Code extension's bundled one under
   `.vscode\extensions\anthropic.claude-code-*\resources\native-binary\claude.exe`. The unattended
   runner needs the native install: `irm https://claude.ai/install.ps1 | iex`.

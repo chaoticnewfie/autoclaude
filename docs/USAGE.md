@@ -57,6 +57,9 @@ Contents:
 Open a new terminal after each install so it sees the new program. The copy of Claude Code that
 comes inside an editor extension is not enough: the run starts `claude` from a terminal.
 
+A run needs network access the whole time: Claude itself, and the browser tester, which fetches
+the Playwright MCP server (`npx -y @playwright/mcp@latest`) each time it starts.
+
 Sign in once: run `claude` in a terminal, log in with your Claude subscription, pick a theme if
 asked, then `/exit`. The run uses the same 5-hour and weekly usage limits as the rest of your
 Claude Code work; on a Pro plan, expect long waits for the 5-hour reset during a long run.
@@ -178,15 +181,20 @@ nothing else the checklist does not need:
    must be clean before a run. For a brand new project: `git init`, then a first commit. If the
    tree is dirty with the user's own work, ask whether to commit or stash it.
 4. **Trust and first run.** Claude Code must have been opened once in the project folder from a
-   terminal, with its theme picker (first run only) and folder-trust question answered. The
-   preflight's `trust` line (step 9) confirms it. If it fails, ask the user to run `claude` in the
-   project once, answer both, and `/exit`.
+   terminal, with its theme picker (first run only) and folder-trust question answered. Only a
+   person can answer them: a session started with `claude -p` or the Agent SDK never records
+   trust, so if you are such a session, tell the user now that this item is theirs. The
+   preflight's `trust` line (step 9) confirms it. If it fails, ask the user to run `claude` in
+   the project once, answer both, and `/exit`.
 5. **Init.** `/autoclaude:init` asks two questions (a Playwright test scaffold, only for a web
    project without end-to-end tests; and whether to install the status line bridge, which records
    usage data for the weekly pause by editing the user-level Claude Code status line once, with a
    backup, keeping any status line already there). Then it writes what is missing and never
    overwrites an existing file:
-   - `autoclaude.config.json`, with guessed check commands and dev server
+   - `autoclaude.config.json`, with check commands and a dev server guessed from `package.json`
+     (for a dev script that runs a Node file, the port and a `/health` route are read from that
+     file); the project's name, used in the plan title and the run branch, comes from
+     `package.json` or else the folder's name
    - `CLAUDE.md`, `PLAN.md`, `CONTINUE_HERE.md`, `PROGRESS.md`, and `docs/` with `DECISIONS.md`,
      `BLOCKERS.md`, `DEFERRED.md`, `REVIEW_NOTES.md`, `SECURITY-FINDINGS.md`, `SESSION_LOG.md`
    - `.gitattributes` and `.editorconfig` only if the project has none; entries added to

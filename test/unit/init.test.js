@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
-import { initProject, detectProject, formatInitReport, playwrightMcpConfig, existingProjectSignals } from "../../plugins/autoclaude/lib/init.js";
+import { initProject, detectProject, formatInitReport, playwrightMcpConfig, existingProjectSignals, serverEntry, projectName } from "../../plugins/autoclaude/lib/init.js";
 import { gitEnv } from "../fixtures/prepare.js";
 
 const tmp = (p) => fs.mkdtempSync(path.join(os.tmpdir(), p));
@@ -31,12 +31,12 @@ test("detectProject guesses checks and the dev server from package.json", () => 
   fs.writeFileSync(path.join(root, "package.json"), JSON.stringify({ scripts: { dev: "vite", lint: "biome check .", typecheck: "tsc --noEmit", test: "vitest run", "test:e2e": "playwright test" }, devDependencies: { vite: "^8" } }));
   const d = detectProject(root);
   assert.deepEqual(d.checks.map((c) => [c.name, c.command, c.needsDevServer || false]), [["lint", "npm run lint", false], ["typecheck", "npm run typecheck", false], ["unit", "npm test", false], ["e2e", "npm run test:e2e", true]]);
-  assert.equal(d.devServer.url, "http://localhost:5173");
+  assert.equal(d.devServer.url, "http://127.0.0.1:5173");
   assert.equal(d.notes.length, 0);
 
   fs.writeFileSync(path.join(root, "package.json"), JSON.stringify({ scripts: { dev: "node server.js --port 4173" } }));
   const d2 = detectProject(root);
-  assert.equal(d2.devServer.url, "http://localhost:4173");
+  assert.equal(d2.devServer.url, "http://127.0.0.1:4173");
   assert.deepEqual(d2.checks, []);
   assert.ok(d2.notes.some((n) => /no lint, typecheck or test scripts/.test(n)));
 
@@ -44,6 +44,21 @@ test("detectProject guesses checks and the dev server from package.json", () => 
   const d3 = detectProject(bare);
   assert.equal(d3.hasPackageJson, false);
   assert.equal(d3.devServer.command, null);
+});
+
+test("detectProject reads a Node dev server's default port and health route; the name comes from package.json", () => {
+  const root = tmp("autoclaude-init-entry-");
+  fs.writeFileSync(path.join(root, "server.js"), "const port = Number(process.env.PORT || 4173);\napp.get(\"/health\", ok);\nserver.listen(port, \"127.0.0.1\");\n");
+  fs.writeFileSync(path.join(root, "package.json"), JSON.stringify({ name: "@home/kitchen-todos", scripts: { dev: "node --watch server.js" } }));
+  const d = detectProject(root);
+  assert.deepEqual([d.devServer.command, d.devServer.url, d.devServer.healthPath], ["npm run dev", "http://127.0.0.1:4173", "/health"]);
+  assert.ok(!d.notes.some((n) => /port is unknown/.test(n)), "the port was read, not guessed");
+  assert.deepEqual(serverEntry(root, "node src/missing.js"), null);
+  fs.writeFileSync(path.join(root, "app.mjs"), "http.createServer(h).listen(8080);\n");
+  assert.equal(serverEntry(root, "node app.mjs").port, "8080");
+  assert.equal(projectName(root), "kitchen-todos");
+  const bare = tmp("autoclaude-init-noname-");
+  assert.equal(projectName(bare), path.basename(bare));
 });
 
 test("initProject in an empty folder: config, template files with placeholders, gitignore, mcp config, registry; then idempotent", () => {
@@ -173,7 +188,7 @@ test("the Playwright scaffold is written only when asked and never over an exist
     assert.equal(fs.existsSync(path.join(root, "playwright.config.js")), false);
     r = initProject(root, { template, statusline: false, playwright: true });
     assert.ok(r.created.includes("playwright.config.js") && r.created.includes("e2e/smoke.spec.js"));
-    assert.match(fs.readFileSync(path.join(root, "playwright.config.js"), "utf8"), /baseURL: "http:\/\/localhost:3000"/);
+    assert.match(fs.readFileSync(path.join(root, "playwright.config.js"), "utf8"), /baseURL: "http:\/\/127\.0\.0\.1:3000"/);
     r = initProject(root, { template, statusline: false, playwright: true });
     assert.ok(r.skipped.includes("playwright.config.js"));
   });

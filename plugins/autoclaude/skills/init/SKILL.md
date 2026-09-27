@@ -3,7 +3,7 @@ name: init
 description: Set this project up for AutoClaude - config, the doc set, the statusline bridge, the machine registry - without overwriting anything that exists. Use when the user types /autoclaude:init or asks to add autoclaude to a project.
 ---
 
-1. Ask the user two quick things only if not obvious from the conversation: whether to add a Playwright scaffold (only if the project has no e2e tests yet and has a web UI), and whether the statusline bridge may be installed (it edits `~/.claude/settings.json` once, with a backup, and chains any existing status line).
+1. Ask the user two quick things only if not obvious from the conversation: whether to add a Playwright scaffold (only for a web UI project with no runnable end-to-end setup, meaning no Playwright config and no `@playwright/test` dependency; the scaffold then needs `npm i -D @playwright/test`, which the project's own rules may want the owner to approve), and whether the statusline bridge may be installed (it edits `~/.claude/settings.json` once, with a backup, and chains any existing status line).
 
 2. Run with the Bash tool from the project root (add `--playwright` and/or `--no-statusline` according to the answers; add `--dev-url <url>` if you already know the dev server address):
 

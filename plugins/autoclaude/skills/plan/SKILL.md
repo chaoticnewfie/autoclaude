@@ -93,7 +93,9 @@ pushes (unless `git.push` is true), nobody answers questions, and the builder ne
 or `autoclaude.config.json`. Find rules in the rules files that say otherwise: "commit and push
 after every change", "update PLAN.md at the end of every prompt", "ask before adding a
 dependency", "use plan mode first", "deploy after merging", "never work on a branch". Each one
-gets a line in the run section (3e) saying what happens instead during a run.
+gets a line in the run section (3e) saying what happens instead during a run. Read the owner's
+user-level `~/.claude/CLAUDE.md` too: the builder loads it as well. The run rules already say
+they override it; name its conflicting rules in the run section anyway, so nobody is surprised.
 
 **d. Docs files that existed before init.** The run writes to the files named under `docs` in
 `autoclaude.config.json`. Init never overwrites, so a file it listed as "kept as they were" (or
@@ -207,7 +209,9 @@ production `.env` files, package publishing. Example:
 ] }
 ```
 
-Test every rule against the commands it must block and one it must allow:
+Write the rules with the Edit or Write tool, not a shell one-liner: a shell collapses `\\` and
+turns `\b` into a backspace, and the rule then silently matches nothing. Test every rule against
+the commands it must block and one it must allow:
 
 ```
 autoclaude guard-test "bash ./deploy.sh"
@@ -221,7 +225,9 @@ run". Init's template already has it; an older `CLAUDE.md` gets it copied from
 `${CLAUDE_PLUGIN_ROOT}/project-template/CLAUDE.md` once the owner agrees. It says: the gate
 commits; no pushing unless `git.push` is true; no edits to the plan; nobody answers, so the
 builder uses the decider and `autoclaude blocked`; the per-prompt doc rules happen before each
-`autoclaude ready`. Add the project's own lines: one per conflicting rule from 1c, the files the
+`autoclaude ready`. If the project's `CLAUDE.md` has no Definition of done, spell those duties
+out in the section (for example: run the tests, rewrite CONTINUE_HERE.md, add decisions to
+docs/DECISIONS.md). Add the project's own lines: one per conflicting rule from 1c, the files the
 run must not edit, the names `guard.deny` blocks (read those with Read and Grep), and the plan's
 real file name if it is not `PLAN.md`. For a new project also fill the TODO lines: Tech stack,
 Commands (matching `checks` and `devServer`) and the backup rule. The stack lives in `CLAUDE.md`;

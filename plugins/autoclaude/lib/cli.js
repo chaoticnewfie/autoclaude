@@ -3,7 +3,7 @@
 // Later phases add init, run, supervise, start, ready, blocked, answer, watchdog.
 import fs from "node:fs";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { findProjectRoot, projectPaths, pluginRoot, binDir, machinePaths, isWindows } from "./paths.js";
 import { loadConfig, formatConfigErrors } from "./config.js";
 import { loadState, updateState, describeState, STATUS } from "./state.js";
@@ -461,12 +461,18 @@ async function cmdUninstall(args, io) {
 
   const dir = io.env.AUTOCLAUDE_BIN_DIR || binDir();
   const files = ["autoclaude", "autoclaude.cmd", l.LAUNCHER_NAME, l.LAUNCHER_SIDECAR, "autoclaude-watchdog.vbs"].map((f) => path.join(dir, f)).filter((f) => fs.existsSync(f));
-  for (const f of files) fs.rmSync(f, { force: true });
+  // `autoclaude uninstall` typed in cmd or PowerShell runs through autoclaude.cmd, and cmd reads
+  // a batch file again after each command: deleting it now ends the command with "The system
+  // cannot find the path specified". On Windows it (and the folder) go a moment after we exit.
+  const cmdShim = path.join(dir, "autoclaude.cmd");
+  const later = win && files.includes(cmdShim);
+  for (const f of files) if (!(later && f === cmdShim)) fs.rmSync(f, { force: true });
+  if (later) (io.deps.deleteLater || deleteAfterExit)(cmdShim, dir);
   io.out(`  command shims: ${files.length ? `removed ${files.length} file(s) from ${dir}` : "none found"}`);
   if (win) {
     // On Windows the folder is AutoClaude's own (%LOCALAPPDATA%\autoclaude\bin), and so is its
     // PATH entry. Elsewhere it is ~/.local/bin, shared with other tools: the folder and PATH stay.
-    try { if (fs.existsSync(dir) && fs.readdirSync(dir).length === 0) fs.rmdirSync(dir); } catch {}
+    try { if (!later && fs.existsSync(dir) && fs.readdirSync(dir).length === 0) fs.rmdirSync(dir); } catch {}
     io.out(`  PATH: ${removeFromUserPath(dir)}`);
   } else {
     io.out(`  PATH: unchanged (${dir} is shared with other tools, so it stays)`);
@@ -485,6 +491,16 @@ async function cmdUninstall(args, io) {
   io.out("  claude plugin marketplace remove autoclaude");
   io.out("Project files (autoclaude.config.json, .autoclaude/, the docs) are left alone; delete them by hand if you want.");
   return ok ? 0 : 1;
+}
+
+// Deletes `file` about two seconds from now, from a detached hidden cmd, then removes `dir` if it
+// is empty by then. Windows only.
+function deleteAfterExit(file, dir) {
+  const line = `ping -n 3 127.0.0.1 >nul & del /f /q "${file}" >nul 2>&1 & rd "${dir}" >nul 2>&1`;
+  try {
+    const child = spawn("cmd.exe", ["/d", "/s", "/c", `"${line}"`], { detached: true, stdio: "ignore", windowsVerbatimArguments: true, windowsHide: true });
+    child.unref();
+  } catch {}
 }
 
 // Takes `dir` out of the user's PATH on Windows: the user environment through PowerShell, as

@@ -228,11 +228,13 @@ test("uninstall removes the watchdog, the status line bridge, the shims and the 
   const deps = {
     uninstallWatchdog: () => { calls.push("watchdog"); return { ok: true, stderr: "", wasInstalled: true }; },
     uninstallStatusline: () => { calls.push("statusline"); return { removed: true, restored: { command: "old" } }; },
-    removeFromUserPath: (d) => { calls.push(`path ${d}`); return `removed ${d} from your user PATH`; }
+    removeFromUserPath: (d) => { calls.push(`path ${d}`); return `removed ${d} from your user PATH`; },
+    // The .cmd shim may be the running command, so on Windows it is deleted after exit.
+    deleteLater: (file) => { calls.push(`later ${path.basename(file)}`); fs.rmSync(file, { force: true }); }
   };
   let r = await run(["uninstall"], dir, { configDir, deps: { ...deps, isWindows: true }, env: { AUTOCLAUDE_BIN_DIR: dir, PATH: "" } });
   assert.equal(r.code, 0, r.out);
-  assert.deepEqual(calls, ["watchdog", "statusline", `path ${dir}`]);
+  assert.deepEqual(calls, ["watchdog", "statusline", ...(process.platform === "win32" ? ["later autoclaude.cmd"] : []), `path ${dir}`]);
   assert.match(r.out, /watchdog: removed/);
   assert.match(r.out, /status line bridge: removed; your previous status line is back/);
   assert.match(r.out, new RegExp(`command shims: removed ${process.platform === "win32" ? 4 : 3} file\\(s\\)`));
