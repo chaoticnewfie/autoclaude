@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Todo fixture</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 480px; margin: 2rem auto; }
+    li.done span { text-decoration: line-through; color: #888; }
+    button { margin-left: .5rem; }
+  </style>
+</head>
+<body>
+  <h1>Todos</h1>
+  <form id="add">
+    <input id="text" placeholder="What needs doing?" autocomplete="off">
+    <button type="submit">Add</button>
+  </form>
+  <ul id="list"></ul>
+  <p id="count"></p>
+  <script>
+    async function load() {
+      const todos = await (await fetch("/api/todos")).json();
+      const ul = document.getElementById("list");
+      ul.innerHTML = "";
+      for (const t of todos) {
+        const li = document.createElement("li");
+        li.className = t.done ? "done" : "";
+        li.dataset.id = t.id;
+        const span = document.createElement("span");
+        span.textContent = t.text;
+        const toggle = document.createElement("button");
+        toggle.textContent = t.done ? "Undo" : "Done";
+        toggle.onclick = async () => { await fetch("/api/todos/" + t.id + "/toggle", { method: "POST" }); load(); };
+        const del = document.createElement("button");
+        del.textContent = "Delete";
+        del.onclick = async () => { await fetch("/api/todos/" + t.id, { method: "DELETE" }); load(); };
+        li.append(span, toggle, del);
+        ul.append(li);
+      }
+      document.getElementById("count").textContent = todos.filter((t) => !t.done).length + " left";
+    }
+    document.getElementById("add").onsubmit = async (e) => {
+      e.preventDefault();
+      const input = document.getElementById("text");
+      await fetch("/api/todos", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ text: input.value }) });
+      input.value = "";
+      load();
+    };
+    load();
+  </script>
+</body>
+</html>

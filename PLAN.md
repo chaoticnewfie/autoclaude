@@ -434,6 +434,7 @@ autoclaude/
 - `review.pauseAt` in the config does the same automatically: `phase-end` after the last step of every phase, `every-step` after each step. Default `never`.
 - While paused Scott reads `PROGRESS.md`, `docs/DECISIONS.md` and `git log`, edits `PLAN.md` freely (the gate re-lints it on resume and refuses to resume on a lint error), and leaves notes: `autoclaude note "<text>"` appends a dated entry to `docs/REVIEW_NOTES.md` and adds it to `pendingNotes`.
 - `autoclaude resume` (or `/autoclaude:resume`) clears `pauseRequested`, sets running, and the next SessionStart context injection carries every pending note under "Owner review notes: act on these first". Claude records what it did with each note in `docs/DECISIONS.md` as `N-###`, and the note leaves `pendingNotes`.
+- Where the run continues after a pause (D33): the step in `state.currentStep`, with its attempt count kept. If the owner unticked a verified step while paused, the gate re-baselines on resume: that step leaves `tickedByGate` and becomes current if it is now the first unfinished step. If the current step was removed from the plan, the first unfinished step becomes current. The owner never edits `state.json`.
 - Every pause sends a default-priority notification with the last verified step, the next step and the resume command. The dev server is stopped on pause.
 
 ---

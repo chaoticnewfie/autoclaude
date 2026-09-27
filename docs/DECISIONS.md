@@ -218,6 +218,25 @@ is absent from `settings.json` (good) and invisible to the CLI (the gap).
 Sending every notification through a hook process (the supervisor would need a session).
 Storing the channel in the project (secrets in repos, and it is per machine anyway).
 
+### D33 Resume continues the current step, notes first, and honours owner edits to the plan
+
+**Decision.** `state.json` holds `currentStep` and its attempt count; `PLAN.md` holds what is
+verified. On resume the SessionStart injection gives Claude the current step's text and every
+pending note under "act on these first", so the run continues the step it was on, shaped by the
+notes. While paused the owner may also edit `PLAN.md` freely, including unticking a verified step
+to have it redone. On resume the gate re-baselines its record from the plan as the owner left it:
+a step the owner unticked leaves `tickedByGate`, and `currentStep` becomes the first unfinished
+step in document order if the old one no longer exists or is no longer first. Lint still has to
+pass.
+
+**Why.** Scott asked how the run knows where it is after a pause and notes (2026-09-27). The
+answer has to be "exactly where the files say", not "wherever Claude remembers", and the owner
+needs a way to send the run back to a step without editing state files by hand.
+
+**Rejected.** Treating an owner untick as an integrity violation (the integrity check is for
+Claude ticking boxes during a run, not for the owner during a pause). A separate "redo step"
+command (the checkbox is the interface everyone already understands).
+
 ### D31 The launcher spawns `cmd start` from Node, and the supervisor polls `claude agents --json`
 
 **Decision.** `autoclaude run` opens the window through Node's `spawn("cmd.exe", ["/d","/s","/c",

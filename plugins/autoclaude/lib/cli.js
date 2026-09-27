@@ -12,6 +12,7 @@ import { readUsage, formatUsage } from "./usage.js";
 import { notify, readMachineNotify, writeMachineNotify, resolveChannel } from "./notify.js";
 import { readText, readJson, appendLine, ageMs, ensureDir } from "./fsatomic.js";
 import { isPidAlive, findOnPath } from "./proc.js";
+import { initProject, formatInitReport } from "./init.js";
 
 const VERSION = JSON.parse(fs.readFileSync(path.join(pluginRoot(), ".claude-plugin", "plugin.json"), "utf8")).version;
 
@@ -20,6 +21,9 @@ const HELP = `autoclaude ${VERSION}
 Usage: autoclaude <command> [options]
 
 Project commands (run inside a project):
+  init [--playwright] [--no-statusline] [--dev-url <url>] [--dir <path>]
+                        Set the project up: config, doc set, .gitignore, browser-tester config,
+                        machine registry, statusline bridge. Never overwrites existing files.
   status [--all]        State, current step, attempts, usage, last progress (--all: every registered project)
   pause [--now]         Pause after the next verified commit (or right now with --now)
   note "<text>"         Leave a review note for Claude; it is read on the next resume or session start
@@ -57,6 +61,7 @@ export async function runCli(argv, rawIo = {}) {
     switch (cmd) {
       case "help": case "--help": case "-h": io.out(HELP.trimEnd()); return 0;
       case "version": case "--version": case "-v": io.out(VERSION); return 0;
+      case "init": return cmdInit(rest, io);
       case "status": return cmdStatus(rest, io);
       case "pause": return cmdPause(rest, io);
       case "note": return cmdNote(rest, io);
@@ -113,6 +118,24 @@ function fmtAge(ms) {
   if (min < 1) return `${Math.round(ms / 1000)} s ago`;
   if (min < 120) return `${Math.round(min)} min ago`;
   return `${(min / 60).toFixed(1)} h ago`;
+}
+
+// ---------- init ----------
+
+function cmdInit(args, io) {
+  const opts = { playwright: false, statusline: true, devUrl: null, now: io.now(), env: io.env };
+  let dir = io.cwd;
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a === "--playwright") opts.playwright = true;
+    else if (a === "--no-statusline") opts.statusline = false;
+    else if (a === "--dev-url") { opts.devUrl = args[++i]; if (!opts.devUrl) throw new Error("--dev-url needs a value"); }
+    else if (a === "--dir") { dir = args[++i]; if (!dir) throw new Error("--dir needs a value"); }
+    else throw new Error(`unknown option ${a}`);
+  }
+  const report = initProject(path.resolve(io.cwd, dir), opts);
+  io.out(formatInitReport(report));
+  return report.warnings.length ? 0 : 0;
 }
 
 // ---------- status ----------
