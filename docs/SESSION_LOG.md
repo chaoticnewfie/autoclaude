@@ -73,3 +73,22 @@ One entry per working session: what was done, what was committed. Append only.
   with no environment, HTTP 204. The webhook is in the OS secure store and in that file, never in
   the repo or the log. CLI tests now run under a throwaway `CLAUDE_CONFIG_DIR`.
 - P1.5 ticked. Phase 1 complete; CHECKPOINT 1 presented.
+
+## 2026-09-27 (Code VM) - Phase 2
+
+- Scott: go for Phase 2; asked how a resumed run knows where it is (answered, D33).
+- One background agent drafted `project-template/` (13 files) from the conventions survey and
+  the R17 rules; reviewed and kept as delivered. Stopped when done.
+- Built `lib/init.js` and the init skill, `lib/registry.js`, `lib/statusline.js` with the
+  self-contained `templates/statusline-bridge.js`, `hooks/hooks.json` with the SessionStart hook,
+  `scripts/session-context.js` and `prompts/context.md`, the todo-app fixture and three fixture
+  plans. `npm test` counterpart: `node scripts/check.js` -> 61 tests pass.
+- Live, on a scratch copy of the fixture under `spikes/out/todo-demo`: `init` created the config
+  (lint, unit, e2e, dev server) and the doc set, registered the project, and installed the
+  statusline bridge into `~/.claude/settings.json` with a backup. A headless session answered
+  with the injected step and owner note. An interactive window showed
+  `AC S1.1 > running | 5h 44% | 7d 11%` and wrote `usage.json`.
+- Gotcha: the scratch copy had its own `.git`, so it needed its own workspace trust and the first
+  window stopped on the trust dialog; removed the nested repo (now in `CLAUDE.md` facts).
+- Three Discord test notifications delivered in total today.
+- P2.1 to P2.5 ticked. CHECKPOINT 2 presented; Scott's look at `/compact` re-injection pending.

@@ -87,8 +87,11 @@ export function initProject(root, options = {}) {
   // 1. config
   const detected = detectProject(root);
   report.detected = detected;
+  if (devUrl) {
+    detected.devServer = { ...detected.devServer, url: devUrl, command: detected.devServer.command || "npm run dev" };
+    detected.notes = detected.notes.filter((n) => !/devServer\.url is a guess/.test(n));
+  }
   report.notes.push(...detected.notes);
-  if (devUrl) detected.devServer = { ...detected.devServer, url: devUrl, command: detected.devServer.command || "npm run dev" };
   if (fs.existsSync(p.configFile)) {
     report.skipped.push(CONFIG_FILE);
   } else {

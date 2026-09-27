@@ -509,22 +509,22 @@ autoclaude/
 
 ### Phase 2: Project init and context injection
 
-- [ ] **P2.1** `/autoclaude:init` skill and `autoclaude init`
+- [x] **P2.1** `/autoclaude:init` skill and `autoclaude init` (2026-09-27: `test/unit/init.test.js`; live on a copy of the fixture app: config with detected lint, unit, e2e and the dev server, 14 template files, `.gitignore`, MCP config, registry, statusline; second run kept every file)
   - Accept: in a fresh project it detects `package.json` scripts and writes `autoclaude.config.json` with the detected commands (asking Scott to confirm anything it's unsure of)
   - Accept: it writes every missing file from `project-template/` (`CLAUDE.md`, `PLAN.md`, `CONTINUE_HERE.md`, `PROGRESS.md`, the `docs/` set, `.gitattributes`, `.editorconfig`), never touches a file that exists, reports what it skipped, and adds `.autoclaude/` to `.gitignore`
   - Accept: it offers to add Playwright (config plus one smoke spec) if missing, and writes the tester's MCP config into `.autoclaude/mcp.playwright.json` (on Windows `{"command":"cmd","args":["/c","npx","-y","@playwright/mcp@latest","--headless"]}`, elsewhere `npx` directly; P0.5)
   - Accept: it checks that `node` resolves on the machine PATH and that `claude` is the native install, and says what to fix if not (D29)
   - Accept: in a project that already has code or a plan, `init` ends by recommending a review of the plan against the step format and the decide-ahead rule (R17), and names `/autoclaude:plan` as the way to do it
   - Accept: running it again is safe (idempotent) and never overwrites a filled-in config or plan
-- [ ] **P2.2** Statusline bridge
+- [x] **P2.2** Statusline bridge (2026-09-27: `init` installed `~/.claude/autoclaude/statusline.js` with a settings backup; a live session in the fixture copy showed `AC S1.1 > running | 5h 44% | 7d 11%` and wrote `usage.json`; chaining an existing status line is covered by `test/unit/statusline.test.js`, since this machine had none)
   - Accept: `init` installs `~/.claude/autoclaude/statusline.js` and registers it in `~/.claude/settings.json`, chaining any existing `statusLine` command and leaving its output intact
   - Accept: `usage.json` updates while a session runs. The statusline shows `AC <step> ▸ <status> │ 5h N% │ 7d N%` while running, and just the chained output otherwise.
-- [ ] **P2.3** Context injection
+- [x] **P2.3** Context injection (2026-09-27: `hooks/hooks.json` SessionStart exec-form hook; scenario tests for silent-when-idle and full injection; live: a headless session in a running fixture project answered with the current step and the owner note; `startup` and `resume` sources seen live, `compact` is demonstrated at CHECKPOINT 2)
   - Accept: while running, starting, resuming, `/clear` or `/compact` injects `prompts/context.md` (including the rule to rewrite `CONTINUE_HERE.md` before `ready`, D25), the current step's full text, the last 10 `PROGRESS.md` lines, and any pending review notes (§4.10)
   - Accept: when not running, nothing is injected
-- [ ] **P2.4** Machine registry
+- [x] **P2.4** Machine registry (2026-09-27: `lib/registry.js`, `init` registers, `status --all` lists; live on the Code VM)
   - Accept: `init` adds the project to `~/.claude/autoclaude/registry.json`, and `autoclaude status --all` lists every registered project
-- [ ] **P2.5** Project template
+- [x] **P2.5** Project template (2026-09-27: `project-template/` with 13 files; the template plan lints as "no steps" so a run cannot start on placeholders; the R17 section is in its `CLAUDE.md`; `init` on the fixture copy added only the missing files)
   - Accept: `project-template/CLAUDE.md` carries the conventions in `docs/CONVENTIONS_SURVEY.md` section 2 (all except 10, with 15 as reworded in this repo's `CLAUDE.md`) with fill-in slots for the stack and the definition-of-done commands; `PLAN.md` is the step-format skeleton with the requested-features table; each `docs/` file opens with a one-paragraph statement of its purpose
   - Accept: `project-template/CLAUDE.md` has a "planning for an unattended run" section (R17): decisions are made in the plan, not during the run, because nobody answers while autoclaude builds; every step needs Accept lines a test or a browser can check; the Constraints & decisions section says what to do when something is unclear; and a plan written before autoclaude was added gets reviewed against these rules
   - Accept: `autoclaude init` in an empty folder produces a project that passes `lint-plan` once one step is filled in; `init` in a checkout of Lists or DB adds only the files they lack and lists what it skipped

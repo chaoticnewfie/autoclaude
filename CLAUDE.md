@@ -14,9 +14,9 @@ what order lives in [PLAN.md](PLAN.md). Where things are right now lives in
 
 ## Status, in one line
 
-Phase 1 complete (2026-09-27): the plugin installs from the local marketplace, the CLI and the
-core libraries exist with a green test suite, and Discord notifications reach Scott's phone.
-CHECKPOINT 1 is waiting on his go for Phase 2. Phase 0 is fully verified (`VERIFY.md`).
+Phase 2 complete (2026-09-27): `init`, the project template, the statusline bridge, context
+injection and the machine registry all work live on a fixture copy; 61 tests pass. CHECKPOINT 2
+is waiting on Scott's look at the status line and the `/compact` re-injection. Next: Phase 3, the gate.
 
 ## Definition of done: every prompt, no exceptions
 
@@ -130,6 +130,11 @@ CHECKPOINT 1 is waiting on his go for Phase 2. Phase 0 is fully verified (`VERIF
   with `resets_at`, refreshed by any session. Read it; never write that file (D27, D28).
 - Bash-tool commands are wrapped in a way that breaks on an apostrophe even inside a quoted
   heredoc. Write scripts with the Write tool and call them by path.
+- Workspace trust covers subfolders of a trusted repo, but a nested git repository needs its own
+  trust: a scratch copy of the fixture with its own `.git` stopped an interactive session on the
+  trust dialog. Scratch projects under `spikes/out/` must not be git repositories.
+- `~/.claude/settings.json` may be written by the CLI (the statusline bridge install did it with a
+  backup); `~/.claude.json` may not (classifier-denied, and D28 forbids it anyway).
 
 ## Documentation index
 

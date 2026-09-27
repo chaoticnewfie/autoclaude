@@ -4,58 +4,61 @@
 
 ## Where things are
 
-**Phase 1 is complete. CHECKPOINT 1 is waiting on Scott's go for Phase 2.** Phase 0 is fully verified.
+**Phase 2 is complete. CHECKPOINT 2 is waiting on Scott's look.** Phases 0 and 1 are done.
 
 | Step | State |
 |---|---|
-| P1.1 marketplace and installable plugin | Done. Installed on the Code VM from `C:\AutoClaude` (loads in place). |
-| P1.2 `lib/plan.js` | Done. |
-| P1.3 `lib/state.js`, `lib/config.js`, `lib/fsatomic.js` | Done. |
-| P1.4 CLI: status, pause, note, resume, lint-plan, usage, install-cli | Done. `install-cli` ran for real; `autoclaude` is on Scott's user PATH. |
-| P1.5 `lib/notify.js`, userConfig, `notify-setup` | Done. Two Discord messages reached Scott (userConfig path and per-machine file path, D32). |
-| P1.6 `lib/proc.js`, `lib/paths.js` | Done. tmux and background launch paths untested (no Linux machine yet). |
+| P2.1 `autoclaude init` and the init skill | Done, live on a fixture copy. |
+| P2.2 statusline bridge | Done, installed on the Code VM; live `AC S1.1 > running | 5h 44% | 7d 11%`. |
+| P2.3 context injection (SessionStart hook) | Done; scenario tests plus a live headless and a live interactive check. `/compact` re-injection is what Scott looks at. |
+| P2.4 machine registry | Done. |
+| P2.5 `project-template/` | Done (13 files, drafted by a background agent, reviewed). |
 
-`node scripts/check.js`: syntax clean, all unit tests pass (see `docs/SESSION_LOG.md` for the count).
-Remote `chaoticnewfie/autoclaude`, branch `main`.
+`node scripts/check.js`: syntax 31/31, 61 tests pass. Remote `chaoticnewfie/autoclaude`, branch `main`.
 
-Configured on this machine (outside the repo): the Discord webhook in the plugin's secure
-userConfig store and in `~/.claude/autoclaude/notify.json`; `notify_channel=discord` in
-`~/.claude/settings.json` pluginConfigs.
+Live state on this machine: the plugin is installed and enabled; the statusline bridge is
+registered in `~/.claude/settings.json` (backup next to it); the Discord webhook is in the
+plugin's secure config and in `~/.claude/autoclaude/notify.json`; the registry lists one project,
+the scratch copy `C:\AutoClaude\spikes\out\todo-demo` (gitignored), which is in state `running`
+on `S1.1` of the happy plan with no supervisor or gate behind it. Set it back to idle before
+Phase 3 live runs: delete its `.autoclaude/state.json`.
+
+## CHECKPOINT 2 demo for Scott
+
+In a Start-menu PowerShell (or VS Code after a full restart):
+
+```
+cd C:\AutoClaude\spikes\out\todo-demo
+autoclaude status
+claude
+```
+
+The status line at the bottom reads `AC S1.1 > running | 5h N% | 7d N%`. Ask "which step are we
+on and what are its Accept lines?" (the answer comes from the injected context). Then `/compact`,
+ask again: the same context is re-injected after compaction. `/exit`. Note: the injected rules
+tell Claude to work on the step, so it may offer to start; it is a scratch copy, nothing matters.
 
 ## The exact next step
 
-**Phase 2** (`PLAN.md`), on Scott's go:
+**Phase 3, the Stop gate** (`PLAN.md`): P3.1 fixture app and plans (the app and the three plans
+exist; `broken.md` still needs `test/impossible.test.js` in the fixture, and `ui-bug.md` needs the
+`id="txt"` bug applied to a copy), P3.2 ready/blocked protocol and the gate skeleton (Stop hook in
+`hooks/hooks.json`, `scripts/stop-gate.js`), P3.3 `lib/devserver.js`, P3.4 `lib/checks.js` and
+`lib/report.js`, P3.5 pass path (tick, PROGRESS.md, commit, tag, next step), P3.6 fail path,
+P3.7 integrity check, P3.8 scenario tests. Then CHECKPOINT 3: the first live run on the fixture.
 
-1. P2.5 `project-template/` first, because P2.1 copies from it: `CLAUDE.md` (conventions plus the
-   R17 "planning for an unattended run" section), `PLAN.md` skeleton with the requested-features
-   table, `CONTINUE_HERE.md`, `PROGRESS.md`, `docs/{DECISIONS,SESSION_LOG,DEFERRED,BLOCKERS,
-   SECURITY-FINDINGS,REVIEW_NOTES}.md`, `.gitattributes`, `.editorconfig`, `.gitignore`.
-2. P2.1 `autoclaude init` and the `/autoclaude:init` skill: detect `package.json` scripts, write
-   `autoclaude.config.json`, copy missing template files only, `.autoclaude/` into `.gitignore`,
-   Playwright offer, MCP config per OS, `node` and native `claude` checks, plan-review
-   recommendation for existing projects. Idempotent.
-3. P2.2 statusline bridge: `~/.claude/autoclaude/statusline.js` registered in user settings,
-   chaining any existing statusLine, writing `usage.json`. Registering it edits
-   `~/.claude/settings.json`; do it through the CLI with a clear message and a backup.
-4. P2.3 context injection: `hooks/hooks.json` (exec form) with a SessionStart hook that exits at
-   once when no run is active; while running it injects `prompts/context.md`, the current step,
-   the last 10 `PROGRESS.md` lines and pending review notes. Also mirrors notify userConfig into
-   `notify.json` (D32).
-5. P2.4 machine registry: `init` registers the project; `status --all` lists them.
-
-CHECKPOINT 2: `init` on a fixture app, the statusline, and injected context after `/compact`.
+Design reminders for the gate: exit at once unless `state.status === "running"` and
+`AUTOCLAUDE_ROLE` is unset; keep the block reason under 4,000 characters and name the report
+path; `taskkill /T` for the dev server; D33 re-baseline on resume; the `review.pauseAt` and
+`pauseRequested` checks after the commit (section 4.10).
 
 ## Notes for whoever continues
 
-- The CLI runs the plugin in place: `%LOCALAPPDATA%\autoclaude\bin\autoclaude.cmd` calls
-  `C:\AutoClaude\plugins\autoclaude\bin\autoclaude.js`. Edits apply immediately.
-- VS Code's integrated terminal keeps the PATH VS Code started with; after `install-cli` or the
-  native Claude install, `claude` and `autoclaude` are "not recognized" there until VS Code is
-  fully closed and reopened. A Start-menu PowerShell sees them at once. `install-cli` says so.
-- `hooks/hooks.json` does not exist yet on purpose: the installed plugin stays inert in every
-  session until the hooks exit early when no run is active.
-- `cachedUsageUtilization` in `~/.claude.json` comes and goes (D27 amended); the statusline bridge
-  (P2.2) is what the usage gate will rely on.
+- The CLI runs the plugin in place; edits apply immediately. `install-cli` has been run on this VM.
+- VS Code's integrated terminal keeps the PATH VS Code started with; restart VS Code fully after
+  installs. Sessions started from a stale VS Code cannot resolve `node` for exec-form hooks.
+- A scratch project must not be its own git repository (workspace trust), see `CLAUDE.md` facts.
+- `cachedUsageUtilization` in `~/.claude.json` comes and goes; the statusline bridge is primary.
 - Never call `process.exit()` right after a `fetch` in the CLI; set `process.exitCode`.
 
 ## Decisions Scott still owns
