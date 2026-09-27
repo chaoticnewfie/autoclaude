@@ -19,6 +19,10 @@ The app is running at {{URL}}. Use the Playwright browser tools. You may use Rea
 5. Take a screenshot of each bug (browser_take_screenshot) with a short file name and no folder, for example `double-click.png`; they are kept with this report.
 6. Leave `testConcerns` empty.
 
+## Budget
+
+You have {{TURNS}} turns, and every tool call uses one. Share them across all the features instead of spending them on one. When about 8 are left, stop trying new things and give your verdict: a verdict from partial exploration is far more useful than none. Say in `notes` what you did not get to.
+
 ## Verdict
 
 Set `verdict` to "fail" only when a criterion failed or you found a high-severity bug; medium and low bugs become follow-ups for the owner and do not fail the phase. Keep everything short and factual. Reply with the structured verdict only.

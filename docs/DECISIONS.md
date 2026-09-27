@@ -399,6 +399,27 @@ something, which is worth a page.
 - **A second supervisor refuses to start** while a live one is recorded.
 - **Trust lookups compare real paths,** because Windows can name one folder by its 8.3 short form
   and its long form (found by a test, not by guessing).
+- **Found by the live chaos run and fixed the same day:**
+  - A nudge waits while the gate is verifying. The first forced `/compact` landed two seconds
+    into a verification, killed it and threw away the builder's `ready`.
+  - When a nudged prompt ends at the idle prompt, the supervisor goes straight back to the plan
+    (`continue`, not counted as a recovery). Before, a compacted session sat idle until the idle
+    or stall rule fired, which is 15 to 45 minutes with the default settings.
+  - `autoclaude nudge` undoes Git Bash's path conversion: from Git Bash, `"/compact"` arrives
+    as `C:/Program Files/Git/compact` and was sent to Claude as that text.
+  - `/autoclaude:start` prints the run rules after starting. The first session of a run never
+    had them, because SessionStart fires before the run exists.
+  - Only a resume from a pause starts the "did not pick it up" timer; the change from idle to
+    running is the session's own start, already in progress.
+  - The watchdog leaves a run alone when its supervisor pid is missing or its state is more than
+    24 hours old (logged as `stale`). It had revived a scratch project abandoned in Phase 5.
+  - A verification the supervisor has seen running counts as activity. Without it, a nine-minute
+    phase-end verification looked like nine silent minutes, and the session was relaunched two
+    seconds after the gate answered, which lost the answer.
+  - The checkers state their turn budget in the prompt. A checker that still runs out of turns is
+    resumed once (`--resume`, 4 turns) and asked for its structured answer from what it has
+    seen. The phase-end bug bash had explored for all 60 turns on both tries, and the gate threw
+    both runs away as machine failures. The resume was checked live before relying on it.
 
 ### D31 The launcher spawns `cmd start` from Node, and the supervisor polls `claude agents --json`
 

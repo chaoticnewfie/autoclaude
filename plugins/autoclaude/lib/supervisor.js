@@ -44,7 +44,7 @@ const ts = (iso) => { const t = iso ? Date.parse(iso) : NaN; return Number.isFin
 const mins = (ms) => `${Math.round(ms / MIN)} min`;
 
 // Pure decision. Every input is a plain value; see supervise() for where each comes from.
-// Returns { action: "none" | "relaunch" | "nudge" | "pause-stuck" | "pause-weekly" | "resume-weekly" | "exit", reason }.
+// Returns { action: "none" | "relaunch" | "nudge" | "continue" | "pause-stuck" | "pause-weekly" | "resume-weekly" | "exit", reason }.
 export function decide(i) {
   const { status, now, childAlive, cfg, sup } = i;
   const s = cfg.supervisor;
@@ -52,8 +52,13 @@ export function decide(i) {
     let want = null;
     const last = i.lastActivityAt || 0;
     if (!childAlive) want = "the session exited";
+    // A verification in progress is never interrupted, not even by an owner nudge (seen live: a
+    // nudge that landed during the gate's run killed it and wasted the builder's `ready`).
+    else if (i.gateAt && now - i.gateAt < (cfg.gate.timeoutSec + 300) * 1000) return { action: "none", reason: i.nudge ? "the gate is verifying a step; the nudge waits" : "the gate is verifying a step" };
     else if (i.nudge) return { action: "nudge", reason: `the owner asked for: ${i.nudge}` };
-    else if (i.gateAt && now - i.gateAt < (cfg.gate.timeoutSec + 300) * 1000) return { action: "none", reason: "the gate is verifying a step" };
+    // A nudged prompt (for example /compact) ends at an idle prompt; carry on with the run at once
+    // instead of waiting out idleRelaunchMin (seen live: a compacted session just sat there).
+    else if (sup.nudgedAt && i.idle && i.idle.at >= sup.nudgedAt && i.idle.at >= last) return { action: "continue", reason: "the owner's nudge has finished; back to the plan" };
     else if (i.failure && i.failure.type === "rate_limit" && i.failure.at >= last) {
       if (i.usage && i.usage.sevenDay && i.usage.sevenDay.pct >= 99) return { action: "pause-weekly", reason: `the weekly usage limit is reached (${Math.round(i.usage.sevenDay.pct)}%)` };
       const reset = (i.usage && i.usage.fiveHour && i.usage.fiveHour.resetsAt) || i.failure.at + 5 * 60 * MIN;
@@ -139,8 +144,8 @@ export async function supervise({
 
   fs.writeFileSync(p.supervisorPidFile, String(process.pid));
   updateState(root, (s) => { s.supervisorPid = process.pid; s.windowTitle = title; });
-  let sup = { recoveries: 0, countAtLastRecovery: -1, resumedAt: null, lastMorningDate: null };
-  try { sup = { ...sup, ...(readJson(supFile, {}) || {}), resumedAt: null }; } catch {}
+  let sup = { recoveries: 0, countAtLastRecovery: -1, resumedAt: null, nudgedAt: null, lastMorningDate: null };
+  try { sup = { ...sup, ...(readJson(supFile, {}) || {}), resumedAt: null, nudgedAt: null }; } catch {}
   const saveSup = () => { try { writeJsonAtomic(supFile, sup); } catch {} };
 
   const doSpawn = spawnChild || ((args, opts) => spawn(claudeBinary(env), args, { ...opts, stdio: "inherit" }));
@@ -167,6 +172,10 @@ export async function supervise({
   else log(`the run is paused (${state.pauseReason || "?"}); waiting for \`autoclaude resume\``);
 
   let loops = 0;
+  // The last poll that saw the gate verifying. A verification is activity: without this the
+  // session looked silent for the whole verification and was relaunched two seconds after a
+  // nine-minute bug bash ended (seen live), which threw away the gate's answer.
+  let gateSeenAt = 0;
   try {
     for (;;) {
       await sleep((cfgNow().supervisor.pollSec || 60) * 1000);
@@ -175,8 +184,11 @@ export async function supervise({
       state = loadState(root);
       const t = now();
       if (lastStatus !== STATUS.running && state.status === STATUS.running) {
-        sup.resumedAt = t; sup.recoveries = 0; sup.countAtLastRecovery = -1;
-        log(`the run is running again (was ${lastStatus})`);
+        // Only a resume from a pause needs watching for "the session did not pick it up"; the
+        // idle-to-running change is the session's own `autoclaude start`, already in progress.
+        if (lastStatus === STATUS.paused) sup.resumedAt = t;
+        sup.recoveries = 0; sup.countAtLastRecovery = -1;
+        log(`the run is ${lastStatus === STATUS.paused ? "running again" : "running"} (was ${lastStatus})`);
       }
       lastStatus = state.status;
       const beat = readHeartbeat(root);
@@ -197,7 +209,8 @@ export async function supervise({
       const nudgeFile = path.join(p.runtimeDir, "nudge.json");
       const nudge = (() => { try { const j = readJson(nudgeFile, null); return j && j.prompt ? String(j.prompt) : null; } catch { return null; } })();
       const usage = readUsage({ staleAfterMin: 24 * 60, now: t });
-      const lastActivityAt = Math.max(ts(beat.at) || 0, childStartedAt || 0);
+      if (gate && t - gate < (cfg.gate.timeoutSec + 300) * 1000) gateSeenAt = t;
+      const lastActivityAt = Math.max(ts(beat.at) || 0, childStartedAt || 0, gateSeenAt);
       const stale = t - lastActivityAt > cfg.supervisor.stallMin * MIN;
       const input = {
         status: state.status, pauseReason: state.pauseReason, now: t, childAlive, cfg, sup,
@@ -211,11 +224,19 @@ export async function supervise({
       if (d.action === "nudge") {
         // An owner request, not a recovery: it does not count towards the stuck limit.
         removeIfExists(nudgeFile);
+        removeIfExists(p.idleFile);
         await stopChild();
+        sup.nudgedAt = now();
         launch("resume", nudge);
+      } else if (d.action === "continue") {
+        // Also an owner request, so it does not count towards the stuck limit either.
+        sup.nudgedAt = null;
+        removeIfExists(p.idleFile);
+        await stopChild();
+        launch("resume");
       } else if (d.action === "relaunch") {
         await stopChild();
-        sup.recoveries += 1; sup.countAtLastRecovery = beat.count; sup.resumedAt = null;
+        sup.recoveries += 1; sup.countAtLastRecovery = beat.count; sup.resumedAt = null; sup.nudgedAt = null;
         removeIfExists(p.idleFile);
         if (failure && failure.type !== "rate_limit") removeIfExists(p.failureFile);
         launch("resume");

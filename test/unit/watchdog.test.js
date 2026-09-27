@@ -10,10 +10,10 @@ import {
 
 const tmp = (tag) => fs.mkdtempSync(path.join(os.tmpdir(), `autoclaude-wd-${tag}-`));
 
-function makeProject(parent, name, { status = "running", pidFile = null, statePid = null } = {}) {
+function makeProject(parent, name, { status = "running", pidFile = null, statePid = null, updatedAt = new Date().toISOString() } = {}) {
   const root = path.join(parent, name);
   fs.mkdirSync(path.join(root, ".autoclaude"), { recursive: true });
-  fs.writeFileSync(path.join(root, ".autoclaude", "state.json"), JSON.stringify({ version: 1, status, supervisorPid: statePid }));
+  fs.writeFileSync(path.join(root, ".autoclaude", "state.json"), JSON.stringify({ version: 1, status, supervisorPid: statePid, updatedAt }));
   if (pidFile !== null) fs.writeFileSync(path.join(root, ".autoclaude", "supervisor.pid"), `${pidFile}\n`);
   return root;
 }
@@ -135,6 +135,17 @@ test("watchdogPass leaves live, paused, complete and idle runs alone and reports
   assert.equal(readLines(logFile).length, 8, "one machine log line per action");
   for (const root of [alive, paused, complete]) assert.equal(fs.existsSync(path.join(root, ".autoclaude", "watchdog.json")), false);
   assert.equal(fs.existsSync(gone), false, "a missing project folder is not created");
+});
+
+test("a leftover 'running' state is not revived: no supervisor ever, or untouched for a day", async () => {
+  const parent = tmp("stale");
+  const never = makeProject(parent, "never-supervised");
+  const old = makeProject(parent, "old-run", { pidFile: 777, updatedAt: "2026-09-20T00:00:00.000Z" });
+  const recent = makeProject(parent, "recent-run", { pidFile: 778 });
+  const { calls, launch } = fakeLauncher();
+  const results = await watchdogPass({ registry: [never, old, recent], now: Date.now(), isAlive: () => false, launch, logFile: path.join(parent, "watchdog.log") });
+  assert.deepEqual(results.map((r) => r.action), ["stale", "stale", "launched"]);
+  assert.deepEqual(calls.map((c) => c.root), [recent]);
 });
 
 test("a launch that fails becomes launch-failed, records nothing, and the pass never throws", async () => {

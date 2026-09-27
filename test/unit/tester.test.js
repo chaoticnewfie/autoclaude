@@ -144,6 +144,19 @@ test("runBrowserCheck: one infra failure is retried; two are reported as infra",
   assert.match(r.failed, /no criteria/);
 });
 
+test("runBrowserCheck: a checker that runs out of turns is asked for its answer, and the prompt states the budget", async () => {
+  const limit = { ok: false, infra: true, subtype: "error_max_turns", sessionId: "s-9", error: "claude ended with error_max_turns: ", numTurns: 40, durationMs: 4000 };
+  const { r, calls, root } = await check([limit, ok(good)]);
+  assert.deepEqual([r.status, calls.length], ["passed", 2]);
+  assert.match(calls[0].prompt, /You have 40 turns/);
+  assert.deepEqual(calls[1].args.slice(-2), ["--resume", "s-9"]);
+  assert.match(r.sections[0].body, /answer given after reaching the turn limit/);
+  const saved = JSON.parse(fs.readFileSync(path.join(root, r.verdictFile), "utf8"));
+  assert.deepEqual([saved.wrappedUp, saved.tries, saved.numTurns], [true, 1, 45]);
+  const bash = await runBrowserCheck({ kind: "bugbash", root: tmp(), config, step: stepById(parsed, "S1.2"), parsed, env: process.env, attempt: 1, run: fakeRun([ok(good)]).run });
+  assert.equal(bash.status, "passed");
+});
+
 test("runBrowserCheck moves files the checker created in the project into its report folder", async () => {
   const env = gitEnv(process.env);
   const root = tmp();

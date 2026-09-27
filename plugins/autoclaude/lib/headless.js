@@ -34,7 +34,7 @@ export function buildArgs({ model = null, maxTurns = null, schema = null, mcpCon
 // sessionId, denials, durationMs, timedOut, code }. `infra` means the run itself did not produce
 // a usable answer (timeout, crash, unreadable output, an error result, no structured output).
 export function interpret({ stdout = "", stderr = "", code = null, timedOut = false, durationMs = 0, spawnError = null, expectStructured = true }) {
-  const base = { ok: false, infra: true, structured: null, output: null, costUsd: null, numTurns: null, sessionId: null, denials: [], durationMs, timedOut, code };
+  const base = { ok: false, infra: true, structured: null, output: null, costUsd: null, numTurns: null, sessionId: null, subtype: null, denials: [], durationMs, timedOut, code };
   if (spawnError) return { ...base, error: `could not start claude: ${spawnError}` };
   if (timedOut) return { ...base, error: `timed out after ${Math.round(durationMs / 1000)} s` };
   const text = String(stdout).trim();
@@ -52,6 +52,7 @@ export function interpret({ stdout = "", stderr = "", code = null, timedOut = fa
     costUsd: typeof out.total_cost_usd === "number" ? out.total_cost_usd : null,
     numTurns: typeof out.num_turns === "number" ? out.num_turns : null,
     sessionId: out.session_id || null,
+    subtype: out.subtype || null,
     denials: Array.isArray(out.permission_denials) ? out.permission_denials : []
   };
   if (out.is_error) {
@@ -95,4 +96,36 @@ export function runHeadless({ prompt, args, cwd, env = process.env, role = "revi
       done(interpret({ stdout, stderr, code, timedOut, durationMs: Date.now() - started, expectStructured }));
     });
   });
+}
+
+// A checker that runs out of turns has usually done the work and only lacks the answer (seen live:
+// a phase-end bug bash explored for 60 turns, twice, and the gate threw both runs away). Resume
+// that session once with a few turns and ask for the structured answer from what it has seen.
+export const WRAP_UP_PROMPT = "You have used all your turns. Stop checking now and make no more tool calls except the one that returns your structured answer. Build the answer from what you have already seen, and say in it what you did not get to check.";
+export const WRAP_UP_TURNS = 4;
+
+export function hitTurnLimit(r) {
+  return !!(r && !r.ok && r.subtype === "error_max_turns" && r.sessionId);
+}
+
+export function wrapUpArgs(args, sessionId, turns = WRAP_UP_TURNS) {
+  const out = [];
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === "--max-turns") { i++; continue; }
+    out.push(args[i]);
+  }
+  return [...out, "--max-turns", String(turns), "--resume", sessionId];
+}
+
+// run(opts), and if that ends at the turn limit, one short resumed run for the answer. The result
+// carries the summed time, cost and turns, and wrappedUp: true when the answer came from the
+// wrap-up. `run` is runHeadless or a test fake.
+export async function runWithWrapUp(run, opts) {
+  const first = await run(opts);
+  if (!hitTurnLimit(first)) return first;
+  const second = await run({ ...opts, prompt: WRAP_UP_PROMPT, args: wrapUpArgs(opts.args, first.sessionId), timeoutMs: Math.min(opts.timeoutMs || 300000, 300000) });
+  const add = (a, b) => (typeof a === "number" || typeof b === "number" ? (a || 0) + (b || 0) : null);
+  const totals = { durationMs: (first.durationMs || 0) + (second.durationMs || 0), costUsd: add(first.costUsd, second.costUsd), numTurns: add(first.numTurns, second.numTurns) };
+  if (second.ok) return { ...second, ...totals, wrappedUp: true };
+  return { ...first, ...totals, wrappedUp: false, error: `${first.error}; the wrap-up also failed: ${second.error}` };
 }

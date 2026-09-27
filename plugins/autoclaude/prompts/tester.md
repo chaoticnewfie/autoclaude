@@ -23,6 +23,10 @@ The app is running at {{URL}}. Use the Playwright browser tools to use it the wa
 
 {{TEST_CHANGES}}
 
+## Budget
+
+You have {{TURNS}} turns, and every tool call uses one. Check every Accept line before anything else, and keep about 5 turns for the verdict.
+
 ## Verdict
 
 - `verdict` is "pass" only when every criterion passed and you found no high-severity bug.

@@ -8,7 +8,7 @@ import path from "node:path";
 import { projectPaths, pluginRoot } from "./paths.js";
 import { readText, readJson, writeJsonAtomic, ensureDir } from "./fsatomic.js";
 import { stepText, MARKERS } from "./plan.js";
-import { runHeadless, buildArgs } from "./headless.js";
+import { runHeadless, buildArgs, runWithWrapUp } from "./headless.js";
 import { playwrightMcpConfig } from "./init.js";
 import * as git from "./git.js";
 
@@ -63,7 +63,7 @@ function fill(template, values) {
   return out;
 }
 
-export function buildPrompt(kind, { template, url, step, parsed, testChanges = "", screenshotDir }) {
+export function buildPrompt(kind, { template, url, step, parsed, testChanges = "", screenshotDir, turns = 40 }) {
   const phaseSteps = step.phase ? step.phase.steps : [step];
   const verified = phaseSteps.filter((s) => s !== step && s.marker === MARKERS.done);
   const neighbours = verified.slice(-6).map((s) => stepText(parsed, s)).join("\n\n") || "(none yet)";
@@ -76,7 +76,8 @@ export function buildPrompt(kind, { template, url, step, parsed, testChanges = "
     FEATURES: features,
     PHASE: step.phase ? `Phase ${step.phase.num}: ${step.phase.title}` : "the plan",
     TEST_CHANGES: testChanges || "(no test files changed)",
-    SCREENSHOT_DIR: screenshotDir
+    SCREENSHOT_DIR: screenshotDir,
+    TURNS: String(turns)
   });
 }
 
@@ -195,7 +196,7 @@ export function verdictSection(kind, verdict, evaluation, meta = {}) {
   if (concerns.length) lines.push("", "Test concerns:", ...concerns.map((e) => `- ${e}`));
   if (verdict.notes) lines.push("", `Notes: ${verdict.notes}`);
   if (meta.screenshots && meta.screenshots.length) lines.push("", "Screenshots:", ...meta.screenshots.map((s) => `- ${s}`));
-  const bits = [meta.model && `model ${meta.model}`, meta.numTurns !== null && meta.numTurns !== undefined && `${meta.numTurns} turns`, meta.durationMs && `${Math.round(meta.durationMs / 1000)} s`, meta.tries > 1 && `${meta.tries} tries`, meta.verdictFile && `verdict ${meta.verdictFile}`].filter(Boolean);
+  const bits = [meta.model && `model ${meta.model}`, meta.numTurns !== null && meta.numTurns !== undefined && `${meta.numTurns} turns`, meta.durationMs && `${Math.round(meta.durationMs / 1000)} s`, meta.tries > 1 && `${meta.tries} tries`, meta.wrappedUp && "answer given after reaching the turn limit", meta.verdictFile && `verdict ${meta.verdictFile}`].filter(Boolean);
   if (bits.length) lines.push("", `Run: ${bits.join(", ")}`);
   return { title: `${label}: ${evaluation.passed ? "passed" : "FAILED"}`, body: lines.join("\n").trim() };
 }
@@ -212,8 +213,11 @@ export async function runBrowserCheck({ kind = "tester", root, config, step, par
   const shotsDir = path.join(p.reportsDir, tag);
   ensureDir(shotsDir);
   const template = readText(path.join(pluginRoot(), "prompts", k.prompt), "");
+  const t = config.tester;
+  const maxTurns = Math.round(t.maxTurns * k.turnsFactor);
   const prompt = buildPrompt(kind, {
     template,
+    turns: maxTurns,
     url: config.devServer.url,
     step,
     parsed,
@@ -221,10 +225,9 @@ export async function runBrowserCheck({ kind = "tester", root, config, step, par
     screenshotDir: shotsDir.replace(/\\/g, "/")
   });
   const mcpFile = mcpConfigFor(root, shotsDir.replace(/\\/g, "/"));
-  const t = config.tester;
   // The checker's working directory is its own report folder, so anything it saves by a bare
   // file name lands there; --add-dir keeps the project readable for Read, Glob and Grep.
-  const args = buildArgs({ model: t.model, maxTurns: Math.round(t.maxTurns * k.turnsFactor), schema: VERDICT_SCHEMA, mcpConfig: mcpFile, allowedTools: ALLOWED_TOOLS, extraArgs: ["--add-dir", root] });
+  const args = buildArgs({ model: t.model, maxTurns, schema: VERDICT_SCHEMA, mcpConfig: mcpFile, allowedTools: ALLOWED_TOOLS, extraArgs: ["--add-dir", root] });
   const before = await untrackedSet(root, env);
 
   const errors = [];
@@ -238,7 +241,7 @@ export async function runBrowserCheck({ kind = "tester", root, config, step, par
     if (tries > 0 && remaining < t.timeoutSec * 1000 * 0.5) { errors.push("no time left for a retry before the gate's own timeout"); break; }
     tries++;
     const timeoutMs = Math.max(30000, Math.min(t.timeoutSec * 1000, remaining));
-    result = await run({ prompt, args, cwd: shotsDir, env, role: kind, timeoutMs });
+    result = await runWithWrapUp(run, { prompt, args, cwd: shotsDir, env, role: kind, timeoutMs });
     totalMs += result.durationMs || 0;
     if (typeof result.costUsd === "number") cost += result.costUsd;
     if (result.ok) {
@@ -258,7 +261,8 @@ export async function runBrowserCheck({ kind = "tester", root, config, step, par
   writeJsonAtomic(verdictFile, {
     kind, step: step.id, attempt, tries, ok: !!evaluation, errors, strays,
     verdict: result && result.structured ? result.structured : null,
-    model: t.model, numTurns: result ? result.numTurns : null, costUsd: cost || null, durationMs: totalMs, screenshots
+    model: t.model, numTurns: result ? result.numTurns : null, costUsd: cost || null, durationMs: totalMs, screenshots,
+    wrappedUp: !!(result && result.wrappedUp)
   });
   const verdictRel = rel(root, verdictFile);
 
@@ -274,7 +278,7 @@ export async function runBrowserCheck({ kind = "tester", root, config, step, par
   }
 
   const verdict = result.structured;
-  const section = verdictSection(kind, verdict, evaluation, { model: t.model, numTurns: result.numTurns, durationMs: totalMs, tries, verdictFile: verdictRel, screenshots });
+  const section = verdictSection(kind, verdict, evaluation, { model: t.model, numTurns: result.numTurns, durationMs: totalMs, tries, verdictFile: verdictRel, screenshots, wrappedUp: !!result.wrappedUp });
   const concerns = Array.isArray(verdict.testConcerns) ? verdict.testConcerns : [];
   const followUps = [
     ...evaluation.other.map((b) => ({ ...b, foundBy: kind })),

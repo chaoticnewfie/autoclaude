@@ -29,6 +29,8 @@ export const SERVICE_NAME = "autoclaude-watchdog.service";
 export const TIMER_NAME = "autoclaude-watchdog.timer";
 // schtasks rejects a /TR value of 261 characters or more.
 export const MAX_TR_LENGTH = 260;
+// A "running" state untouched for this long is a leftover, not a crash to recover from.
+export const STALE_RUN_MS = 24 * 60 * 60 * 1000;
 // The machine log gets a line per project every 5 minutes; keep one old file past this size.
 const LOG_MAX_BYTES = 1024 * 1024;
 // schtasks says one of these when the task is not there ("cannot find the file specified" on
@@ -126,9 +128,18 @@ async function checkProject(entry, { env, nowMs, isAlive, launch, minRelaunchGap
   const root = path.resolve(String(raw));
   try {
     if (!isDirectory(root)) return { root, action: "missing", pid: null };
-    if (loadState(root).status !== STATUS.running) return { root, action: "not-running", pid: null };
+    const state = loadState(root);
+    if (state.status !== STATUS.running) return { root, action: "not-running", pid: null };
     const pid = supervisorPid(root);
     if (pid && isAlive(pid)) return { root, action: "alive", pid };
+    // Only bring back a run that was really under supervision recently. A "running" state that
+    // never had a supervisor, or has not changed for a day, is a leftover, not a crash (seen live:
+    // the first pass revived a scratch project last touched hours earlier and burned a session on
+    // it). The owner restarts such a run with `autoclaude run`.
+    const updated = state.updatedAt ? Date.parse(state.updatedAt) : NaN;
+    if (!pid || !Number.isFinite(updated) || nowMs - updated > STALE_RUN_MS) {
+      return { root, action: "stale", pid };
+    }
     const file = watchdogFile(root);
     const last = lastLaunchMs(file);
     if (last !== null && nowMs - last >= 0 && nowMs - last < minRelaunchGapMs) {

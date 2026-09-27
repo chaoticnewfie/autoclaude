@@ -272,7 +272,11 @@ async function cmdSupervise(args, io) {
 function cmdNudge(args, io) {
   const project = requireProject(io);
   if (!project) return 1;
-  const prompt = args.join(" ").trim();
+  let prompt = args.join(" ").trim();
+  // Git Bash rewrites an argument like "/compact" into "C:/Program Files/Git/compact" before
+  // any program sees it (seen live). Undo that, since a nudge is never a path inside Git.
+  const msys = prompt.match(/^[A-Za-z]:[\\/](?:Program Files[\\/]Git|msys64|Git)[\\/]([^\\/\s][^\s]*)$/i);
+  if (msys && (io.env.MSYSTEM || io.env.SHELL)) prompt = `/${msys[1]}`;
   if (!prompt) { io.err('autoclaude: usage: autoclaude nudge "<prompt>"   (for example "/compact")'); return 2; }
   const state = loadState(project.root);
   if (state.status !== STATUS.running) { io.out(`autoclaude: the run is ${describeState(state)}; a nudge only applies to a running session`); return 1; }
@@ -352,6 +356,18 @@ async function cmdStart(args, io) {
   });
   io.out(`autoclaude: running on branch ${branch}${co.created ? " (created)" : ""}. First step: ${first.id} ${first.title}.`);
   io.out(`  the builder session works the plan; the gate verifies on every stop. Watch with \`autoclaude status\`.`);
+  // The session that ran `start` began before the run existed, so it never got the run's rules
+  // at session start (seen in the first `autoclaude run`). Give them here, in the tool result.
+  try {
+    const { buildContext } = await import("../scripts/session-context.js");
+    const { cliCommand } = await import("./gate.js");
+    const promptTemplate = readText(path.join(pluginRoot(), "prompts", "context.md"), "");
+    const context = buildContext({ root, state: loadState(root), config, planText: readText(path.join(root, config.plan), ""), progressText: readText(path.join(root, config.docs.progress), ""), promptTemplate, cli: cliCommand(io.env), now: io.now() });
+    io.out("");
+    io.out(context);
+  } catch (e) {
+    io.out(`  (could not print the run rules: ${e.message}; they arrive with the gate's first message)`);
+  }
   return 0;
 }
 

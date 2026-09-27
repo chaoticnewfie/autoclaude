@@ -8,7 +8,7 @@ import path from "node:path";
 import { projectPaths, pluginRoot } from "./paths.js";
 import { readText, writeJsonAtomic, ensureDir } from "./fsatomic.js";
 import { stepText, isPhaseEnd } from "./plan.js";
-import { runHeadless, buildArgs } from "./headless.js";
+import { runHeadless, buildArgs, runWithWrapUp } from "./headless.js";
 import { untrackedSet, sweepStrays } from "./tester.js";
 import * as git from "./git.js";
 
@@ -198,7 +198,7 @@ export async function runSecurityReview({ root, config, step, parsed, state = nu
     if (tries > 0 && remaining < s.timeoutSec * 1000 * 0.5) { errors.push("no time left for a retry before the gate's own timeout"); break; }
     tries++;
     const timeoutMs = Math.max(30000, Math.min(s.timeoutSec * 1000, remaining));
-    result = await run({ prompt, args, cwd: reportDir, env, role: "security", timeoutMs });
+    result = await runWithWrapUp(run, { prompt, args, cwd: reportDir, env, role: "security", timeoutMs });
     totalMs += result.durationMs || 0;
     if (typeof result.costUsd === "number") cost += result.costUsd;
     if (result.ok) {

@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
-import { buildArgs, interpret, runHeadless } from "../../plugins/autoclaude/lib/headless.js";
+import { buildArgs, interpret, runHeadless, hitTurnLimit, wrapUpArgs, runWithWrapUp, WRAP_UP_PROMPT } from "../../plugins/autoclaude/lib/headless.js";
 
 const fake = fileURLToPath(new URL("../fixtures/fake-claude.mjs", import.meta.url));
 const run = (mode, extra = {}) => runHeadless({ prompt: "check the page", args: ["-p", "--x"], bin: process.execPath, binArgs: [fake], env: { ...process.env, FAKE_CLAUDE_MODE: mode }, role: "tester", timeoutMs: 20000, ...extra });
@@ -71,4 +71,33 @@ test("runHeadless kills a run that exceeds its timeout", async () => {
   assert.equal(r.timedOut, true);
   assert.match(r.error, /timed out/);
   assert.ok(Date.now() - started < 15000);
+});
+
+test("a run that hits the turn limit is resumed once for its answer; anything else runs once", async () => {
+  const limit = interpret({ stdout: JSON.stringify({ is_error: true, subtype: "error_max_turns", session_id: "s-1", num_turns: 61, total_cost_usd: 0.5 }), code: 1 });
+  assert.equal(limit.subtype, "error_max_turns");
+  assert.equal(hitTurnLimit(limit), true);
+  assert.equal(hitTurnLimit({ ...limit, sessionId: null }), false, "nothing to resume");
+  assert.equal(hitTurnLimit(interpret({ timedOut: true, durationMs: 5 })), false);
+  const args = buildArgs({ maxTurns: 60, schema: { type: "object" } });
+  const w = wrapUpArgs(args, "s-1");
+  assert.deepEqual(w.slice(-4), ["--max-turns", "4", "--resume", "s-1"]);
+  assert.equal(w.filter((a) => a === "--max-turns").length, 1);
+  assert.ok(w.includes("--json-schema"), "the wrap-up keeps the schema");
+
+  const calls = [];
+  const good = { ok: true, infra: false, structured: { verdict: "pass" }, numTurns: 2, durationMs: 1000, costUsd: 0.1 };
+  const fake = (seq) => async (o) => { calls.push(o); return seq[calls.length - 1]; };
+  let r = await runWithWrapUp(fake([{ ...limit, durationMs: 9000 }, good]), { prompt: "explore", args, timeoutMs: 900000 });
+  assert.deepEqual([r.ok, r.wrappedUp, r.numTurns, r.durationMs, calls.length], [true, true, 63, 10000, 2]);
+  assert.equal(r.costUsd, 0.6);
+  assert.equal(calls[1].prompt, WRAP_UP_PROMPT);
+  assert.equal(calls[1].timeoutMs, 300000);
+  calls.length = 0;
+  r = await runWithWrapUp(fake([limit, { ...limit, sessionId: "s-2" }]), { prompt: "explore", args });
+  assert.deepEqual([r.ok, r.wrappedUp, calls.length], [false, false, 2]);
+  assert.match(r.error, /error_max_turns.*; the wrap-up also failed: claude ended with error_max_turns/);
+  calls.length = 0;
+  r = await runWithWrapUp(fake([good]), { prompt: "check", args });
+  assert.deepEqual([r.ok, r.wrappedUp, calls.length], [true, undefined, 1]);
 });

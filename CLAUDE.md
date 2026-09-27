@@ -121,6 +121,11 @@ proven live. 161 tests pass. CHECKPOINT 5 is waiting on Scott's go. Next: Phase 
   Windows commands from Node, and use `//c` for a cmd switch when bash is unavoidable. `start` needs
   a quoted title or it treats the first word as the program; both mistakes leave a `cmd` hung on an
   error dialog.
+- Git Bash also rewrites a leading-slash argument: `"/compact"` reaches a Windows program as
+  `C:/Program Files/Git/compact`. `autoclaude nudge` undoes this; anything else that takes a slash
+  command should be run from PowerShell.
+- The Bash tool collapses a doubled backslash into one, which silently changes escapes in code
+  written through it. For a slash in a regex use a character class such as `[/]`.
 - `claude config` is not a subcommand in 2.1.283: `claude config list` sends "config list" as a
   prompt and burns a turn.
 - `--bare` skips credential reads and fails auth under a subscription login; nested runs use
