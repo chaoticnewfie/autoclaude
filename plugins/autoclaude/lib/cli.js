@@ -290,6 +290,7 @@ function cmdInstallCli(args, io) {
     const r = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", ps], { encoding: "utf8", windowsHide: true });
     if (r.status === 0) {
       io.out(`  ${String(r.stdout).trim() === "added" ? "added to" : "already in"} your user PATH. Open a new terminal to use \`autoclaude\`.`);
+      io.out("  Note: terminals inside VS Code keep the PATH VS Code started with; close VS Code fully and reopen it, or use a Start-menu PowerShell.");
       return 0;
     }
     io.out(`  could not update the user PATH (${String(r.stderr || r.error).trim().slice(0, 200)}); add ${dir} to it by hand`);

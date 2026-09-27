@@ -37,6 +37,10 @@ Remote `chaoticnewfie/autoclaude`, branch `main`.
 
 - The CLI runs the plugin in place: `%LOCALAPPDATA%\autoclaude\bin\autoclaude.cmd` calls
   `C:\AutoClaude\plugins\autoclaude\bin\autoclaude.js`. Edits apply immediately.
+- VS Code's integrated terminal keeps the PATH VS Code started with, so after `install-cli` (or the
+  native Claude install) `claude` and `autoclaude` are "not recognized" there until VS Code is fully
+  closed and reopened. A Start-menu PowerShell sees them at once. `install-cli` should say this
+  (P7.2 docs, and a line in its own output).
 - `hooks/hooks.json` does not exist yet on purpose: the installed plugin must stay inert in every
   session until the Stop gate (Phase 3) is ready and exits early when no run is active.
 - `cachedUsageUtilization` in `~/.claude.json` comes and goes (D27 amended); the statusline bridge
