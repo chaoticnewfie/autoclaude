@@ -1,6 +1,6 @@
 # AutoClaude: build plan
 
-**Owner:** Scott · **Drafted:** 2026-09-24 · **Revised:** 2026-09-26 (pure Windows, pause for review, shareable) · **Status:** Phase 0 in progress. P0.1, P0.2, P0.4, P0.5, P0.10 done; P0.3, P0.6, P0.8 wait for a one-time interactive `claude` run by Scott. Findings: `VERIFY.md`.
+**Owner:** Scott · **Drafted:** 2026-09-24 · **Revised:** 2026-09-26 (pure Windows, pause for review, shareable) · **Status:** Phase 0 complete (2026-09-27), waiting on CHECKPOINT 0. Findings: `VERIFY.md`.
 **Builds:** a portable Claude Code plugin that runs a project's `PLAN.md` step by step, unattended, and verifies every step before moving on.
 **Primary machines:** Windows, with no WSL: Scott's `Code` VM (Windows Server 2025) and Windows 11 desktops. Linux and macOS run the same code; nothing requires tmux or systemd.
 **Repo:** `github.com/chaoticnewfie/autoclaude`. Decisions made after the draft: `docs/DECISIONS.md` (D17 onward). Rules for working in this repo: `CLAUDE.md`.
@@ -446,7 +446,7 @@ autoclaude/
   - Accept: a minimal Node Stop hook that returns `{"decision":"block","reason":…}` makes Claude continue with that reason, 3 times in a row, each with tool use in between
   - Accept: documented: the value of `stop_hook_active` on each call, whether tool use resets the 8-block cap, and whether `last_assistant_message` is present
   - Accept: a Stop hook with `"timeout": 1200` that sleeps 300 s isn't killed
-- [ ] **P0.3** Spike the statusline bridge (blocked until Scott's one-time interactive run; docs findings in VERIFY.md)
+- [x] **P0.3** Spike the statusline bridge (VERIFY.md: `rate_limits` present 4 s after start, right after the first API response, and updated during the run)
   - Accept: a statusline script receives `rate_limits.five_hour` and `rate_limits.seven_day` (used_percentage and resets_at) and writes them to a file. Documented how soon after startup they appear.
 - [x] **P0.4** Spike a nested headless run from a hook (VERIFY.md: works with `--settings '{"disableAllHooks":true}'`; `--bare` rejected, D30)
   - Accept: a Stop hook spawns `claude -p` with `--settings '{"disableAllHooks":true}' --output-format json --json-schema … --model sonnet` and parses `structured_output`
@@ -455,14 +455,14 @@ autoclaude/
 - [x] **P0.5** Spike headless browser testing (VERIFY.md: `cmd /c npx` MCP config on Windows; no `--with-deps`)
   - Accept: `npx playwright install chromium` succeeds on this machine (Windows needs no `--with-deps`; Linux does, and it is documented)
   - Accept: `claude -p` with Playwright MCP (`npx @playwright/mcp@latest --headless`, passed through `--mcp-config` and `--strict-mcp-config`) opens a local page, clicks a button and reports the resulting text
-- [ ] **P0.6** Spike the unattended permission behaviour (blocked until Scott's one-time interactive run; hooks wired in `spikes/p08-supervisor`)
+- [x] **P0.6** Spike the unattended permission behaviour (VERIFY.md: PermissionRequest deny and the `AskUserQuestion` deny both reach Claude with the guidance text; no prompt appears)
   - Accept: a `PermissionRequest` hook returning `decision.behavior: "deny"` with a message makes Claude carry on without a prompt appearing
   - Accept: a `PreToolUse` deny on `AskUserQuestion` returns the guidance text to Claude
   - Accept: documented what happens after repeated auto-mode classifier blocks (does the PermissionRequest hook catch the fallback prompts?)
 - [ ] **P0.7** Confirm the usage-limit behaviour
   - Accept: `autoContinueAtUsageLimit` is on (check with `/config`)
   - Accept: documented from the current docs: auto-continue conditions, the "re-arms at most twice in a row" rule, the weekly exception (over 24 h), and whether a connected Remote Control session disables auto-continue (D14)
-- [ ] **P0.8** Spike the supervisor (replaces the tmux spike, D18). Partial: window, kill tree, relaunch and no orphans verified; the rest waits for Scott's one-time interactive run (VERIFY.md)
+- [x] **P0.8** Spike the supervisor (replaces the tmux spike, D18). VERIFY.md: every line verified except the RDP disconnect and reconnect, which Scott does with a spike window open
   - Accept: a Node script using only built-ins opens a new console window titled `ac-spike` running `claude` interactively, and that window survives the launching terminal being closed
   - Accept: the same script sees the child exit, relaunches `claude --continue "<prompt>"`, and the prompt is submitted and answered in the new window
   - Accept: ending the child from the script kills the whole process tree (`taskkill /T /F` on Windows, the process group elsewhere), leaving no orphan `node` or `claude`
@@ -472,7 +472,7 @@ autoclaude/
   - Accept: a local-marketplace plugin whose `hooks.json` runs `node "${CLAUDE_PLUGIN_ROOT}/scripts/x.js"` fires on Windows, with `${CLAUDE_PLUGIN_ROOT}` expanded and the stdin JSON readable
   - Accept: documented which shell runs hook commands on Windows, whether `node` resolves there, and how a plugin path with spaces behaves
   - Accept: `fs.renameSync` over a file another process holds open is tried, and the retry strategy for `EPERM` and `EBUSY` is documented
-- [ ] **P0.9** Reconcile
+- [x] **P0.9** Reconcile (VERIFY.md has a row per step; every change is in this plan and in `docs/DECISIONS.md` D26 to D31)
   - Accept: `VERIFY.md` has a Pass/Changed/Blocked row for every Phase 0 step
   - Accept: every "Changed" row is reflected in this plan and in `docs/DECISIONS.md`
 
@@ -601,7 +601,7 @@ autoclaude/
 - [ ] **P6.3** `autoclaude run`
   - Accept: from a shell in the project, it opens a new console window titled `ac-<slug>` running `autoclaude supervise`, which spawns `claude --permission-mode auto "/autoclaude:start"`; it records the window title and supervisor pid in state and prints how to watch (`autoclaude status`, the window) and how to stop (`autoclaude pause`)
   - Accept: on Linux and macOS the same command uses tmux when present and otherwise a background process logging to `logs/supervisor.log`
-  - Accept: `/autoclaude:start` runs the preflight (clean tree, branch, config valid, plan lints, checks runnable, dev server healthy, Playwright installed, usage below threshold, notify channel configured, first-run onboarding done and the workspace trusted, read from `~/.claude.json` without ever writing it; if either is missing it tells the user to run `claude` once in the project, pick a theme, accept the trust dialog and exit, D28), then sets running and starts on the first unchecked step
+  - Accept: `/autoclaude:start` runs the preflight (clean tree, branch, config valid, plan lints, checks runnable, dev server healthy, Playwright installed, usage below threshold, notify channel configured, first-run onboarding done (`hasCompletedOnboarding`) and the workspace trusted (`projects["<repo root, forward slashes>"].hasTrustDialogAccepted`), read from `~/.claude.json` without ever writing it; if either is missing it tells the user to run `claude` once in the project, pick a theme, accept the trust dialog and exit, D28), then sets running and starts on the first unchecked step
 - [ ] **P6.4** Supervisor loop and backstop watchdog
   - Accept: every 60 s the supervisor decides from the heartbeat age, the idle marker, `failure.json`, `claude agents --json` (which lists interactive sessions with a `status`, D31), usage reset times and state:
     - working → nothing

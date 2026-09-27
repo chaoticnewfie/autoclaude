@@ -62,7 +62,10 @@ function runChild(args, holdMs) {
 }
 
 const holdMs = Number(process.argv[2] || 80000);
-const runs = [
+// Extra arguments after holdMs become a single custom run, e.g.
+//   node supervise.mjs 70000 --continue --permission-mode manual "prompt"
+const custom = process.argv.slice(3);
+const runs = custom.length ? [custom] : [
   ["--permission-mode", "auto", "Reply with the single word READY and nothing else, then wait."],
   ["--continue", "--permission-mode", "manual", "Use the Bash tool to run exactly: git status . Report the result in one line, then wait."],
   ["--continue", "--permission-mode", "auto", "Use the AskUserQuestion tool to ask me whether I prefer red or blue. Then wait."]

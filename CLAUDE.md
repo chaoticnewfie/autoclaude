@@ -14,8 +14,8 @@ what order lives in [PLAN.md](PLAN.md). Where things are right now lives in
 
 ## Status, in one line
 
-Phase 0 nearly done (2026-09-26): five spikes pass, three wait for Scott's one-time interactive
-`claude` run in this folder (`VERIFY.md`). No plugin code exists. Next: rerun `spikes/p08-supervisor`, then CHECKPOINT 0.
+Phase 0 complete (2026-09-27): every spike passes (`VERIFY.md`); only the RDP disconnect check is
+Scott's. CHECKPOINT 0 is waiting on his review. No plugin code exists. Next: Phase 1 after the go-ahead.
 
 ## Definition of done: every prompt, no exceptions
 

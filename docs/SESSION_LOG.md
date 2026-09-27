@@ -33,3 +33,16 @@ One entry per working session: what was done, what was committed. Append only.
 - Wrote `VERIFY.md`, ticked P0.1, P0.2, P0.4, P0.5, P0.10, added D26 to D31, updated the plan.
 - Next: Scott runs `claude` once in `C:\AutoClaude` (theme, trust, `/config`), then the p08 rerun
   closes P0.3, P0.6, P0.8 and CHECKPOINT 0 follows.
+
+## 2026-09-27 (Code VM) - Phase 0 closed
+
+- Scott did the one-time interactive run and confirmed auto-continue at usage limit is on. The
+  trust key landed as `projects["C:/AutoClaude"]` (forward slashes).
+- Reran `spikes/p08-supervisor`: statusline `rate_limits` 4 s after start; `--continue` from a new
+  process resumed the same session and answered; `idle_prompt` 61 s after each stop; the
+  `AskUserQuestion` PreToolUse deny and, in a fourth run with `mkdir`, the PermissionRequest deny
+  both reached Claude with the guidance text and no prompt; `taskkill /T` left no orphans;
+  `claude agents --json` reports the interactive session as `idle` or `busy`.
+- `VERIFY.md` rows P0.3, P0.6, P0.8 set to Pass; P0.9 done; PLAN.md ticked. Only the RDP
+  disconnect check remains and it is Scott's.
+- Next: CHECKPOINT 0 review, then Phase 1.

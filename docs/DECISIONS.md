@@ -172,6 +172,10 @@ people install should not silently grant trust to a folder either.
 
 **Rejected.** Editing `~/.claude.json` from `init` or `start`.
 
+**Observed key format (2026-09-27).** After Scott's one-time run the file holds
+`hasCompletedOnboarding: true` and `projects["C:/AutoClaude"].hasTrustDialogAccepted: true`:
+the repository root with forward slashes. The preflight matches that form.
+
 ### D29 Hooks use exec form, and `node` must be on the claude process PATH
 
 **Decision.** Every `hooks.json` entry is `{"type":"command","command":"node","args":["${CLAUDE_PLUGIN_ROOT}/scripts/<x>.js", ...]}`.

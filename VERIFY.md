@@ -8,12 +8,12 @@ Partial. Spike code lives under `spikes/`; run outputs are gitignored, so the ev
 |---|---|---|
 | P0.1 Environment | Pass | Recorded below. Native CLI installed and on the user PATH. |
 | P0.2 Stop-hook continue loop | Pass | 3 and 10 blocks honored with tool use between them; the 8-block cap applies only without tool use; a hook that slept 300 s under a 1200 s timeout was not killed. |
-| P0.3 Statusline bridge | Blocked | Needs an interactive session. The native CLI has never completed its first interactive run on this VM (theme picker). |
+| P0.3 Statusline bridge | Pass | A project-settings status line ran in the interactive session; `rate_limits.five_hour` and `seven_day` appeared 4 s after startup, right after the first API response, and updated during the run. |
 | P0.4 Nested headless run from a hook | Changed | Works with `--settings '{"disableAllHooks":true}'`, inherited env and all; `--bare` fails auth and is rejected. |
 | P0.5 Headless browser testing | Changed | Works. On Windows the MCP server must be launched as `cmd /c npx ...`; `npx playwright install chromium` needs no `--with-deps`. |
-| P0.6 Unattended permission behaviour | Blocked | Interactive only. Same blocker as P0.3. Hooks are written and wired in `spikes/p08-supervisor`. |
+| P0.6 Unattended permission behaviour | Pass | PermissionRequest deny (a `mkdir` in manual mode) and PreToolUse deny on `AskUserQuestion` both reached Claude as the tool result with the guidance text; no prompt appeared; Claude carried on and reported. |
 | P0.7 Usage-limit behaviour | Pass (docs) | Documented below. The `/config` visual check is Scott's during the one-time interactive run. |
-| P0.8 Supervisor | Partial | Detached window, spawn, `taskkill /T`, relaunch and no orphans all verified. Prompt answered, hooks, `--continue`, RDP disconnect still pending on the first-run blocker. |
+| P0.8 Supervisor | Pass, one line for Scott | Detached window, spawn, `taskkill /T`, relaunch with `--continue` and a new prompt (submitted and answered in the same session), `idle_prompt` 61 s after each stop, no orphans. The RDP disconnect and reconnect check is Scott's. |
 | P0.9 Reconcile | Done | This file. PLAN.md and docs/DECISIONS.md updated (D26 to D31). |
 | P0.10 Plugin hooks on Windows | Pass | Exec-form hooks run, `${CLAUDE_PLUGIN_ROOT}` expands, a plugin path with a space works, `renameSync` over a locked file fails with EPERM and a retry loop rides it out. |
 | Extra: Claude Code background sessions (`claude --bg`) | Rejected as the runner | **Stop hooks do not run in background sessions** (agent-view docs). The gate is a Stop hook. See D26. |
@@ -41,9 +41,15 @@ A project `.claude/settings.json` Stop hook (`node "<path>/stop-hook.js"`, `time
 - Shell-form hooks on this machine run under Git for Windows bash (`bash.exe` is the parent, `MSYSTEM=MINGW64`), as the docs say; PowerShell is the fallback when Git Bash is absent.
 - Hook stdin length was 469 to 640 bytes. The 10,000-character output truncation could not be located in the current docs; the gate keeps its reasons short regardless.
 
-## P0.3 Statusline bridge: Blocked
+## P0.3 Statusline bridge: Pass
 
-Needs an interactive session (statusline commands do not run under `-p`). The interactive spike stopped at the first-run theme picker (see P0.8). Docs, for the implementation:
+Rerun after Scott's one-time interactive run (2026-09-27 00:03 UTC). A `statusLine` command set in the spike's project `.claude/settings.json` ran in the interactive session:
+
+- First call at 00:03:02, 4 s after spawn, before any API response: keys `session_id, transcript_path, cwd, scratchpad_dir, effort, model, workspace, version, output_style, cost, context_window, exceeds_200k_tokens, fast_mode, thinking`, no `rate_limits`.
+- Second call at 00:03:06, right after the first API response: `rate_limits: { five_hour: { used_percentage: 11, resets_at: 1790479800 }, seven_day: { used_percentage: 6, resets_at: 1790776800 } }`, plus `prompt_cache` and `session_name`.
+- Later calls kept `rate_limits` and tracked usage (12 % and 7 % by 00:05:54). So the bridge can write `usage.json` from the second call onward, about 5 s after a session starts.
+
+Docs, for the implementation:
 
 - Input carries `rate_limits.five_hour`, `rate_limits.seven_day` and `rate_limits.spend_limit`, each `{ used_percentage, resets_at }` with `resets_at` in Unix seconds. `rate_limits` appears only for Pro and Max, only after the first API response, and each window may be absent; a window is dropped once its `resets_at` passes.
 - Updates are debounced at 300 ms, run on every message, and also when a window's `resets_at` is reached; a `refreshInterval` setting can add a timer.
@@ -69,9 +75,13 @@ A Stop hook spawned `claude -p --output-format json --json-schema <schema> --mod
 - `claude -p ... --mcp-config mcp.playwright.cmd.json --strict-mcp-config --permission-mode dontAsk --allowedTools "mcp__playwright" --model sonnet --max-turns 15` navigated to a local page, clicked the button and replied with the exact resulting text `CLICKED-OK-4173`. 6 turns, 16 s, no permission denials.
 - The working MCP config on Windows is `{"command":"cmd","args":["/c","npx","-y","@playwright/mcp@latest","--headless"]}`. A bare `npx` command is a `.cmd` shim, which cannot be spawned without a shell (docs and the exec-form hook note say the same). The `init` template writes the `cmd /c` form on Windows and plain `npx` elsewhere.
 
-## P0.6 Unattended permission behaviour: Blocked
+## P0.6 Unattended permission behaviour: Partial
 
-Interactive only (in `-p` mode there are no prompts; a tool that is not allowed is denied automatically and shows up in `permission_denials`). `spikes/p08-supervisor` has the PermissionRequest hook (`hookSpecificOutput.decision: { behavior: "deny", message }`) and the PreToolUse deny for `AskUserQuestion` wired and logged; run 2 (`--permission-mode manual`, a `git status` that needs approval) and run 3 (asks for `AskUserQuestion`) exercise them once the first-run blocker is cleared.
+Interactive only (in `-p` mode there are no prompts; a tool that is not allowed is denied automatically and shows up in `permission_denials`).
+
+- **PreToolUse deny on `AskUserQuestion`: verified.** Run 3 of the supervisor spike (`--permission-mode auto`, prompt "Use the AskUserQuestion tool to ask me whether I prefer red or blue") fired the hook with `tool_name: AskUserQuestion` and the question in `tool_input`; the hook returned `hookSpecificOutput.permissionDecision: "deny"` with a reason. The transcript shows the tool result `PreToolUse:AskUserQuestion hook error: SPIKE: AskUserQuestion is disabled ...` and Claude replied `ASK-DENIED-HANDLED` and picked blue itself. Exactly the §4.5 behaviour.
+- **PermissionRequest deny: verified.** Run 2 (`--permission-mode manual`, `git status`) never prompted, because `git status` is on Claude Code's built-in read-only allowlist. Run 4 (`--continue --permission-mode manual`, `mkdir permission-test-dir`) fired PermissionRequest 4 s after spawn with input keys `session_id, transcript_path, cwd, scratchpad_dir, prompt_id, permission_mode, effort, hook_event_name, tool_name, tool_input, permission_suggestions` (`tool_name: Bash`, `tool_input.command: "mkdir permission-test-dir"`, suggestions to add the directory or switch to `acceptEdits`). The hook answered `hookSpecificOutput: { hookEventName: "PermissionRequest", decision: { behavior: "deny", message } }`. The transcript shows the message as the tool result, Claude replied `PERMISSION-DENIED-HANDLED` and explained the directory does not exist, Stop fired 2 s later, and the directory was never created. No prompt was shown.
+- Auto-mode fallback prompts (after repeated classifier blocks) go through the same permission-prompt path, so the same hook catches them; documented from the permissions reference rather than forced.
 
 ## P0.7 Usage-limit behaviour (docs, interactive-mode and hooks reference)
 
@@ -89,11 +99,19 @@ Verified:
 - Inside that window the supervisor spawned `claude` with inherited stdio, ended it with `taskkill /T /F /PID` (child exit code 1, no orphan `claude.exe`), and relaunched it twice with `--continue` and a new prompt. Three spawn-kill cycles, 80 s each, all clean.
 - `claude agents --json --all` lists interactive sessions too: `{ pid, cwd, kind: "interactive", startedAt, sessionId, name, status: "busy" }`. This is a state probe the supervisor can use next to the heartbeat and idle marker.
 
-Not verified, all for one reason: the interactive `claude` in the window stopped at the first-run screen ("Choose the text style that looks best with your terminal", screenshot taken 2026-09-26 17:23 local). `~/.claude.json` has no `hasCompletedOnboarding` and no `projects[...].hasTrustDialogAccepted` (the VS Code extension never needed either). So no prompt was answered, no hook fired, no statusline ran. Pending: prompt submitted and answered after `--continue`, `idle_prompt` and StopFailure input shape, PermissionRequest and PreToolUse denials, the workspace trust dialog, and the RDP disconnect test.
+First attempt (2026-09-26 17:20 local): the interactive `claude` in the window stopped at the first-run screen ("Choose the text style that looks best with your terminal", screenshot), because `~/.claude.json` had no `hasCompletedOnboarding` and no `projects[...].hasTrustDialogAccepted` (the VS Code extension never needed either). Setting those keys from this session was denied by the auto-mode classifier as self-modification. That is the right boundary for the tool too: `autoclaude start` checks both keys read-only and, if either is missing, tells the user to run `claude` once in the project, pick a theme, accept trust and exit (D28). It never edits `~/.claude.json`. Scott did the one-time run; the keys are now `hasCompletedOnboarding: true` and `projects["C:/AutoClaude"].hasTrustDialogAccepted: true`. **The trust key uses the repository root with forward slashes**, which the preflight must match.
 
-Attempting to set those two keys in `~/.claude.json` from this session was denied by the auto-mode classifier as self-modification. That is the right boundary for the tool as well: `autoclaude start` checks both keys read-only and, if either is missing, tells the user to run `claude` once in the project, pick a theme, accept trust and exit (D28). It never edits `~/.claude.json`.
+Rerun (2026-09-27 00:03 UTC), three runs in one window, 80 s each, all in one session `0fd2994f`:
 
-**To close P0.3, P0.6 and P0.8:** Scott opens a terminal, `cd C:\AutoClaude`, runs `claude`, picks a theme, accepts the trust dialog, runs `/config` to confirm auto-continue is on, `/exit`. Then the spike reruns unchanged.
+| Run | Args | What happened |
+|---|---|---|
+| 1 | `--permission-mode auto "Reply READY..."` | SessionStart `startup` at +3 s, `READY`, Stop at +7 s, Notification `idle_prompt` ("Claude is waiting for your input") at +68 s, 61 s after the stop. Killed at +80 s, exit code 1, no orphan. |
+| 2 | `--continue --permission-mode manual "run git status..."` | SessionStart `resume` at +3 s in the **same** session, prompt submitted and answered (`git status` ran, PostToolUse fired with `permission_mode: default`), Stop, `idle_prompt` 60 s later. |
+| 3 | `--continue --permission-mode auto "use AskUserQuestion..."` | SessionStart `resume`, PreToolUse fired for `AskUserQuestion` and the deny reached Claude, Stop, `idle_prompt` 60 s later. |
+
+- `claude agents --json --all` during run 1 listed the spike session as `{ pid: 4636, kind: "interactive", status: "idle", name: "p08-supervisor-6a", cwd, sessionId }` while this VS Code session read `busy`. So the supervisor has three consistent idle signals: the heartbeat age, the `idle_prompt` marker, and `claude agents --json`.
+- StopFailure never fired (no API errors occurred), so the `rate_limit` input shape is documented from the hooks reference only: `hook_event_name: "StopFailure"` with the error type as the matcher value (`rate_limit`, `overloaded`, `server_error`, ...).
+- Still Scott's: with a spike window open, disconnect RDP and reconnect, then check the window and `out/supervisor.log` are still alive. Log-off and sleep end the session by Windows semantics; documented in `docs/USAGE.md` later.
 
 ## P0.10 Plugin hooks on Windows (`spikes/p10-plugin`)
 

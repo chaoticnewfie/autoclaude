@@ -1,54 +1,45 @@
 # CONTINUE_HERE.md
 
-**Last updated: 2026-09-26 (end of the Phase 0 session).** Rewrite this file at the end of every prompt.
+**Last updated: 2026-09-27.** Rewrite this file at the end of every prompt.
 
 ## Where things are
 
-**Phase 0 is nearly done. No plugin code exists yet.** Findings and evidence: `VERIFY.md`.
+**Phase 0 is complete. CHECKPOINT 0 is waiting on Scott's review. No plugin code exists yet.**
 
-| Step | State |
-|---|---|
-| P0.1 environment, P0.2 Stop-hook loop, P0.4 nested headless, P0.5 browser tester, P0.10 plugin hooks | Done and ticked in `PLAN.md` |
-| P0.7 usage-limit behaviour | Done from the docs; the `/config` look is Scott's |
-| P0.3 statusline, P0.6 permissions, P0.8 supervisor | Blocked on one thing: the native CLI has never completed its first interactive run on this VM |
-| P0.9 reconcile | `VERIFY.md` written; `PLAN.md` and `docs/DECISIONS.md` (D26 to D31) updated |
+- Every Phase 0 step is ticked in `PLAN.md`; the evidence is in `VERIFY.md`, one row per step.
+- The only unverified line is the RDP disconnect and reconnect (P0.8), which needs Scott at the
+  console: open a spike window, disconnect, reconnect, confirm the window and its log are alive.
+- Decisions D17 to D31 are in `docs/DECISIONS.md`. The design after Phase 0: interactive `claude`
+  under our console-window supervisor (D18); Claude Code's background sessions rejected because
+  Stop hooks do not run there (D26); exec-form plugin hooks (D29); nested runs with
+  `--settings '{"disableAllHooks":true}'` (D30); onboarding and trust checked read-only (D28).
+- Installed on this VM: Claude Code native 2.1.283 on the user PATH, Playwright Chromium.
+- Remote `chaoticnewfie/autoclaude`, branch `main`, in sync with `C:\AutoClaude` after the last commit.
 
-Installed on this VM today: Claude Code native 2.1.283 (`%USERPROFILE%\.local\bin`, on the user
-PATH), Playwright Chromium. Nothing else changed on the machine. `~/.claude.json` was not touched.
+## The exact next step
 
-## What Scott needs to do (five minutes)
-
-1. Open a terminal (Windows Terminal or PowerShell, a fresh one so PATH is current), then:
-   `cd C:\AutoClaude` and `claude`.
-2. Pick a theme. Accept the workspace trust dialog for `C:\AutoClaude`.
-3. Run `/config` and confirm "Continue automatically at usage limit" is on (it should be, by default).
-4. `/exit`.
-5. Say so in chat. The interactive spike (`spikes/p08-supervisor`) then reruns unchanged and closes
-   P0.3, P0.6 and P0.8. While that window is open, an RDP disconnect and reconnect would close the
-   last P0.8 line too.
-
-## The exact next step (after the above)
-
-```
-cd /c/AutoClaude/spikes/p08-supervisor && rm -rf out
-node ../lib/open-window.mjs ac-spike "C:\AutoClaude\spikes\p08-supervisor" "C:\Program Files\nodejs\node.exe" "C:\AutoClaude\spikes\p08-supervisor\supervise.mjs" 80000
-```
-
-Then read `out/supervisor.log`, `out/hooks.jsonl` (SessionStart, Notification `idle_prompt`,
-PermissionRequest deny, PreToolUse deny, Stop, StopFailure), `out/statusline.jsonl`
-(`rate_limits`), and the three transcripts under `~/.claude/projects/C--AutoClaude-spikes-p08-supervisor/`.
-Update `VERIFY.md` rows P0.3, P0.6, P0.8, tick them in `PLAN.md`, then **CHECKPOINT 0** with Scott.
+1. **CHECKPOINT 0 with Scott:** walk through `VERIFY.md` (the summary table first, then the
+   "Changes made to the plan" list at the bottom) and `docs/DECISIONS.md` D26 to D31. He decides
+   whether anything in the revised design is wrong before code is written.
+2. On his go-ahead, **Phase 1** (`PLAN.md`): P1.1 repo layout, local marketplace and an installable
+   empty plugin; P1.2 `lib/plan.js`; P1.3 state, config, fsatomic (retry EPERM and EBUSY on rename);
+   P1.4 CLI skeleton with the Windows shim; P1.5 notify; P1.6 `lib/proc.js` and `lib/paths.js`
+   (the `cmd start` launcher from `spikes/lib/open-window.mjs` moves here). `node --test` from the
+   first file.
+3. During P1.1, check whether `CLAUDE_PLUGIN_OPTION_<KEY>` is exported after a marketplace install
+   (it was not under `--plugin-dir`, VERIFY.md P0.10).
 
 ## Decisions Scott still owns
 
 - License and public versus private (`docs/DECISIONS.md` D20).
 - Whether the project template ships the fuller docs set as stubs (default: core files only).
 
-## Facts that save time
+## Spike helpers worth reusing in Phase 1
 
-In `CLAUDE.md`, "Facts worth not re-deriving": PATH quirks, the Git Bash `/D` mangling, the
-`start` title rule, `claude config` not being a subcommand, `--bare` breaking auth, and where usage
-data lives. Spike helpers: `spikes/lib/claude-clean.mjs` (run the native CLI with `CLAUDE*` env
-stripped), `spikes/lib/open-window.mjs` (detached console window), `spikes/lib/summarize.js`
-(summarize a `-p` JSON result and its transcript), `spikes/lib`-style outputs go under `out/` and
-are gitignored.
+`spikes/lib/open-window.mjs` (detached console window through `cmd start`, quoted title),
+`spikes/lib/claude-clean.mjs` (run the native CLI from inside a Claude session),
+`spikes/lib/summarize.js` and `spikes/lib/transcript-texts.js` (read `-p` results and transcripts),
+`spikes/p08-supervisor/supervise.mjs` (spawn, hold, `taskkill /T`, relaunch with `--continue`),
+`spikes/p08-supervisor/permission-deny.js` and `pretool-deny.js` (the exact hook output shapes
+that work in 2.1.283), `spikes/p04-nested/nested-hook.js` (nested `claude -p` with a schema),
+`spikes/p05-browser/mcp.playwright.cmd.json` (the Windows MCP config).
