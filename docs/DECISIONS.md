@@ -559,3 +559,22 @@ rules and checks to any other machine.
 
 **Rejected.** Gitignoring the run records; also the config; also the plan and docs (the last
 contradicts his rule that project plans and docs live in git).
+
+### D46 One install per device; the instructions travel into each project (2026-09-27)
+
+**Decision.** AutoClaude stays a one-time install per device from the GitHub marketplace; every
+project on that device uses the same plugin, and nothing of AutoClaude itself is copied into a
+project. `init` now writes a copy of the repository's `INSTRUCTIONS.md` into each project as
+`AUTOCLAUDE.md`, with a line saying which AutoClaude version copied it and how to refresh it
+(delete it, run `autoclaude init`). The template copy lives in
+`plugins/autoclaude/project-template/AUTOCLAUDE.md` and a test keeps it identical to the root file.
+
+**Why.** Scott asked whether AutoClaude should live in its own cloned folder per device, with
+projects pointing at it and the instructions pulled into each project, then chose: "I like having
+it as a one time setup per device". The plugin install already is that folder, managed by Claude
+Code; the missing piece was having the instructions at hand in every project. The name is not
+CLAUDE.md, so Claude Code never loads it and the builder pays nothing for it.
+
+**Rejected.** Installing from a git clone (a directory marketplace): a `git pull` would change the
+code under a running build, and it clashes by name with the GitHub marketplace. A per-project
+pointer to the install location: not needed, the plugin is enabled for the user everywhere.

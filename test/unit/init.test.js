@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
-import { initProject, detectProject, formatInitReport, playwrightMcpConfig, existingProjectSignals, serverEntry, projectName } from "../../plugins/autoclaude/lib/init.js";
+import { initProject, detectProject, formatInitReport, playwrightMcpConfig, existingProjectSignals, serverEntry, projectName, GUIDE_FILE, pluginVersion, stampGuide } from "../../plugins/autoclaude/lib/init.js";
 import { gitEnv } from "../fixtures/prepare.js";
 
 const tmp = (p) => fs.mkdtempSync(path.join(os.tmpdir(), p));
@@ -44,6 +44,30 @@ test("detectProject guesses checks and the dev server from package.json", () => 
   const d3 = detectProject(bare);
   assert.equal(d3.hasPackageJson, false);
   assert.equal(d3.devServer.command, null);
+});
+
+test("the instructions for people: the repo's INSTRUCTIONS.md and the template's AUTOCLAUDE.md are the same file", () => {
+  const repo = fs.readFileSync(path.resolve("INSTRUCTIONS.md"), "utf8");
+  const template = fs.readFileSync(path.resolve("plugins/autoclaude/project-template", GUIDE_FILE), "utf8");
+  assert.equal(template, repo, "copy INSTRUCTIONS.md over plugins/autoclaude/project-template/AUTOCLAUDE.md after editing it");
+});
+
+test("init puts the instructions into the project as AUTOCLAUDE.md, stamped with the version, and never overwrites them", () => {
+  withConfigDir(() => {
+    const root = tmp("autoclaude-init-guide-");
+    const r = initProject(root, { statusline: false, now: new Date("2026-09-27T12:00:00Z") });
+    assert.ok(r.created.includes(GUIDE_FILE));
+    const text = fs.readFileSync(path.join(root, GUIDE_FILE), "utf8");
+    const version = JSON.parse(fs.readFileSync(path.resolve("plugins/autoclaude/.claude-plugin/plugin.json"), "utf8")).version;
+    assert.equal(pluginVersion(), version);
+    assert.match(text, new RegExp(`^# AutoClaude: instructions\\n\\n> Copied into this project by AutoClaude ${version.replace(/\./g, "[.]")} on 2026-09-27\\.`));
+    assert.equal(text.replace(/\n> Copied into[^\n]*\n> [^\n]*\n/, ""), fs.readFileSync(path.resolve("INSTRUCTIONS.md"), "utf8"));
+    fs.writeFileSync(path.join(root, GUIDE_FILE), "my own notes\n");
+    const again = initProject(root, { statusline: false });
+    assert.ok(again.skipped.includes(GUIDE_FILE));
+    assert.equal(fs.readFileSync(path.join(root, GUIDE_FILE), "utf8"), "my own notes\n");
+  });
+  assert.equal(stampGuide("no newline", "1.0.0", "2026-01-01").split("\n")[0], "no newline");
 });
 
 test("detectProject reads a Node dev server's default port and health route; the name comes from package.json", () => {

@@ -71,7 +71,8 @@ In that session, type:
 /autoclaude:plan
 ```
 
-`/autoclaude:init` sets the project up and installs the `autoclaude` command. `/autoclaude:plan`
+`/autoclaude:init` sets the project up, installs the `autoclaude` command, and puts a copy of
+[INSTRUCTIONS.md](INSTRUCTIONS.md) into the project as `AUTOCLAUDE.md`. `/autoclaude:plan`
 reviews the project, interviews you, writes and checks the plan, sets up the test commands and
 the dev server, and commits it all. It ends with a list of things for you to do before the run.
 

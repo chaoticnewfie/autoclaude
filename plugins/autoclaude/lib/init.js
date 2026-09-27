@@ -15,6 +15,21 @@ export function templateDir() {
 }
 
 // Looks at package.json and guesses the checks and the dev server. Every guess is reported.
+// The instructions for people (the repo's INSTRUCTIONS.md, kept identical in the template by a
+// test) land in every project as AUTOCLAUDE.md. Claude Code only loads files named CLAUDE.md, so
+// this one costs the builder nothing (D46). The copy is stamped with the version that wrote it.
+export const GUIDE_FILE = "AUTOCLAUDE.md";
+
+export function pluginVersion(template = templateDir()) {
+  try { return JSON.parse(fs.readFileSync(path.join(template, "..", ".claude-plugin", "plugin.json"), "utf8")).version || "?"; } catch { return "?"; }
+}
+
+export function stampGuide(text, version, date) {
+  const stamp = `> Copied into this project by AutoClaude ${version} on ${date}. After updating AutoClaude,\n> delete this file and run \`autoclaude init\` to get the current instructions.\n`;
+  const nl = text.indexOf("\n");
+  return nl < 0 ? `${text}\n\n${stamp}` : `${text.slice(0, nl + 1)}\n${stamp}${text.slice(nl + 1)}`;
+}
+
 // For a dev script that runs a Node file ("node server.js", "node --watch src/app.js"), read that
 // file for its default port (`PORT || 4173`, `.listen(4173`) and a health route ("/health").
 export function serverEntry(root, script) {
@@ -164,7 +179,8 @@ export function initProject(root, options = {}) {
     for (const rel of walk(template)) {
       const target = path.join(root, rel);
       if (fs.existsSync(target)) { report.skipped.push(rel); continue; }
-      const src = fs.readFileSync(path.join(template, rel), "utf8");
+      let src = fs.readFileSync(path.join(template, rel), "utf8");
+      if (rel === GUIDE_FILE) src = stampGuide(src, pluginVersion(template), date);
       writeFileAtomic(target, src.replace(/\{\{PROJECT_NAME\}\}/g, name).replace(/\{\{DATE\}\}/g, date));
       report.created.push(rel);
     }

@@ -15,8 +15,8 @@ what order lives in [PLAN.md](PLAN.md). Where things are right now lives in
 ## Status, in one line
 
 Phase 7 in progress (2026-09-27): the plan skill, README and USAGE are done and reviewed (P7.1,
-P7.2), version 0.9.3 installs and runs from GitHub, and an onboarding rehearsal by link reached
-the preflight. 266 tests pass. Next: P7.3, Scott's blind all-day rehearsal on his DB project;
+P7.2), version 0.9.4 installs and runs from GitHub, and an onboarding rehearsal by link reached
+the preflight. 268 tests pass. Next: P7.3, Scott's blind all-day rehearsal on his DB project;
 this machine has no AutoClaude installed on purpose. Never open the DB project (D37).
 
 ## Definition of done: every prompt, no exceptions
@@ -96,7 +96,7 @@ this machine has no AutoClaude installed on purpose. Never open the DB project (
 |---|---|
 | `PLAN.md` | The approved plan: phases, steps, Accept lines, checkpoints |
 | `CONTINUE_HERE.md` | Resume point. Read first |
-| `INSTRUCTIONS.md` | Plain instructions for people using AutoClaude; keep in step with `docs/USAGE.md` |
+| `INSTRUCTIONS.md` | Plain instructions for people using AutoClaude; keep in step with `docs/USAGE.md`. `init` copies it into projects as `AUTOCLAUDE.md` from `plugins/autoclaude/project-template/AUTOCLAUDE.md`, which a test keeps identical: copy the file over after every edit |
 | `CLAUDE.md` | This file |
 | `docs/DECISIONS.md` | Dated decision log (D17 onward; D1 to D16 are in the plan) |
 | `docs/SESSION_LOG.md` | One entry per working session |

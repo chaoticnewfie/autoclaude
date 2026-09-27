@@ -269,3 +269,17 @@ One entry per working session: what was done, what was committed. Append only.
 - Scott answered the git question with "Leave it as is": only `.autoclaude/` stays out of a
   project's git (D45). INSTRUCTIONS.md now says what is committed and that AutoClaude never
   pushes.
+
+## 2026-09-27 (Code VM) - Instructions in every project (0.9.4)
+
+- Scott asked whether AutoClaude should live in its own cloned folder per device with projects
+  pointing at it, and the instructions pulled into each project; then chose the one-time install
+  per device. The plugin install already is that per-device folder (Claude Code's plugin cache),
+  so what changed (D46): `init` copies INSTRUCTIONS.md into each project as AUTOCLAUDE.md, with a
+  line naming the version that copied it and how to refresh it. The template copy is kept
+  identical to the root file by a test. INSTRUCTIONS.md now says it is the only install per
+  device and that a clone is for reading, not installing. `gh-install.live.mjs` also checks the
+  copy.
+- The fsatomic lock test timed out once under full-suite load (PowerShell took over 30 s to
+  start); its wait is now 60 s.
+- 268 tests pass.

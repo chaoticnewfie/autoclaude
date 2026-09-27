@@ -5,9 +5,9 @@
 ## Where things are
 
 **Phase 7: P7.1 (plan skill) and P7.2 (docs) are done; P7.3, Scott's blind rehearsal, is next.**
-Phases 0 to 6 done. Version 0.9.3 is on GitHub (`main`), 266 tests pass, remote in sync.
+Phases 0 to 6 done. Version 0.9.4 is on GitHub (`main`), 268 tests pass, remote in sync.
 
-This round (see `docs/SESSION_LOG.md` and D41 to D45):
+This round (see `docs/SESSION_LOG.md` and D41 to D46):
 - The repo stays private, shared by invitation, no license; the rehearsal runs all day (D41).
 - Everything the plugin needs ships inside `plugins/autoclaude/`, and a launcher keeps the
   command and the watchdog working across plugin updates (D42).
@@ -50,7 +50,9 @@ Then CHECKPOINT 7 (review of the run with Scott) and P7.4 (version 1.0.0, tag, C
 ## Notes for whoever continues
 
 - `INSTRUCTIONS.md` (repo root) is the plain guide for people; `docs/USAGE.md` is the full
-  reference. When behavior changes, update both.
+  reference. When behavior changes, update both, then copy INSTRUCTIONS.md over
+  `plugins/autoclaude/project-template/AUTOCLAUDE.md` (a test checks they match): `init` puts
+  that copy into every project as `AUTOCLAUDE.md` (D46). Models default to Opus, never Haiku (D44).
 
 - To test unpushed plugin changes without installing on this machine, run
   `node test/live/gh-install.live.mjs C:/AutoClaude` (throwaway config). Do not re-add the clone

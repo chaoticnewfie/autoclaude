@@ -199,6 +199,8 @@ nothing else the checklist does not need:
      `BLOCKERS.md`, `DEFERRED.md`, `REVIEW_NOTES.md`, `SECURITY-FINDINGS.md`, `SESSION_LOG.md`
    - `.gitattributes` and `.editorconfig` only if the project has none; entries added to
      `.gitignore`; `.autoclaude/` for run state
+   - `AUTOCLAUDE.md`: a copy of the repository's `INSTRUCTIONS.md`, the plain instructions for
+     people, stamped with the AutoClaude version that wrote it. Claude Code does not load it
    - the project's entry in the machine registry (used by the watchdog and `status --all`)
    - the `autoclaude` command, if it is not installed yet
 
@@ -657,7 +659,8 @@ claude plugin update autoclaude@autoclaude
 Then close the run window and start it again with `autoclaude run` (a running supervisor keeps the
 old code until then), start new Claude Code sessions, and `autoclaude resume`. The `autoclaude`
 command and the watchdog follow the new version by themselves. `claude plugin list` shows the
-installed version.
+installed version. A project's `AUTOCLAUDE.md` keeps the version it was copied from; delete it and
+run `autoclaude init` in the project to get the current one (init only adds missing files).
 
 **Uninstall.**
 

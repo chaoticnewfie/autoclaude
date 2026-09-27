@@ -63,6 +63,9 @@ git("add", "-A");
 git("commit", "-q", "-m", "initial");
 r = run(process.execPath, [launcher, "init", "--no-statusline"], { cwd: proj });
 check("init from the installed copy, through the launcher", r.status === 0 && fs.existsSync(path.join(proj, "autoclaude.config.json")) && fs.existsSync(path.join(proj, "CLAUDE.md")), out(r));
+const guide = path.join(proj, "AUTOCLAUDE.md");
+const guideText = fs.existsSync(guide) ? fs.readFileSync(guide, "utf8") : "";
+check("init puts the instructions into the project as AUTOCLAUDE.md, stamped with the version", guideText.includes(`Copied into this project by AutoClaude ${entry.version}`), guideText.split("\n").slice(0, 3).join(" | "));
 
 // A running state, then the installed tool guard, spawned by its installed path (which has a
 // space and a tilde in it), must deny a push from both shell tools.
