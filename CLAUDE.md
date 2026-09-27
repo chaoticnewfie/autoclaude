@@ -14,9 +14,9 @@ what order lives in [PLAN.md](PLAN.md). Where things are right now lives in
 
 ## Status, in one line
 
-Phase 3 complete (2026-09-27): the gate ran two live plans unattended, a 3-step happy plan
-(3 commits, tag, summary) and a broken one (3 strikes, pause, page). 108 tests pass. CHECKPOINT 3
-is waiting on Scott's go. Next: Phase 4, the browser tester.
+Phase 4 complete (2026-09-27): the browser tester and the phase-end bug bash verify UI steps in
+a real headless browser; live, the tester caught a broken form the unit tests missed. 131 tests
+pass. CHECKPOINT 4 is waiting on Scott's go. Next: Phase 5, guardrails for unattended runs.
 
 ## Definition of done: every prompt, no exceptions
 
@@ -140,6 +140,15 @@ is waiting on Scott's go. Next: Phase 4, the browser tester.
   detached `cmd.exe` has no console and Windows gives its child a fresh one, which replaces an
   inherited log handle, so `lib/devserver.js` spawns a detached console-less `node` wrapper that
   runs `cmd /c <command>` non-detached with the log file as stdio. Verified in Phase 3.
+- `node --test <directory>` fails on Node 24 on Windows ("Cannot find module ...\test"); pass a
+  glob such as `node --test test/*.test.js`. The fixture app had this bug until Phase 4.
+- Playwright MCP writes page snapshots and console logs to `--output-dir`, but a screenshot saved
+  with a file name goes to the claude process's working directory. The checkers therefore run
+  with their report folder as the working directory, and `sweepStrays` moves anything new in the
+  project into the report (D35).
+- A `git push` over SSH to github.com once timed out on port 22 and succeeded on a plain retry.
+  If it keeps failing, `git push https://github.com/chaoticnewfie/autoclaude.git main` works
+  through the GitHub CLI credential helper.
 - The PreToolUse, PostToolUse and Stop hooks of this plugin run in every session on the machine,
   including this one. They must stay silent and instant when no run is active, and the Stop hook
   imports its libraries lazily so a half-written library can never break someone's session.

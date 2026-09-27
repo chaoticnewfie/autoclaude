@@ -40,8 +40,9 @@ function appendFollowUps(root, config, step, items, date) {
     fs.writeFileSync(file, "# BLOCKERS\n\nFollow-ups the AutoClaude gate found that did not fail a step. One row each, appended; close a row by changing its status.\n\n| Date | Found by | Step | What | Owner | Status |\n|---|---|---|---|---|---|\n");
   }
   const cell = (s) => String(s || "").replace(/\r?\n/g, " ").replace(/\|/g, "\\|").trim();
+  const part = (label, s) => (s ? `${label}${String(s).trim().replace(/[.\s]+$/, "")}` : null);
   for (const b of items) {
-    const what = [`${b.severity}: ${b.title}`, b.actual && `Actual: ${b.actual}`, b.expected && `Expected: ${b.expected}`, b.repro && `Repro: ${b.repro}`].filter(Boolean).join(". ");
+    const what = [part(`${b.severity}: `, b.title), part("Actual: ", b.actual), part("Expected: ", b.expected), part("Repro: ", b.repro)].filter(Boolean).join(". ") + ".";
     appendLine(file, `| ${date} | ${b.foundBy === "bugbash" ? "bug bash" : "browser tester"} | ${step.id} | ${cell(what)} | Claude | open |`);
   }
 }

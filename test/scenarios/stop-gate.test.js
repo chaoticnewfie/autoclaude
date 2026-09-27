@@ -234,12 +234,13 @@ test("tester failure counts as an attempt and its evidence reaches the builder",
 
 test("tester pass with minor bugs: verified, and the follow-ups land in BLOCKERS.md inside the step commit", async () => {
   const root = scratchUi();
-  const { deps: b } = fakeBrowser({ tester: { status: "passed", sections: [{ title: "Browser tester: passed", body: "all good" }], followUps: [{ severity: "medium", title: "button hard to see", actual: "grey on grey", repro: "open /", expected: "contrast", foundBy: "tester" }] } });
+  const { deps: b } = fakeBrowser({ tester: { status: "passed", sections: [{ title: "Browser tester: passed", body: "all good" }], followUps: [{ severity: "medium", title: "button hard to see", actual: "grey on grey.", repro: "open /", expected: "contrast.", foundBy: "tester" }] } });
   writeReady(root, "S1.1");
   const r = await gate(root, b);
   assert.match(r.reason, /S1\.1 verified and committed/);
   const blockers = fs.readFileSync(path.join(root, "docs", "BLOCKERS.md"), "utf8");
-  assert.match(blockers, /\| \d{4}-\d\d-\d\d \| browser tester \| S1\.1 \| medium: button hard to see\. Actual: grey on grey\. Expected: contrast\. Repro: open \/ \| Claude \| open \|/);
+  assert.match(blockers, /\| \d{4}-\d\d-\d\d \| browser tester \| S1\.1 \| medium: button hard to see\. Actual: grey on grey\. Expected: contrast\. Repro: open \/\. \| Claude \| open \|/);
+  assert.doesNotMatch(blockers, /\.\./, "no doubled periods when the model already ended a sentence");
   const files = spawnSync("git", ["show", "--name-only", "--format=", "HEAD"], { cwd: root, encoding: "utf8", env }).stdout;
   assert.match(files, /docs\/BLOCKERS\.md/);
 });

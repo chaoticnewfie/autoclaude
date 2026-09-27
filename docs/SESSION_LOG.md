@@ -133,3 +133,21 @@ One entry per working session: what was done, what was committed. Append only.
   every time: the builder did not touch the impossible test. Report 3 shows the failing test
   output in the first screen, which is the "feedback Claude gets is clear" check of section 6.5.
 - CHECKPOINT 3 met. Phase 3 complete.
+
+## 2026-09-27 (Code VM) - Phase 4, the browser tester (model switched to Opus 5.5 by Scott)
+
+- Built `lib/headless.js` (the `claude -p` runner shared with the Phase 5 reviewer), `lib/tester.js`,
+  `prompts/tester.md`, `prompts/bugbash.md`, gate wiring (dev server restart before each
+  verification, tester for UI steps, bug bash at phase ends, infra failures never counted and a
+  pause on the second, minor bugs to BLOCKERS.md), `AUTOCLAUDE_ROLE` guards in every hook, the
+  fake-claude fixture, unit and scenario tests, and `test/live/ui-bug.live.mjs`.
+- Live run 1 never reached the browser: the fixture's `node --test test/` fails on Node 24 on
+  Windows; fixed to a glob. Live run 2: the tester caught the broken form perfectly on attempt 1
+  (evidence per Accept line, root cause, console error), passed the fix, but the bug bash failed
+  the phase on an absurd-input layout issue it called high, and named screenshots leaked into the
+  project root. Fixed: bug bash severity rules and evaluation (normal-use criteria plus high bugs
+  only), checker working directory = its report folder with `--add-dir`, a stray-file sweep. Live
+  run 3: tester fail, fix, tester pass, bug bash pass, plan complete, one commit, clean root, six
+  screenshots in the report folders, three follow-ups in BLOCKERS.md. D35 logged.
+- One SSH push to GitHub timed out and succeeded on retry. `node scripts/check.js`: 131 tests pass.
+- P4.1 to P4.5 ticked. CHECKPOINT 4 presented.

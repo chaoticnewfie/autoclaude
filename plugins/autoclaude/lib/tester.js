@@ -119,6 +119,10 @@ export function mcpConfigFor(root, outputDir) {
 }
 
 // { valid, reason, passed, criteria, failing, high, other, bugs }
+// Tester: strict; any failing criterion, a high bug or a "fail" verdict fails the step.
+// Bug bash: its criteria are "works under normal use" per feature, and misuse findings are bugs;
+// the step fails only on a failing criterion or a high bug. Its overall verdict word is not used,
+// because a model tends to answer "fail" for a medium finding (seen live, 2026-09-27).
 export function evaluateVerdict(kind, v) {
   if (!v || typeof v !== "object" || !["pass", "fail"].includes(v.verdict)) return { valid: false, reason: "the verdict is missing or malformed" };
   const criteria = Array.isArray(v.criteria) ? v.criteria : [];
@@ -127,8 +131,34 @@ export function evaluateVerdict(kind, v) {
   const failing = criteria.filter((c) => c && c.result !== "pass");
   const high = bugs.filter((b) => b && b.severity === "high");
   const other = bugs.filter((b) => b && b.severity !== "high");
-  const passed = v.verdict === "pass" && failing.length === 0 && high.length === 0;
+  const passed = failing.length === 0 && high.length === 0 && (kind === "bugbash" || v.verdict === "pass");
   return { valid: true, reason: null, passed, criteria, failing, high, other, bugs };
+}
+
+// Files a checker created in the project while it ran (seen live: screenshots saved by name
+// land in the process's working directory) are moved into its report folder, so the gate's
+// step commit can never pick them up. Needs git; a no-op outside a repository.
+async function untrackedSet(root, env) {
+  const st = await git.status(root, { env });
+  return st.ok ? new Set(st.entries.filter((e) => String(e.code).includes("?")).map((e) => e.path)) : null;
+}
+
+export async function sweepStrays(root, before, destDir, env = process.env) {
+  if (!before) return [];
+  const after = await untrackedSet(root, env);
+  if (!after) return [];
+  const moved = [];
+  for (const rel of after) {
+    if (before.has(rel)) continue;
+    const from = path.join(root, rel);
+    const to = path.join(destDir, "stray", rel);
+    try {
+      ensureDir(path.dirname(to));
+      fs.renameSync(from, to);
+      moved.push(rel);
+    } catch {}
+  }
+  return moved;
 }
 
 function listImages(dir) {
@@ -192,7 +222,10 @@ export async function runBrowserCheck({ kind = "tester", root, config, step, par
   });
   const mcpFile = mcpConfigFor(root, shotsDir.replace(/\\/g, "/"));
   const t = config.tester;
-  const args = buildArgs({ model: t.model, maxTurns: Math.round(t.maxTurns * k.turnsFactor), schema: VERDICT_SCHEMA, mcpConfig: mcpFile, allowedTools: ALLOWED_TOOLS });
+  // The checker's working directory is its own report folder, so anything it saves by a bare
+  // file name lands there; --add-dir keeps the project readable for Read, Glob and Grep.
+  const args = buildArgs({ model: t.model, maxTurns: Math.round(t.maxTurns * k.turnsFactor), schema: VERDICT_SCHEMA, mcpConfig: mcpFile, allowedTools: ALLOWED_TOOLS, extraArgs: ["--add-dir", root] });
+  const before = await untrackedSet(root, env);
 
   const errors = [];
   let result = null;
@@ -205,7 +238,7 @@ export async function runBrowserCheck({ kind = "tester", root, config, step, par
     if (tries > 0 && remaining < t.timeoutSec * 1000 * 0.5) { errors.push("no time left for a retry before the gate's own timeout"); break; }
     tries++;
     const timeoutMs = Math.max(30000, Math.min(t.timeoutSec * 1000, remaining));
-    result = await run({ prompt, args, cwd: root, env, role: kind, timeoutMs });
+    result = await run({ prompt, args, cwd: shotsDir, env, role: kind, timeoutMs });
     totalMs += result.durationMs || 0;
     if (typeof result.costUsd === "number") cost += result.costUsd;
     if (result.ok) {
@@ -219,10 +252,11 @@ export async function runBrowserCheck({ kind = "tester", root, config, step, par
     }
   }
 
+  const strays = await sweepStrays(root, before, shotsDir, env);
   const screenshots = listImages(shotsDir).map((f) => rel(root, f));
   const verdictFile = path.join(p.reportsDir, `${tag}.json`);
   writeJsonAtomic(verdictFile, {
-    kind, step: step.id, attempt, tries, ok: !!evaluation, errors,
+    kind, step: step.id, attempt, tries, ok: !!evaluation, errors, strays,
     verdict: result && result.structured ? result.structured : null,
     model: t.model, numTurns: result ? result.numTurns : null, costUsd: cost || null, durationMs: totalMs, screenshots
   });

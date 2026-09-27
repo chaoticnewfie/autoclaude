@@ -558,17 +558,17 @@ autoclaude/
 
 ### Phase 4: Browser tester
 
-- [ ] **P4.1** `prompts/tester.md`
+- [x] **P4.1** `prompts/tester.md` (2026-09-27: live, the tester checked every Accept line with evidence, smoke-checked, read the console, took screenshots, and could not edit: Playwright MCP, Read, Glob, Grep only)
   - Accept: the tester only reads and browses (never edits code), checks every Accept line, runs a quick smoke check of neighbouring features, gives evidence for each criterion and collects console errors
-- [ ] **P4.2** `lib/tester.js`
+- [x] **P4.2** `lib/tester.js` (2026-09-27: with `lib/headless.js`; prompt on stdin, `--add-dir` instead of the project as working directory, per-run MCP config with `--isolated` and `--output-dir`; unit tests for infra retry, deadline, verdict file, stray-file sweep, D35)
   - Accept: spawns `claude -p` with the config model, `--max-turns`, `--strict-mcp-config --mcp-config .autoclaude/mcp.playwright.json`, `--permission-mode dontAsk`, a narrow `--allowedTools`, `--settings '{"disableAllHooks":true}'`, `--output-format json --json-schema <verdict>` and `AUTOCLAUDE_ROLE=tester`
   - Accept: timeouts or unparseable output count as an infrastructure failure: retried once, then reported, without using up one of the step's attempts
   - Accept: saves the verdict and any screenshots under `reports/`
-- [ ] **P4.3** Wire into the gate
+- [x] **P4.3** Wire into the gate (2026-09-27: dev server restarted before each verification; scenario tests for tester failure, pass with follow-ups, infra not counted then pause, no-ui, dev server failure)
   - Accept: the tester runs only after the deterministic checks pass. Steps tagged `no-ui` skip it. Failing criteria and bugs become the failure summary with repro steps.
-- [ ] **P4.4** Phase-end bug bash
+- [x] **P4.4** Phase-end bug bash (2026-09-27: live, it found two medium and one low misuse bug and filed them in `docs/BLOCKERS.md` inside the step commit; severity recalibrated after its first live run failed a phase on an absurd-input layout issue, D35)
   - Accept: at a phase's last step, `prompts/bugbash.md` explores every feature ticked in that phase. High-severity bugs fail the gate, others go to `docs/BLOCKERS.md` as follow-ups.
-- [ ] **P4.5** Scenario
+- [x] **P4.5** Scenario (2026-09-27: `test/live/ui-bug.live.mjs` with the real gate and tester and a scripted builder: attempt 1 failed in the browser with evidence and screenshots, the fix passed on attempt 2, the bug bash passed, the plan completed with one commit)
   - Accept: on `ui-bug.md` the unit tests pass, the tester catches the UI bug, Claude fixes it on the next attempt and the step passes
 
 **CHECKPOINT 4:** Live run of `ui-bug.md`, with the tester's verdict and screenshots shown.

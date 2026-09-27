@@ -12,7 +12,7 @@ The app is running at {{URL}}. Use the Playwright browser tools to use it the wa
 2. For each criterion, set `result` to pass or fail and write the `evidence` you actually observed: the text on the page, the element, the status code, the response body. "Looks fine" is not evidence. If you could not check a line, it is a fail, and the evidence says why.
 3. Smoke-check the features that were already verified earlier in this phase (listed below) with one quick action each. If one of them no longer works, that is a bug with severity high.
 4. Read the browser console (browser_console_messages) and list real errors in `consoleErrors`. Ignore warnings, and ignore a missing favicon.
-5. Take a screenshot of the final state, and one of each failure (browser_take_screenshot). They are saved automatically under {{SCREENSHOT_DIR}}.
+5. Take a screenshot of the final state, and one of each failure (browser_take_screenshot). Give each a short file name with no folder, for example `final.png`; they are kept with this report.
 6. Look at the test changes below. If an existing assertion was deleted, weakened or skipped so that the tests pass, describe it in `testConcerns`. Do not fail the verdict for that alone.
 
 ## Features already verified in this phase

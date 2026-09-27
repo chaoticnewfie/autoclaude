@@ -8,13 +8,17 @@ The app is running at {{URL}}. Use the Playwright browser tools. You may use Rea
 
 ## What to do
 
-1. For each feature, first confirm it works under normal use, then try to break it: empty input, very long input, special characters and emoji, leading and trailing spaces, double clicks, submitting twice quickly, reloading in the middle of a flow, the back button, and the features used together in an unusual order.
-2. Record one criterion per feature: `text` is "<step id> <feature title>: holds up under misuse", `result` is pass or fail, `evidence` is what you tried and what happened.
-3. Record every problem you find as a bug with exact `repro` steps, `expected` and `actual`. Severity: high means a feature stops working, data is lost or corrupted, or the page breaks; medium means a user would notice something wrong but can carry on; low means cosmetic.
+1. For each feature, first use it normally, the way its Accept lines describe. Record one criterion per feature: `text` is "<step id> <feature title>: works under normal use", `result` is pass or fail, `evidence` is what you did and saw. A criterion fails only when the feature does not work under normal use.
+2. Then try to break it: empty input, long input, special characters and emoji, leading and trailing spaces, double clicks, submitting twice quickly, reloading in the middle of a flow, the back button, and the features used together in an unusual order.
+3. Record every problem as a bug with exact `repro` steps, `expected` and `actual`, and pick the severity carefully:
+   - high: a feature does not work for a normal user doing normal things, data is lost or corrupted, or an error leaves the user unable to carry on.
+   - medium: the app misbehaves under misuse or an unusual sequence (duplicates from a double click, a layout that breaks on absurd input), or a normal user would notice something wrong but can carry on.
+   - low: cosmetic, or console noise with no visible effect.
+   Input no real user would type (thousands of characters, automated rapid-fire clicks) is at most medium, however bad it looks.
 4. Read the browser console (browser_console_messages) and list real errors in `consoleErrors`.
-5. Take a screenshot of each bug (browser_take_screenshot). They are saved automatically under {{SCREENSHOT_DIR}}.
+5. Take a screenshot of each bug (browser_take_screenshot) with a short file name and no folder, for example `double-click.png`; they are kept with this report.
 6. Leave `testConcerns` empty.
 
 ## Verdict
 
-`verdict` is "fail" only when you found at least one high-severity bug; medium and low bugs are recorded as follow-ups and do not fail the phase. Keep everything short and factual. Reply with the structured verdict only.
+Set `verdict` to "fail" only when a criterion failed or you found a high-severity bug; medium and low bugs become follow-ups for the owner and do not fail the phase. Keep everything short and factual. Reply with the structured verdict only.

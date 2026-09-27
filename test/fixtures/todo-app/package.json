@@ -7,7 +7,7 @@
   "scripts": {
     "dev": "node server.js",
     "lint": "node --check server.js && node --check lib/todos.js",
-    "test": "node --test test/",
+    "test": "node --test test/*.test.js",
     "e2e": "npx playwright test"
   }
 }

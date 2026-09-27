@@ -7,6 +7,7 @@
   "scripts": {
     "test": "node --test \"test/**/*.test.js\"",
     "check": "node scripts/check.js",
+    "test:live": "node test/live/ui-bug.live.mjs",
     "validate": "claude plugin validate plugins/autoclaude && claude plugin validate ."
   },
   "engines": {

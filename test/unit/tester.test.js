@@ -50,6 +50,9 @@ test("evaluateVerdict: pass, failing criterion, high bug, medium bug only, malfo
   assert.deepEqual([high.passed, high.high.length], [false, 1]);
   const med = evaluateVerdict("bugbash", { ...good, criteria: [], bugs: [{ severity: "medium", title: "m" }] });
   assert.deepEqual([med.valid, med.passed, med.other.length], [true, true, 1]);
+  const bbFailWord = evaluateVerdict("bugbash", { ...good, verdict: "fail", bugs: [{ severity: "medium", title: "double click duplicates" }] });
+  assert.equal(bbFailWord.passed, true, "the bug bash fails only on a failing criterion or a high bug, not on its verdict word");
+  assert.equal(evaluateVerdict("bugbash", { ...good, criteria: [{ text: "S1.1 x: works under normal use", result: "fail", evidence: "e" }] }).passed, false);
   assert.equal(evaluateVerdict("tester", { verdict: "maybe" }).valid, false);
   assert.equal(evaluateVerdict("tester", { ...good, criteria: [] }).valid, false);
   assert.equal(evaluateVerdict("tester", { ...good, verdict: "fail" }).passed, false);
@@ -114,6 +117,8 @@ test("runBrowserCheck: a pass writes the verdict file, the section and the follo
   assert.equal(calls[0].role, "tester");
   assert.match(calls[0].prompt, /\*\*S1\.2\*\* Price things/);
   assert.ok(calls[0].args.includes("--mcp-config"));
+  assert.equal(calls[0].cwd, path.join(root, ".autoclaude", "reports", "S1.2-1-tester"), "the checker works inside its report folder");
+  assert.equal(calls[0].args[calls[0].args.indexOf("--add-dir") + 1], root, "the project stays readable");
   assert.equal(r.sections[0].title, "Browser tester: passed");
   assert.deepEqual(r.followUps.map((f) => [f.severity, f.title, f.foundBy]), [["low", "price misaligned", "tester"], ["low", "possible weakened or skipped test", "tester"]]);
   const saved = JSON.parse(fs.readFileSync(path.join(root, r.verdictFile), "utf8"));
@@ -137,6 +142,28 @@ test("runBrowserCheck: one infra failure is retried; two are reported as infra",
   ({ r, calls } = await check([ok({ ...good, criteria: [] })]));
   assert.equal(r.status, "infra", "an answer with no criteria is not a verdict");
   assert.match(r.failed, /no criteria/);
+});
+
+test("runBrowserCheck moves files the checker created in the project into its report folder", async () => {
+  const env = gitEnv(process.env);
+  const root = tmp();
+  prepareFixture({ dest: root, plan: "happy", git: true, env });
+  fs.writeFileSync(path.join(root, "builder-notes.txt"), "the builder's own untracked file\n");
+  const run = async () => {
+    fs.writeFileSync(path.join(root, "S1.2-final.png"), "png");
+    fs.mkdirSync(path.join(root, "shots"), { recursive: true });
+    fs.writeFileSync(path.join(root, "shots", "bug.png"), "png");
+    return ok(good);
+  };
+  const r = await runBrowserCheck({ kind: "tester", root, config, step: stepById(parsed, "S1.2"), parsed, env, attempt: 1, run });
+  assert.equal(r.status, "passed");
+  assert.equal(fs.existsSync(path.join(root, "S1.2-final.png")), false);
+  assert.equal(fs.existsSync(path.join(root, "shots", "bug.png")), false);
+  assert.ok(fs.existsSync(path.join(root, "builder-notes.txt")), "files that existed before the check stay");
+  const stray = path.join(root, ".autoclaude", "reports", "S1.2-1-tester", "stray");
+  assert.ok(fs.existsSync(path.join(stray, "S1.2-final.png")));
+  assert.ok(fs.existsSync(path.join(stray, "shots", "bug.png")));
+  assert.deepEqual(r.screenshots.sort(), [".autoclaude/reports/S1.2-1-tester/stray/S1.2-final.png", ".autoclaude/reports/S1.2-1-tester/stray/shots/bug.png"]);
 });
 
 test("runBrowserCheck: no retry when the gate deadline is too close", async () => {

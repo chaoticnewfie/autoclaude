@@ -253,6 +253,37 @@ confuse anyone reading the denial log.
 **Rejected.** Telling the builder to always use the node invocation (ugly in every prompt and
 log). Denying every command that mentions a protected path (reading them is legitimate).
 
+### D35 How the browser checks are judged (Phase 4)
+
+**Decision.**
+- The tester runs for every step not tagged `no-ui`, after the deterministic checks pass. The bug
+  bash runs at a phase's last step, only if the phase has at least one UI step.
+- A step fails on a "fail" verdict, any failing criterion, or any high-severity bug. Medium and
+  low bugs, and possible weakened tests (`testConcerns`), never fail a step: they become rows in
+  `docs/BLOCKERS.md`, committed with the step.
+- An answer that is not a usable verdict (timeout, crash, error result, no structured output, a
+  tester verdict with no criteria) is an infrastructure failure. It is retried once inside the
+  same stop when the gate deadline allows, never counts as an attempt, and the second such stop
+  for the same step pauses the run (`infra`) with a high-priority notification.
+- Before each verification the gate restarts a dev server it started, so the checks and the
+  tester never see code from before the builder's last edit. A server someone else started is
+  reused and the report says so.
+- Each run gets its own Playwright MCP config: the project's `.autoclaude/mcp.playwright.json`
+  plus `--headless`, `--isolated` (fresh in-memory browser profile) and `--output-dir` at the
+  attempt's report folder, where the screenshots land. Tools: Playwright MCP, Read, Glob, Grep.
+- The prompt goes to `claude -p` on stdin (verified), so plan text of any length or content is
+  safe.
+
+**Why.** A weakened test is a real risk (PLAN.md section 7), but a language model flagging one is
+not reliable enough to burn attempts on; the tester checking the Accept lines in the browser is
+the actual guard, and the diff review arrives with the security reviewer in Phase 5. A broken
+browser setup is not the builder's fault, but looping on it overnight wastes the night, so it
+pauses after the second stop.
+
+**Rejected.** Letting medium bugs fail a step (attempts spent on polish). Sharing one browser
+profile across runs (state leaks between attempts). Passing the prompt as an argument (Windows
+command-line limit, quoting).
+
 ### D31 The launcher spawns `cmd start` from Node, and the supervisor polls `claude agents --json`
 
 **Decision.** `autoclaude run` opens the window through Node's `spawn("cmd.exe", ["/d","/s","/c",
