@@ -83,8 +83,19 @@ async function main() {
   try { cli = (await import("../lib/gate.js")).cliCommand(process.env); } catch {}
   const context = buildContext({ root, state, config, planText, progressText, promptTemplate, cli });
 
-  if (input.session_id && state.sessionId !== input.session_id) {
-    try { saveState(root, { ...state, sessionId: input.session_id }); } catch {}
+  // Record the session, and mark owner input as delivered: it reached the builder here, so the
+  // gate need not repeat it and clears it when this step passes (seen live: a note injected only
+  // at session start stayed pending after its step passed and would have been re-applied).
+  const hasOwnerInput = (state.pendingNotes || []).some((n) => !n.delivered) || (state.ownerAnswer && !state.ownerAnswer.delivered);
+  if ((input.session_id && state.sessionId !== input.session_id) || hasOwnerInput) {
+    try {
+      saveState(root, {
+        ...state,
+        sessionId: input.session_id || state.sessionId,
+        pendingNotes: (state.pendingNotes || []).map((n) => ({ ...n, delivered: true })),
+        ownerAnswer: state.ownerAnswer ? { ...state.ownerAnswer, delivered: true } : null
+      });
+    } catch {}
   }
   try { appendLine(path.join(root, ".autoclaude", "logs", "hooks.log"), `${new Date().toISOString()} SessionStart ${input.source || "?"} injected ${context.length} chars for ${state.currentStep || "-"}`); } catch {}
 

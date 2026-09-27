@@ -576,22 +576,22 @@ autoclaude/
 
 ### Phase 5: Guardrails for unattended runs
 
-- [ ] **P5.1** Questions
+- [x] **P5.1** Questions (2026-09-27: `agents/decider.md`; live, the builder consulted it, got "critical" with a ready-made owner question, and logged its own routine choice as D-002 in the section 4.5 format)
   - Accept: while running, `AskUserQuestion` is denied with guidance to follow §4.5
   - Accept: `agents/decider.md` exists and returns `{recommendation, reasoning, classification}`. `docs/DECISIONS.md` entries follow the format in §4.5.
-- [ ] **P5.2** Critical blocker round-trip
+- [x] **P5.2** Critical blocker round-trip (2026-09-27: live, blocked with a five-option question, high Discord message, Scott answered in the run window, the builder recorded it with `autoclaude answer` as D-001, finished the step and the gate verified it; CLI and scenario tests for the terminal path)
   - Accept: `autoclaude blocked` pauses the run and notifies with the question. `autoclaude answer "<text>"` (from a shell, or `/autoclaude:answer` in the session) records the answer in `docs/DECISIONS.md`, resumes, and the answer reaches Claude through the next context injection or nudge.
-- [ ] **P5.3** Permission handling and the tool guard
+- [x] **P5.3** Permission handling and the tool guard (2026-09-27: `scripts/permission-deny.js` with scenario tests incl. the 11th-denial notification; `guard.deny` with validation and tests; no prompt appeared in either live run this phase, and the hook's output shape is the one verified live in P0.6)
   - Accept: while running, anything that would prompt is denied with guidance and logged. If denials exceed 10 per hour, a notification goes out.
   - Accept: the hard-deny list (force push, `git reset --hard` on main or master, `rm -rf` outside the project, edits to protected autoclaude files) is denied, and shell commands that write to `PLAN.md` are caught as well
   - Accept: a per-project deny list in `autoclaude.config.json` (`guard.deny`: regex patterns with a reason each) blocks matching Bash commands during a run; tested with generic example rules for a machine that can reach other hosts (`ssh`, `scp`, infrastructure CLIs), because section 4.7 assumes the run cannot reach anything outside the project and a developer machine often can
-- [ ] **P5.4** Security reviewer
+- [x] **P5.4** Security reviewer (2026-09-27: agent-built `lib/security.js`; live on a planted flaw: SQL injection and a hardcoded key both high, 14 s; live at a real phase end: pass with one sharp low finding filed in `docs/SECURITY-FINDINGS.md`; scenario tests for fail, pause as security, findings, tag, infra)
   - Accept: runs at phase end and on `security`-tagged steps over `git diff <last ac tag>..HEAD`. High severity fails the gate, anything else is appended to `docs/SECURITY-FINDINGS.md`.
   - Accept: a fixture step with an obvious flaw (for example SQL built by string concatenation, or a hardcoded secret) is caught
-- [ ] **P5.5** Usage gate
+- [x] **P5.5** Usage gate (2026-09-27: scenario tests with a fake `usage.json`: 86% pauses after the commit and names the reset; two-hour-old data logs one warning and never pauses)
   - Accept: with a fake `usage.json` showing weekly ≥ threshold, the gate pauses after the current step's commit and notifies with the reset time
   - Accept: usage data older than `staleAfterMin` produces one log warning, never a pause
-- [ ] **P5.6** Pause for review (§4.10)
+- [x] **P5.6** Pause for review (§4.10) (2026-09-27: live with `review.pauseAt: every-step`: paused after S1.1, a note, `resume`, the builder relaunched with `--continue` applied the note without breaking the Accept line, recorded it as N-001, and the run paused again after S1.2; the live run also exposed a note that stayed pending after its step passed, fixed; scenario and CLI tests for all three pauseAt settings, pause --now, lint refusal and the D33 re-baseline)
   - Accept: `autoclaude pause` sets `pauseRequested`; the gate pauses only after the next verified commit, stops the dev server and sends a default-priority notification
   - Accept: `autoclaude pause --now` pauses immediately and keeps the step's attempt count
   - Accept: `autoclaude note "..."` appends to `docs/REVIEW_NOTES.md`; after `resume` the note appears in the injected context, and Claude's handling lands in `docs/DECISIONS.md` as `N-###`

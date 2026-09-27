@@ -4,55 +4,54 @@
 
 ## Where things are
 
-**Phase 4 is complete; CHECKPOINT 4 is waiting on Scott's go for Phase 5.** Phases 0 to 3 done.
+**Phase 5 is complete; CHECKPOINT 5 is waiting on Scott's go for Phase 6.** Phases 0 to 4 done.
 
-What a verification does now, in order: restart the dev server the gate started; run the
-configured checks; for a step not tagged `no-ui`, run the browser tester (headless `claude -p`,
-Sonnet, Playwright MCP) against the step's Accept lines; at a phase's last step, run the bug bash
-over every feature of the phase. Real failures count as attempts; a checker that cannot run never
-does (pause on the second time); medium and low findings go to `docs/BLOCKERS.md`.
+What an unattended run has now: the Stop gate (checks, browser tester, phase-end bug bash,
+security reviewer), permission prompts auto-denied with guidance, the built-in and per-project
+(`guard.deny`) deny rules, questions settled by the decider or escalated with `autoclaude blocked`,
+`autoclaude answer` (or an answer typed into the run window), `pause` / `note` / `resume` with
+`review.pauseAt`, the weekly usage pause, and Discord messages for the events in PLAN.md 4.6.
 
-Evidence: `test/live/ui-bug.live.mjs` (run with `npm run test:live`, uses real quota, about five
-minutes). Last live run: `spikes/out/ui-bug-live`, reports and screenshots under its
-`.autoclaude/reports/`. `node scripts/check.js`: 131 tests pass. Remote in sync.
+`node scripts/check.js`: 161 tests pass. Remote in sync. Live evidence of the last runs is in
+`spikes/out/todo-live` (paused after S1.2 of the happy plan) and `spikes/out/security-live`.
+
+## Blind rehearsal rule (D37)
+
+**Do not open or inspect Scott's DB project, and do not tailor AutoClaude to it.** In Phase 7 Scott
+gives a Claude session in that project only the autoclaude repo URL; that Claude works everything
+out from `README.md` and `docs/USAGE.md`. The only preparation here: remove the local-directory
+plugin install first so the plugin comes from GitHub.
 
 ## The exact next step
 
-**Phase 5, guardrails for unattended runs** (`PLAN.md` P5.1 to P5.6):
+**Phase 6, recovery, supervisor and notifications** (`PLAN.md` P6.1 to P6.6):
 
-1. P5.1 questions: `agents/decider.md` returning `{recommendation, reasoning, classification}`;
-   the AskUserQuestion deny already exists in `scripts/tool-guard.js`.
-2. P5.2 blocker round trip: `autoclaude answer "<text>"` and `/autoclaude:answer` record the answer
-   in `docs/DECISIONS.md`, resume, and the answer reaches Claude through the context injection.
-   The gate already pauses on `blocked` and stores `lastBlockedQuestion` in state.
-3. P5.3 PermissionRequest auto-deny hook (removes the prompt Scott accepted in CHECKPOINT 3; the
-   exact output shape is in `spikes/p08-supervisor/permission-deny.js`), denial rate notification,
-   and the new per-project `guard.deny` list (config key, validation, tool-guard check, tests with
-   generic example rules; D37).
-4. P5.4 security reviewer: reuse `lib/headless.js` with read-only tools and no MCP, over
-   `git diff <last ac tag>..HEAD` plus the uncommitted step diff; high fails, others to
-   `docs/SECURITY-FINDINGS.md`; a fixture step with an obvious flaw.
-5. P5.5 usage gate tests with a fake `usage.json` (the pause itself is already in `lib/gate.js`).
-6. P5.6 pause for review: `pause`, `note`, `resume` exist; add the scenario tests and the D33
-   re-baseline on resume after an owner unticks a step.
-
-## Changed 2026-09-27: the Phase 7 rehearsal is a blind test on Scott's DB project (D36, D37)
-
-**Do not open or inspect the DB project, and do not tailor AutoClaude to it.** Scott's words:
-"I want to test it without you specifically preparing it for that project." In a session in that
-project Scott gives Claude only the autoclaude repo URL; that Claude works everything out from
-`README.md` and `docs/USAGE.md`. The only preparation here is generic: remove the local-directory
-plugin install first so the plugin comes from GitHub. Generic features this motivated: the
-per-project `guard.deny` list (P5.3) and the existing-project plan review (P7.1).
+1. P6.1 `Notification` hook: while running, `idle_prompt`, `permission_prompt`, `agent_needs_input`
+   send one high-priority message per 30 minutes and touch `.autoclaude/idle` for the supervisor.
+2. P6.2 `StopFailure` hook: `rate_limit` only logged; other errors to `.autoclaude/failure.json`.
+3. P6.3 `autoclaude run`: open the `ac-<slug>` window (`lib/proc.js` `openConsoleWindow`, proven in
+   P0.8 and all live runs so far via `spikes/p08-supervisor/supervise.mjs`) running
+   `autoclaude supervise`, which spawns `claude --permission-mode auto "/autoclaude:start"`;
+   `/autoclaude:start` runs the preflight (clean tree, config, lint, checks runnable, dev server,
+   Playwright, usage, notify channel, onboarding and trust read-only per D28, native claude, node).
+4. P6.4 the supervisor loop (heartbeat, idle marker, failure.json, `claude agents --json`, usage
+   reset times; relaunch `claude --continue --permission-mode auto "/autoclaude:resume"`; 2
+   relaunches with no progress pause as stuck) and `autoclaude watchdog --install` (Task Scheduler
+   entry every 5 minutes that relaunches a dead supervisor). The supervisor also has to relaunch
+   the builder after `answer` or `resume` while the window sits idle; today I did that by hand.
+5. P6.5 summaries (plan complete, optional morning summary).
+6. P6.6 chaos tests, live on the fixture: kill claude, kill the supervisor, forced `/compact`,
+   a stalled hook, a crashed dev server, an RDP disconnect.
 
 ## Notes for whoever continues
 
-- The CLI runs the plugin in place; edits apply immediately. Do not edit `lib/gate.js`,
-  `lib/tester.js` or the hook scripts while a live run is in progress on this machine.
+- The CLI runs the plugin in place; edits apply immediately. Do not edit `lib/gate.js`, the hook
+  scripts or the prompts while a live run is in progress on this machine.
 - Restart VS Code fully after installs; its integrated terminal keeps a stale PATH.
-- A scratch project that is its own git repository needs its own workspace trust (D28); the live
-  tester scenario does not need trust because it drives the gate directly, not a session.
-- Scratch folders under `spikes/out/` (`todo-demo`, `todo-live`, `ui-bug-live`) are disposable.
+- A scratch project that is its own git repository needs its own workspace trust (D28);
+  `spikes/out/todo-live` is trusted, so reuse that path for live runs (`test/fixtures/prepare.js`).
+- Live runs so far used the interim launcher: `spikes/lib/open-window.mjs` +
+  `spikes/p08-supervisor/supervise.mjs` with `AC_SPIKE_CWD`. Phase 6 replaces it.
 
 ## Decisions Scott still owns
 

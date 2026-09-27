@@ -151,3 +151,25 @@ One entry per working session: what was done, what was committed. Append only.
   screenshots in the report folders, three follow-ups in BLOCKERS.md. D35 logged.
 - One SSH push to GitHub timed out and succeeded on retry. `node scripts/check.js`: 131 tests pass.
 - P4.1 to P4.5 ticked. CHECKPOINT 4 presented.
+
+## 2026-09-27 (Code VM) - Phase 7 reshaped, Phase 5 built
+
+- Scott: the Phase 7 rehearsal runs on his DB project, onboarded from the repo link (D36); then
+  "dont look at that project at all" (D37): a blind test, nothing prepared for it. Generic
+  lessons kept: `guard.deny`, an existing-project plan review (P7.1).
+- Phase 5: one background agent built the security reviewer against a written contract (12 unit
+  tests, one live Opus run that caught a planted SQL injection and a hardcoded key as high in
+  14 s). Built here: the PermissionRequest auto-deny hook and denial counting, `guard.deny`, the
+  decider agent, `autoclaude answer` and its skill, the resume re-baseline (D33 made concrete:
+  the first unfinished step in plan order), owner input in gate messages, the stale-usage
+  warning, security in the gate, and a hook stdout fix (notify's fallback must never corrupt a
+  hook's JSON answer).
+- Live 1, `plans/needs-owner.md`: the builder asked the decider, blocked with a five-option
+  question, Scott got the Discord message and typed "b" into the run window, the builder recorded
+  it with `autoclaude answer` (D-001), built the Discord webhook with tests, and the gate verified
+  it including a real security review (pass, one low cross-site-request finding filed). 6 minutes.
+- Live 2, happy plan with `review.pauseAt: every-step`: pause after S1.1, a note, resume, the
+  builder applied it without breaking the Accept line and recorded N-001, pause after S1.2. Bug
+  found and fixed: a note delivered at session start was never marked delivered, so it would have
+  been re-applied on the next step.
+- 161 tests pass. P5.1 to P5.6 ticked. CHECKPOINT 5 presented.

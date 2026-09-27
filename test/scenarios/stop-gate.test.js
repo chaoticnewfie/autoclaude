@@ -399,6 +399,16 @@ test("owner notes and an owner answer reach the builder in the gate's next messa
   assert.deepEqual([s.pendingNotes, s.ownerAnswer], [[], null]);
 });
 
+test("a note injected at session start (delivered) is cleared when its step passes", async () => {
+  const root = scratch();
+  saveState(root, { ...loadState(root), pendingNotes: [{ at: "t", text: "Make the done count bold", delivered: true }] });
+  writeReady(root, "S1.1");
+  const r = await gate(root);
+  assert.match(r.reason, /S1\.1 verified/);
+  assert.doesNotMatch(r.reason, /OWNER/, "not repeated: the builder already had it");
+  assert.deepEqual(loadState(root).pendingNotes, []);
+});
+
 test("a note left while the builder finishes a step arrives with the next step", async () => {
   const root = scratch();
   saveState(root, { ...loadState(root), pendingNotes: [{ at: "t", text: "Use the existing table" }] });

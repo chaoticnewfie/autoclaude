@@ -352,8 +352,11 @@ through the logged-in GitHub CLI and D20 remains open for anyone else.
   twice: at session start and at the top of the gate's next message. Seen live (2026-09-27): Scott
   typed the answer into the run's own window instead of a terminal; the builder recorded it with
   `autoclaude answer` itself and carried on. Both paths are supported.
-- **Owner input is delivered once in a gate message and cleared when its step passes.** Notes not
-  yet delivered stay pending, so a note left during a review pause reaches the next step.
+- **Owner input is delivered once and cleared when its step passes.** Delivery is either the
+  session-start injection or the top of a gate message, whichever comes first; the injection keeps
+  repeating it after a compaction until the step passes. Notes not yet delivered stay pending, so a
+  note left during a review pause reaches the next step. (First version counted only gate
+  messages; live, a note injected at session start stayed pending after its step passed.)
 - **Resume trusts the plan as the owner left it** (D33 made concrete): the first unfinished step
   in plan order is where the run continues; owner ticks and unticks become the record; a failed or
   blocked step gets fresh attempts.

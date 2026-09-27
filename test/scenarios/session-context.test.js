@@ -61,6 +61,9 @@ test("run active: injects the rules, the current step, the progress tail and pen
   assert.match(ctx, /docs\/DECISIONS\.md as N-###/);
   const state = JSON.parse(fs.readFileSync(path.join(root, ".autoclaude", "state.json"), "utf8"));
   assert.equal(state.sessionId, "sess-1");
+  assert.equal(state.pendingNotes[0].delivered, true, "a note injected here counts as delivered, so the gate clears it when the step passes");
+  const again = JSON.parse(runHook(root).stdout).hookSpecificOutput.additionalContext;
+  assert.match(again, /Use the existing table/, "still injected after a compaction until the step passes");
   assert.match(fs.readFileSync(path.join(root, ".autoclaude", "logs", "hooks.log"), "utf8"), /SessionStart startup injected/);
 });
 

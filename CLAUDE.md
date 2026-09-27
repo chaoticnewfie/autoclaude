@@ -14,9 +14,10 @@ what order lives in [PLAN.md](PLAN.md). Where things are right now lives in
 
 ## Status, in one line
 
-Phase 4 complete (2026-09-27): the browser tester and the phase-end bug bash verify UI steps in
-a real headless browser; live, the tester caught a broken form the unit tests missed. 131 tests
-pass. CHECKPOINT 4 is waiting on Scott's go. Next: Phase 5, guardrails for unattended runs.
+Phase 5 complete (2026-09-27): permission prompts auto-denied, per-project deny rules, the
+decider, the answer round trip, the security reviewer and review pauses all work, most of them
+proven live. 161 tests pass. CHECKPOINT 5 is waiting on Scott's go. Next: Phase 6, recovery and
+`autoclaude run`. The Phase 7 rehearsal is a blind test on Scott's DB project: never open it (D37).
 
 ## Definition of done: every prompt, no exceptions
 
