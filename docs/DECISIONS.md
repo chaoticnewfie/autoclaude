@@ -284,6 +284,39 @@ pauses after the second stop.
 profile across runs (state leaks between attempts). Passing the prompt as an argument (Windows
 command-line limit, quoting).
 
+### D36 The dress rehearsal runs on Scott's DB project, onboarded from the repo link
+
+**Decision.** P7.3 is an overnight run on `chaoticnewfie/DB` (`C:\Database`) instead of a
+12-step fixture plan. It starts the way another person would start: in a session in that project,
+Scott gives Claude the autoclaude repo URL and asks it to add AutoClaude; Claude follows only the
+repo's README and usage guide. Conditions:
+- **Local work only.** The DB repo has scripts that create ZFS pools and VMs, and the Code VM has
+  a root SSH key to the Proxmox host. The plan's scope excludes Proxmox, the VM, deploys and
+  secrets, and a new per-project `guard.deny` list (P5.3) blocks `ssh`, `scp`, `qm`, `pct`,
+  `zpool`, `zfs` and the repo's `proxmox/` and `vm/` scripts during the run.
+- **Docker first.** Most of the DB's next work is SQL. Without Postgres the gate can only check
+  TypeScript, so WSL2 and Docker Engine go onto the Code VM with Scott beforehand (his machine
+  notes already plan exactly that for Docker on Windows Server).
+- **A fresh install path.** The local-directory install is removed first, so the plugin comes from
+  GitHub; two installs of the same plugin would run every hook twice.
+- **The DB's own rules win where they should.** Its `PLAN.md` is a historical spec, so the
+  AutoClaude plan gets its own file (`plan` in the config). Its `CLAUDE.md` gains an AutoClaude
+  section agreed with Scott, because its "commit and push after every change" rule conflicts with
+  the gate committing and pushing being off during a run.
+- **Size by the work.** The plan has as many 20 to 90 minute steps as the local work needs.
+
+**Why.** Scott: the tokens get spent either way, so spend them on his next real project, and it
+tests integration into an existing repo. The link-only onboarding also tests the shareability
+requirement (R14) with the real docs.
+
+**Rejected.** The fixture rehearsal: known expectations, but it tests nothing about existing
+projects or onboarding. Letting the run include VM or Proxmox work: irreversible, and the key to
+do it is on this machine. The browser tester gets little use here (the DB work is mostly no-ui);
+the fixture's live UI scenario (P4.5) already covers it.
+
+**Note.** The repo is private. Onboarding by link works on this machine because the GitHub CLI is
+logged in; anyone else needs the repo shared or public (D20, still open).
+
 ### D31 The launcher spawns `cmd start` from Node, and the supervisor polls `claude agents --json`
 
 **Decision.** `autoclaude run` opens the window through Node's `spawn("cmd.exe", ["/d","/s","/c",

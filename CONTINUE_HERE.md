@@ -26,13 +26,21 @@ minutes). Last live run: `spikes/out/ui-bug-live`, reports and screenshots under
    in `docs/DECISIONS.md`, resume, and the answer reaches Claude through the context injection.
    The gate already pauses on `blocked` and stores `lastBlockedQuestion` in state.
 3. P5.3 PermissionRequest auto-deny hook (removes the prompt Scott accepted in CHECKPOINT 3; the
-   exact output shape is in `spikes/p08-supervisor/permission-deny.js`), denial rate notification.
+   exact output shape is in `spikes/p08-supervisor/permission-deny.js`), denial rate notification,
+   and the new per-project `guard.deny` list (config key, validation, tool-guard check, tests with
+   the DB rehearsal's Proxmox rules; D36).
 4. P5.4 security reviewer: reuse `lib/headless.js` with read-only tools and no MCP, over
    `git diff <last ac tag>..HEAD` plus the uncommitted step diff; high fails, others to
    `docs/SECURITY-FINDINGS.md`; a fixture step with an obvious flaw.
 5. P5.5 usage gate tests with a fake `usage.json` (the pause itself is already in `lib/gate.js`).
 6. P5.6 pause for review: `pause`, `note`, `resume` exist; add the scenario tests and the D33
    re-baseline on resume after an owner unticks a step.
+
+## Changed 2026-09-27: the Phase 7 rehearsal runs on Scott's DB project (D36)
+
+Onboarded from the repo link in a session in `C:\Database`, local work only, sized by the work.
+Before it, with Scott: install WSL2 and Docker Engine on this VM, and remove the local-directory
+plugin install so it comes from GitHub. Details in `PLAN.md` P7.3 and `docs/DECISIONS.md` D36.
 
 ## Notes for whoever continues
 

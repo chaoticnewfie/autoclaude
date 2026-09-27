@@ -55,6 +55,7 @@ Everything Scott has asked for after 2026-09-24, with where it landed. Nothing i
 | 2026-09-26 | Works with existing projects and as the starting point for new ones (R16) | D23, P2.1, P2.5 | Planned |
 | 2026-09-26 | "Keep agents small means don't make 70... make sure that they are stopped when they aren't needed anymore" | `CLAUDE.md` rule 10 (a rule for building this, not a feature) | Done |
 | 2026-09-27 | Plans made in plan mode must settle decisions ahead of time, since nobody answers during a run; an existing project gets a plan review once autoclaude is added (R17) | P2.1 (init message), P2.5 (template `CLAUDE.md`), P7.1 (plan skill) | Planned |
+| 2026-09-27 | "Could we change phase 7 to work on a real project... my database project... that will also give us the chance to test integrating this into an existing project"; "give claude in that project the github repo for autoclaude and have it add it to the project and start it that way"; plan size follows the project, not a fixed 12 steps | D36, P5.3 (per-project deny list), P7.3 (rehearsal on `chaoticnewfie/DB`), P8.1 | Planned |
 
 ### How each requirement is met
 
@@ -87,7 +88,7 @@ Scott spends an hour with Claude turning an idea into a solid `PLAN.md`, types `
 ### Success criteria (v1.0)
 
 - **Install:** set up on a new project in under 10 minutes with `/plugin install` and `/autoclaude:init`.
-- **Unattended:** completes a 12-step fixture plan with no human input, and each step produces exactly one commit.
+- **Unattended:** runs a real project's plan overnight with no human input (the rehearsal uses Scott's DB project, D36), and each verified step produces exactly one commit. Plans are sized by the work: steps of 20 to 90 minutes, as many as the project needs.
 - **Never advances on red:** in scenario tests, no step is ticked while any check or browser criterion fails.
 - **Recovers on its own:** the fixture run survives a context compaction, a simulated API error, a killed `claude` process and a 5-hour usage reset.
 - **Quiet:** the only notifications are those in §4.6. The dress rehearsal produces no false alarms.
@@ -583,6 +584,7 @@ autoclaude/
 - [ ] **P5.3** Permission handling and the tool guard
   - Accept: while running, anything that would prompt is denied with guidance and logged. If denials exceed 10 per hour, a notification goes out.
   - Accept: the hard-deny list (force push, `git reset --hard` on main or master, `rm -rf` outside the project, edits to protected autoclaude files) is denied, and shell commands that write to `PLAN.md` are caught as well
+  - Accept: a per-project deny list in `autoclaude.config.json` (`guard.deny`: regex patterns with a reason each) blocks matching Bash commands during a run; tested with the rules the DB rehearsal needs (`ssh`, `scp`, `qm`, `pct`, `zpool`, `zfs`, the repo's `proxmox/` and `vm/` scripts), so an unattended run on this VM can never reach the Proxmox host with the root key that is on it (D36)
 - [ ] **P5.4** Security reviewer
   - Accept: runs at phase end and on `security`-tagged steps over `git diff <last ac tag>..HEAD`. High severity fails the gate, anything else is appended to `docs/SECURITY-FINDINGS.md`.
   - Accept: a fixture step with an obvious flaw (for example SQL built by string concatenation, or a hardcoded secret) is caught
@@ -632,9 +634,12 @@ autoclaude/
   - Accept: the interview settles every decision it can up front (stack, naming, scope, data, what to do when unsure) and records each in Constraints & decisions, so the run never needs a human (R17); for a project that already has a plan, the skill starts with a review of that plan and lists every step that would stall an unattended run, then rewrites it into the step format
 - [ ] **P7.2** Docs
   - Accept: `README.md` (what it is, a 5-minute quickstart) and `docs/USAGE.md` (install, init, plan, run, watch, pause and notes, alerts, answering blockers, recovery, uninstall, troubleshooting; Windows notes on RDP disconnect versus log-off, power settings and the standard-user recommendation; Linux and macOS notes), all written for someone who has never seen this repo or Scott's machines
-- [ ] **P7.3** Overnight dress rehearsal
-  - Accept: a 12-step, 3-phase fixture plan (use `/autoclaude:plan` to write it) runs overnight on the Code VM with no input
-  - Accept: the morning review finds 12 commits, every step verified, no false alarms, and every issue found turned into a fix or a backlog item
+- [ ] **P7.3** Overnight dress rehearsal on a real project: Scott's DB repo (D36)
+  - Accept: prerequisites done with Scott beforehand: WSL2 and Docker Engine on the Code VM so the DB's SQL work can be verified against a real Postgres; the local-directory install of the plugin removed from this machine, so the rehearsal installs from GitHub the way a new machine would
+  - Accept: onboarding by link: in a Claude Code session in `C:\Database`, Scott gives Claude only the repo URL `https://github.com/chaoticnewfie/autoclaude` and asks it to add AutoClaude to the project; Claude installs the plugin and the CLI, runs `init`, and reviews the existing plan and rules using nothing but the repo's `README.md` and `docs/USAGE.md`. Every place it had to guess is a fix to those docs
+  - Accept: the AutoClaude plan lives in its own file (the DB's `PLAN.md` is a historical spec its rules forbid rewriting), is sized by the work, covers local work only (the four `scripts/`, the review punch list, the local smoke test), and settles every decision up front; nothing touches Proxmox, the VM, deploys or secrets, and `guard.deny` enforces that
+  - Accept: the DB's `CLAUDE.md` gains an AutoClaude section agreed with Scott (during a run the gate commits and pushing is off), so its own "commit and push after every change" rule does not fight the gate
+  - Accept: the run goes overnight with no input; the morning review finds one verified commit per completed step on the run branch, no false alarms, every pause justified, and every issue turned into a fix or a backlog item. The branch is merged into the DB's `main` only after Scott's review
 - [ ] **P7.4** Release
   - Accept: `plugin.json` version `1.0.0`, git tag `v1.0.0`, `CHANGELOG.md`, and `LICENSE` if Scott chose one
 
@@ -642,8 +647,8 @@ autoclaude/
 
 ### Phase 8: Rollout
 
-- [ ] **P8.1** First real project on the Code VM: `/autoclaude:init`, `/autoclaude:plan`, Scott reviews `PLAN.md`, a supervised run of 2–3 steps (watching the window, or `review.pauseAt: every-step`), then unattended
-  - Accept: the first real project has run at least 3 steps unattended on the Code VM with one verified commit per step and no false alarms
+- [ ] **P8.1** The DB project keeps going on AutoClaude after the rehearsal (its next phases, still local-only until Scott approves VM work by hand), and a second existing repo of Scott's is onboarded the same way
+  - Accept: a second existing project has run at least 3 steps unattended on the Code VM with one verified commit per step and no false alarms
 - [ ] **P8.2** Install on the Windows 11 desktop and confirm an unattended run behaves the same as on the Code VM, including sleep and power settings
   - Accept: the fixture plan passes unattended on the Windows 11 desktop, and the sleep and power settings that matter are written into `docs/USAGE.md`
 - [ ] **P8.3** Backlog of later ideas lives in `docs/DEFERRED.md`, each with a trigger; review it and file anything new from the rollout
