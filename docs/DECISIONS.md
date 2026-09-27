@@ -317,6 +317,28 @@ the fixture's live UI scenario (P4.5) already covers it.
 **Note.** The repo is private. Onboarding by link works on this machine because the GitHub CLI is
 logged in; anyone else needs the repo shared or public (D20, still open).
 
+### D37 The rehearsal is a blind test (supersedes the project-specific conditions in D36)
+
+**Decision.** Scott, minutes after D36: "dont look at that project at all either. I want to test
+it without you specifically preparing it for that project specially." So:
+- Nobody building AutoClaude opens the DB project or tailors anything to it. D36's project-specific
+  conditions (a Docker prerequisite, named deny rules, where its plan goes, a section for its
+  `CLAUDE.md`) are withdrawn. Whatever that project needs is for the Claude session in it to work
+  out from the repo link and the docs, with Scott, which is the point of the test.
+- The generic lessons stay, stated for any project: a per-project `guard.deny` list (P5.3),
+  and a plan review for existing projects that settles where the plan lives, conflicts with the
+  project's own rules, what the run must never touch, and missing tools for the check commands
+  (P7.1). These are what a stranger's existing project needs too.
+- The only preparation on this machine is generic: remove the local-directory plugin install so the
+  plugin comes from GitHub as it would on a new machine.
+
+**Why.** A rehearsal the builder has prepared for proves the builder's knowledge, not the
+product's. The value is in finding what the docs and the planner miss.
+
+**Kept from D36.** The rehearsal runs on the DB repo, overnight, sized by the work, onboarded by
+link; the branch is merged only after Scott's review; the repo is private, so the link works here
+through the logged-in GitHub CLI and D20 remains open for anyone else.
+
 ### D31 The launcher spawns `cmd start` from Node, and the supervisor polls `claude agents --json`
 
 **Decision.** `autoclaude run` opens the window through Node's `spawn("cmd.exe", ["/d","/s","/c",

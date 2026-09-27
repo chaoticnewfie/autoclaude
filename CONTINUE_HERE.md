@@ -28,7 +28,7 @@ minutes). Last live run: `spikes/out/ui-bug-live`, reports and screenshots under
 3. P5.3 PermissionRequest auto-deny hook (removes the prompt Scott accepted in CHECKPOINT 3; the
    exact output shape is in `spikes/p08-supervisor/permission-deny.js`), denial rate notification,
    and the new per-project `guard.deny` list (config key, validation, tool-guard check, tests with
-   the DB rehearsal's Proxmox rules; D36).
+   generic example rules; D37).
 4. P5.4 security reviewer: reuse `lib/headless.js` with read-only tools and no MCP, over
    `git diff <last ac tag>..HEAD` plus the uncommitted step diff; high fails, others to
    `docs/SECURITY-FINDINGS.md`; a fixture step with an obvious flaw.
@@ -36,11 +36,14 @@ minutes). Last live run: `spikes/out/ui-bug-live`, reports and screenshots under
 6. P5.6 pause for review: `pause`, `note`, `resume` exist; add the scenario tests and the D33
    re-baseline on resume after an owner unticks a step.
 
-## Changed 2026-09-27: the Phase 7 rehearsal runs on Scott's DB project (D36)
+## Changed 2026-09-27: the Phase 7 rehearsal is a blind test on Scott's DB project (D36, D37)
 
-Onboarded from the repo link in a session in `C:\Database`, local work only, sized by the work.
-Before it, with Scott: install WSL2 and Docker Engine on this VM, and remove the local-directory
-plugin install so it comes from GitHub. Details in `PLAN.md` P7.3 and `docs/DECISIONS.md` D36.
+**Do not open or inspect the DB project, and do not tailor AutoClaude to it.** Scott's words:
+"I want to test it without you specifically preparing it for that project." In a session in that
+project Scott gives Claude only the autoclaude repo URL; that Claude works everything out from
+`README.md` and `docs/USAGE.md`. The only preparation here is generic: remove the local-directory
+plugin install first so the plugin comes from GitHub. Generic features this motivated: the
+per-project `guard.deny` list (P5.3) and the existing-project plan review (P7.1).
 
 ## Notes for whoever continues
 
