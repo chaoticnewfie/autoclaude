@@ -543,3 +543,19 @@ testing AutoClaude, not from the product; building sessions no longer use it eit
 
 **Rejected.** Keeping Sonnet for the tester to save usage: the tester is the step's independent
 verification, not basic work.
+
+### D45 What AutoClaude leaves in a project's git (2026-09-27)
+
+**Decision.** Unchanged: only `.autoclaude/` (run state, logs, reports, screenshots, the browser
+tester's MCP config) is gitignored. `autoclaude.config.json`, the run records (`PROGRESS.md`,
+`docs/REVIEW_NOTES.md`, `docs/BLOCKERS.md`, `docs/SECURITY-FINDINGS.md`), the doc set and the
+`autoclaude(<step>)` commits are part of the project and reach GitHub when the owner merges the
+run branch and pushes. AutoClaude itself never pushes (`git.push` false, the guard denies the
+builder's pushes, the gate only commits).
+
+**Why.** Scott asked that AutoClaude's files not end up in his project repos, was shown the
+options, and chose "Leave it as is". Keeping the config in git also carries the project's deny
+rules and checks to any other machine.
+
+**Rejected.** Gitignoring the run records; also the config; also the plan and docs (the last
+contradicts his rule that project plans and docs live in git).

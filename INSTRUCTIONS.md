@@ -191,6 +191,11 @@ You need to be at the computer (or connected to it remotely) to answer. The run 
 
 The run window stays open afterwards, so you can ask Claude about the run. Close it when done.
 
+What ends up in your project's git (and on GitHub once you push): the code, one commit per step
+named autoclaude(<step>), autoclaude.config.json, PROGRESS.md, the plan, CLAUDE.md,
+CONTINUE_HERE.md and the docs/ files. Only the .autoclaude/ folder (logs, reports, screenshots,
+run state) is kept out. AutoClaude never pushes anything itself; pushing is always your call.
+
 Adding more work later: add new steps to the plan (or run /autoclaude:plan again), commit them,
 then  autoclaude run. It starts a fresh run on the new steps.
 

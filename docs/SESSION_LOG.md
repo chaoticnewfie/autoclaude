@@ -266,3 +266,6 @@ One entry per working session: what was done, what was committed. Append only.
   on the run branch and reach GitHub when the owner merges and pushes. Which of them should stay
   local-only is his call; asked.
 - 266 tests pass.
+- Scott answered the git question with "Leave it as is": only `.autoclaude/` stays out of a
+  project's git (D45). INSTRUCTIONS.md now says what is committed and that AutoClaude never
+  pushes.
