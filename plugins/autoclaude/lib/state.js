@@ -16,6 +16,7 @@ export function defaultState() {
     currentStep: null,
     attempts: {},
     infraFailures: {},
+    uncommitted: [],
     noProgress: 0,
     recoveries: 0,
     toolCallsAtLastGate: 0,

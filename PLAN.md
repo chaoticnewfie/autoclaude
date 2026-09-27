@@ -602,15 +602,15 @@ autoclaude/
 
 ### Phase 6: Recovery, supervisor and notifications
 
-- [ ] **P6.1** Idle and permission-prompt detector (`Notification` hook)
+- [x] **P6.1** Idle and permission-prompt detector (`Notification` hook) (2026-09-27, as amended by D39: every notification writes the idle marker for the supervisor; only `permission_prompt`, `agent_needs_input` and `elicitation_dialog` page, high, at most once per 30 minutes. Live: an `idle_prompt` after the forced compaction was logged and paged nobody, and the supervisor relaunched the session 49 s later)
   - Accept: while running, `idle_prompt`, `permission_prompt` or `agent_needs_input` sends a high-priority notification (throttled to one per 30 minutes)
-- [ ] **P6.2** `StopFailure` handling
+- [x] **P6.2** `StopFailure` handling (2026-09-27: `failure.json` records every type with its time, and the supervisor treats `rate_limit` as a wait until the reset plus a grace period, never a relaunch; scenario and unit tests; no API error occurred in the live runs)
   - Accept: `rate_limit` is only logged. Other error types are logged to `failure.json` for the supervisor's next pass.
-- [ ] **P6.3** `autoclaude run`
+- [x] **P6.3** `autoclaude run` (2026-09-27: live on Windows twice, including bringing back a paused run; the preflight refused a shell without node, and now also checks git on PATH for a run already under way, after a run window without git could not commit; Linux and macOS paths, tmux or a background process, unit-tested only)
   - Accept: from a shell in the project, it opens a new console window titled `ac-<slug>` running `autoclaude supervise`, which spawns `claude --permission-mode auto "/autoclaude:start"`; it records the window title and supervisor pid in state and prints how to watch (`autoclaude status`, the window) and how to stop (`autoclaude pause`)
   - Accept: on Linux and macOS the same command uses tmux when present and otherwise a background process logging to `logs/supervisor.log`
   - Accept: `/autoclaude:start` runs the preflight (clean tree, branch, config valid, plan lints, checks runnable, dev server healthy, Playwright installed, usage below threshold, notify channel configured, first-run onboarding done (`hasCompletedOnboarding`) and the workspace trusted (`projects["<repo root, forward slashes>"].hasTrustDialogAccepted`), read from `~/.claude.json` without ever writing it; if either is missing it tells the user to run `claude` once in the project, pick a theme, accept the trust dialog and exit, D28), then sets running and starts on the first unchecked step
-- [ ] **P6.4** Supervisor loop and backstop watchdog
+- [x] **P6.4** Supervisor loop and backstop watchdog (2026-09-27: `decide` is one pure function with a unit test per rule, plus loop tests with a fake clock; live it relaunched a killed session in 11 s, a compacted idle session, and a stalled one after twice the stall time; the Task Scheduler watchdog brought back a killed supervisor within its 5-minute cycle. Added from the live run: `autoclaude nudge`, a running verification counts as activity, and a nudge never interrupts the gate (D40))
   - Accept: every 60 s the supervisor decides from the heartbeat age, the idle marker, `failure.json`, `claude agents --json` (which lists interactive sessions with a `status`, D31), usage reset times and state:
     - working → nothing
     - usage-limit wait (`rate_limit` in `failure.json` and the reset time not yet passed) → nothing
@@ -619,9 +619,9 @@ autoclaude/
     - 2 relaunches in a row with no progress → pause(stuck) and notify
   - Accept: if `autoResumeAfterWeeklyReset` is on, it resumes a weekly-limit pause after the reset time
   - Accept: `autoclaude watchdog --install` registers a scheduled task (Windows: `schtasks`, every 5 minutes, running only while the user is logged on; Linux and macOS: a cron line or systemd user timer from `templates/watchdog/`) that relaunches a dead supervisor for every registered running project, and `--uninstall` removes it
-- [ ] **P6.5** Summaries
+- [x] **P6.5** Summaries (2026-09-27: the plan-complete summary reached Discord from the chaos run with steps, attempts, decisions, follow-ups, usage and elapsed time; the morning summary is covered by a supervisor loop test, not yet seen live)
   - Accept: plan-complete and optional morning summaries include steps done, attempts, decisions made, blockers, usage used and elapsed time
-- [ ] **P6.6** Chaos tests (live, on the fixture)
+- [x] **P6.6** Chaos tests (live, on the fixture) (2026-09-27: all six recovered without Scott on a 5-step plan, 68 minutes; log in `spikes/out/chaos-events.log`. The run exposed five AutoClaude bugs, all fixed with tests: a nudge that killed a verification, an idle gap after compaction, a long verification mistaken for a stall, a bug bash thrown away at its turn limit, and a failed commit that did not stop the run)
   - Accept: the run recovers without Scott from each of: a killed `claude` process mid-step, a killed supervisor (the backstop relaunches it), a forced `/compact` mid-step, a simulated stall (hook sleeps), a dev server crash, and an RDP disconnect and reconnect
 
 **CHECKPOINT 6:** Show the chaos-test log and the notifications received.

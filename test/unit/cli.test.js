@@ -167,7 +167,8 @@ test("run refuses before opening any window: complete plan, a live supervisor, a
   fs.unlinkSync(path.join(root, ".autoclaude", "supervisor.pid"));
   r = await run(["run"], root);
   assert.equal(r.code, 1);
-  assert.match(r.out, /FAIL git: not a git repository/);
+  // The test environment has no PATH, so git itself is missing; with git it would say "not a git repository".
+  assert.match(r.out, /FAIL git: (not a git repository|`git` is not on PATH)/);
   assert.match(r.out, /FAIL trust: Claude Code has not been opened here yet/);
   assert.match(r.out, /not starting; fix the FAIL lines above/);
 });

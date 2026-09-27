@@ -420,6 +420,16 @@ something, which is worth a page.
     resumed once (`--resume`, 4 turns) and asked for its structured answer from what it has
     seen. The phase-end bug bash had explored for all 60 turns on both tries, and the gate threw
     both runs away as machine failures. The resume was checked live before relying on it.
+    Live afterwards: the bug bash used its 60 turns again, and the resume got a pass verdict
+    with two follow-ups in 3 more turns.
+  - A step that passes but cannot be committed pauses the run (`commit-failed`, a high page),
+    and `autoclaude resume` commits the pending steps before the session restarts. The run
+    window had inherited a PATH without git: the last step was reported verified and the plan
+    complete with nothing committed. Preflight now checks git on PATH even for a run already
+    under way.
+- **After the plan completes, the window stays open with the session idle,** so the owner can
+  ask it about the run. An idle session uses no tokens; the supervisor ends when the owner
+  closes the session or the window.
 
 ### D31 The launcher spawns `cmd start` from Node, and the supervisor polls `claude agents --json`
 

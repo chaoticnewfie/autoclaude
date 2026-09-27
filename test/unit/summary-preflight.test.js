@@ -76,4 +76,15 @@ test("preflight on a fixture: every problem is reported, trust is read from the 
   fs.unlinkSync(path.join(root, "stray.txt"));
   r = await preflight(project, { env, userConfigFile, skip: ["notify", "usage"] });
   assert.equal(r.ok, true, formatPreflight(r));
+
+  // A shell without git on PATH (seen live: the run window inherited one) fails preflight, even
+  // for a run already under way, which skips the repository checks but not the tools.
+  const noGit = { ...env, PATH: path.dirname(process.execPath) };
+  r = await preflight(project, { env: noGit, userConfigFile, skip: ["plan", "git", "checks", "playwright", "devserver", "usage", "notify"] });
+  const tools = Object.fromEntries(r.items.map((i) => [i.name, i]));
+  assert.equal(r.ok, false);
+  assert.equal(tools["git-cli"].status, "fail");
+  assert.match(formatPreflight(r), /FAIL git-cli: `git` is not on PATH; the gate commits every verified step/);
+  r = await preflight(project, { env: noGit, userConfigFile });
+  assert.match(formatPreflight(r), /FAIL git: `git` is not on PATH, so the repository cannot be checked/);
 });

@@ -196,3 +196,15 @@ test("supervise: a complete run exits at once without launching anything", async
   assert.equal(r.exit, "complete");
   assert.deepEqual(h.launches, []);
 });
+
+test("supervise: the optional morning summary goes out once a day, at low priority", async () => {
+  const root = fakeProject("running");
+  fs.writeFileSync(path.join(root, "autoclaude.config.json"), JSON.stringify({ version: 1, notify: { morningSummaryAt: "00:00" }, supervisor: { pollSec: 60, idleRelaunchMin: 15, stallMin: 45, resumeGraceMin: 2, rateLimitGraceMin: 10, maxRecoveries: 2 } }));
+  const h = harness(root);
+  await h.run(3);
+  const morning = h.sent.filter((m) => /morning summary/.test(m.title));
+  assert.equal(morning.length, 1, "three polls on one day, one summary");
+  assert.equal(morning[0].priority, "low");
+  assert.match(morning[0].message, /Steps: 0\/1 verified/);
+  assert.match(fs.readFileSync(path.join(root, ".autoclaude", "logs", "supervisor.log"), "utf8"), /sent the morning summary/);
+});

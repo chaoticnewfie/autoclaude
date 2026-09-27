@@ -14,10 +14,10 @@ what order lives in [PLAN.md](PLAN.md). Where things are right now lives in
 
 ## Status, in one line
 
-Phase 5 complete (2026-09-27): permission prompts auto-denied, per-project deny rules, the
-decider, the answer round trip, the security reviewer and review pauses all work, most of them
-proven live. 161 tests pass. CHECKPOINT 5 is waiting on Scott's go. Next: Phase 6, recovery and
-`autoclaude run`. The Phase 7 rehearsal is a blind test on Scott's DB project: never open it (D37).
+Phase 6 complete (2026-09-27): `autoclaude run`, the supervisor, the Task Scheduler watchdog,
+`nudge` and the summaries work; a live chaos run recovered from all six failures without Scott
+and exposed five bugs, all fixed. 204 tests pass. CHECKPOINT 6 is waiting on Scott's go. Next:
+Phase 7 (planner, docs, the blind DB rehearsal, release). Never open the DB project (D37).
 
 ## Definition of done: every prompt, no exceptions
 
@@ -105,6 +105,10 @@ proven live. 161 tests pass. CHECKPOINT 5 is waiting on Scott's go. Next: Phase 
 - On Scott's dev VM, Node is at `C:\Program Files\nodejs\` and the GitHub CLI at
   `C:\Program Files\GitHub CLI\gh.exe`. Shells opened before those installs do not have them on
   PATH. Call by full path or prepend for the session.
+- A run window inherits the PATH of the shell that ran `autoclaude run`, and so do the session,
+  the hooks and the gate. The VS Code tool shells here lack node, and the PowerShell one lacks git
+  too. Start live runs from a fresh terminal, or prepend both; a run started with node but no git
+  could not commit.
 - The only `claude` binary on that VM is the VS Code extension's bundled one under
   `.vscode\extensions\anthropic.claude-code-*\resources\native-binary\claude.exe`. The unattended
   runner needs the native install: `irm https://claude.ai/install.ps1 | iex`.

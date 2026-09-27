@@ -16,7 +16,7 @@ import { initProject, formatInitReport } from "./init.js";
 import { writeReady, writeBlocked, readReady } from "./protocol.js";
 import { firstUnfinished, planSlug, setMarker, MARKERS } from "./plan.js";
 import * as git from "./git.js";
-import { resumeRun } from "./resume.js";
+import { resumeRun, commitPending } from "./resume.js";
 import { preflight, formatPreflight } from "./preflight.js";
 import { supervise } from "./supervisor.js";
 import { openConsoleWindow, isPidAlive as pidAlive } from "./proc.js";
@@ -442,10 +442,10 @@ function cmdNote(args, io) {
   return 0;
 }
 
-function cmdResume(args, io) {
+async function cmdResume(args, io) {
   const project = requireProject(io);
   if (!project) return 1;
-  const state = loadState(project.root);
+  let state = loadState(project.root);
   const plan = loadPlan(project);
   if (plan.problems.length) {
     io.out(`autoclaude: not resuming, ${project.config.plan} has ${plan.problems.length} problem(s):`);
@@ -468,6 +468,15 @@ function cmdResume(args, io) {
   if (state.status === STATUS.idle) {
     io.out("autoclaude: no run has been started yet; use `autoclaude run` (Phase 6) to start one");
     return 1;
+  }
+  if ((state.uncommitted || []).length) {
+    const c = await commitPending(project, state, { env: io.env });
+    if (!c.ok) {
+      io.out(`autoclaude: not resuming; ${c.ids.join(", ")} passed verification but still cannot be committed. git said: ${c.error.split(/\r?\n/)[0]}`);
+      return 1;
+    }
+    io.out(`autoclaude: committed ${c.ids.join(", ")} (${String(c.sha || "").slice(0, 7)}), which passed verification before the commit failed`);
+    state = loadState(project.root);
   }
   const changes = resumeRun(project, state);
   const next = loadState(project.root);

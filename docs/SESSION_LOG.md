@@ -173,3 +173,25 @@ One entry per working session: what was done, what was committed. Append only.
   found and fixed: a note delivered at session start was never marked delivered, so it would have
   been re-applied on the next step.
 - 161 tests pass. P5.1 to P5.6 ticked. CHECKPOINT 5 presented.
+
+## 2026-09-27 (Code VM) - Phase 6 built and chaos-tested
+
+- Built: the Notification hook (idle marker; pages only for prompts that wait for a person, D39),
+  the StopFailure hook (`failure.json`), `autoclaude run` (preflight, the `ac-<slug>` window),
+  `autoclaude supervise` with one pure `decide` function, `autoclaude nudge`, the Task Scheduler
+  watchdog (hidden VBScript, every 5 minutes), plan-complete and morning summaries. A background
+  agent built the watchdog against a written contract.
+- Live chaos run on a 5-step fixture plan, 68 minutes, log in `spikes/out/chaos-events.log`:
+  killed claude (relaunched in 11 s), killed dev server (restarted by the gate), killed
+  supervisor (the watchdog brought it back), Scott's RDP disconnect (nothing noticed it), forced
+  `/compact` by nudge (context re-injected), stalled hook (relaunched after twice the stall time).
+- Bugs the run exposed, all fixed with tests the same session: a nudge that killed a
+  verification; a compacted session idling until the idle rule; a nine-minute verification
+  mistaken for silence; a bug bash thrown away twice at its turn limit (now a turn budget in the
+  prompt and one `--resume` wrap-up, verified live); a failed commit (git not on the run window's
+  PATH) that did not stop the run (now a `commit-failed` pause, and `resume` commits first). Also
+  fixed earlier in the phase: first session without run rules, a false "did not pick it up",
+  the watchdog reviving an abandoned scratch run, Git Bash turning `/compact` into a path.
+- Notifications from the run: a high "paused: the bug bash cannot run" and the default
+  "plan complete" summary, both accepted by Discord. Idle markers paged nobody, as designed.
+- 204 tests pass. P6.1 to P6.6 ticked. CHECKPOINT 6 presented.

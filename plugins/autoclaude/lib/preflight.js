@@ -59,8 +59,11 @@ export async function preflight(project, { env = process.env, devServer = true, 
     project.parsed = parsed;
   }
 
-  // Git
-  if (!(await git.isRepo(root, { env }))) add("git", "fail", "not a git repository; the gate commits every verified step");
+  // Git. The CLI itself is also checked under Tools, which a run already under way still checks: a
+  // supervisor started from a shell without git on PATH ran a whole step and could not commit it.
+  const gitCli = findOnPath("git", env);
+  if (!gitCli) add("git", "fail", "`git` is not on PATH, so the repository cannot be checked");
+  else if (!(await git.isRepo(root, { env }))) add("git", "fail", "not a git repository; the gate commits every verified step");
   else {
     const st = await git.status(root, { env });
     if (!st.clean) add("git", "fail", `the working tree has ${st.entries.length} uncommitted change(s); commit or stash them first`);
@@ -68,6 +71,7 @@ export async function preflight(project, { env = process.env, devServer = true, 
   }
 
   // Tools
+  add("git-cli", gitCli ? "ok" : "fail", gitCli || "`git` is not on PATH; the gate commits every verified step");
   add("node", findOnPath("node", env) ? "ok" : "fail", findOnPath("node", env) || "`node` is not on PATH; the hooks need it");
   const claude = claudeBinary(env);
   add("claude", claude ? "ok" : "fail", claude || "Claude Code is not installed natively (Windows: irm https://claude.ai/install.ps1 | iex)");

@@ -292,17 +292,18 @@ export async function runGate(input, deps = {}) {
   if (followUps.length) appendFollowUps(root, config, step, followUps, date);
   if (securityFindings.length) appendSecurityFindings(root, config, step, securityFindings, date);
   let sha = null;
+  let commitError = null;
   if (config.git.commitEachStep) {
     const c = await git.commitAll(root, `autoclaude(${step.id}): ${step.title}`);
     sha = c.sha || null;
-    if (!c.ok) logLine(root, `commit failed: ${c.stderr}`);
+    if (!c.ok) { commitError = String(c.stderr || "").trim() || "unknown error"; logLine(root, `commit failed: ${commitError}`); }
     if (phaseEnd && config.git.tagPhaseEnds && step.phase) {
       const t = await git.tag(root, `ac-phase-${step.phase.num}`, { force: true });
       if (!t.ok) logLine(root, `tag failed: ${t.stderr}`);
     }
   }
   ev("passed", { step: step.id, attempt, sha, phaseEnd });
-  logLine(root, `${step.id} verified${sha ? ` (${sha.slice(0, 7)})` : ""}`);
+  logLine(root, `${step.id} verified${sha ? ` (${sha.slice(0, 7)})` : commitError ? " but NOT committed" : ""}`);
 
   // Owner input that reached the builder (in a gate message) belonged to this step: done with.
   // Notes not yet delivered stay pending for the next step or the next session start.
@@ -312,6 +313,19 @@ export async function runGate(input, deps = {}) {
     pendingNotes: (state.pendingNotes || []).filter((n) => !n.delivered), ownerAnswer: null
   };
   const next = nextStep(parsed);
+
+  // A step that passed but could not be committed stops the run: carrying on would pile later
+  // steps onto an unrecorded one (seen live: git was not on the run window's PATH, and the last
+  // step was reported verified and the plan complete with nothing committed). `autoclaude
+  // resume` commits the pending steps before the session restarts.
+  if (commitError) {
+    saveState(root, { ...base, uncommitted: [...(state.uncommitted || []), step.id], currentStep: next ? next.id : null, status: STATUS.paused, pauseReason: "commit-failed", stepStartedAt: null });
+    stopDevServer({ root });
+    ev("paused", { reason: "commit-failed" });
+    const why = commitError.split(/\r?\n/)[0].slice(0, 300);
+    await say({ title: `AutoClaude paused: ${step.id} passed but was not committed`, message: `git said: ${why}\nThe work is safe in the working tree. Fix git on this machine (is it on PATH where the run was started?), then \`${cli} resume\`, which commits it first.`, priority: "high" });
+    return allow(events);
+  }
   if (!next) return await complete(root, base, config, parsed, ev, events, say, deps);
 
   const pauseNow = state.pauseRequested || config.review.pauseAt === "every-step" || (phaseEnd && config.review.pauseAt === "phase-end");

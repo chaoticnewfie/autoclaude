@@ -173,6 +173,39 @@ test("last step passes: the plan completes, the run stops, the summary goes out"
   assert.match(sent.at(-1).message, /Review the commits, docs\/DECISIONS\.md and docs\/BLOCKERS\.md before merging/);
 });
 
+test("a step that passes but cannot be committed pauses the run; resume commits it and the plan then completes", async () => {
+  const root = scratch("broken", PASS);
+  writeReady(root, "S1.1");
+  const lock = path.join(root, ".git", "index.lock");
+  fs.writeFileSync(lock, "");
+  const r = await gate(root);
+  assert.equal(r.decision, "allow", JSON.stringify(r.events));
+  let s = loadState(root);
+  assert.deepEqual([s.status, s.pauseReason, s.currentStep, s.uncommitted], ["paused", "commit-failed", null, ["S1.1"]]);
+  assert.match(sent.at(-1).title, /S1\.1 passed but was not committed/);
+  assert.equal(sent.at(-1).priority, "high");
+  assert.match(sent.at(-1).message, /git said: .*index\.lock/);
+  assert.doesNotMatch(sent.at(-1).title, /plan complete/);
+  assert.match(fs.readFileSync(path.join(root, ".autoclaude", "logs", "gate.log"), "utf8"), /S1\.1 verified but NOT committed/);
+
+  const { commitPending, resumeRun } = await import("../../plugins/autoclaude/lib/resume.js");
+  const { mergeConfig } = await import("../../plugins/autoclaude/lib/config.js");
+  const project = { root, config: mergeConfig(JSON.parse(fs.readFileSync(path.join(root, "autoclaude.config.json"), "utf8"))) };
+  const stuck = await commitPending(project, s, { env });
+  assert.equal(stuck.ok, false, "git is still broken");
+  fs.unlinkSync(lock);
+  const c = await commitPending(project, loadState(root), { env });
+  assert.equal(c.ok, true, c.error);
+  assert.match(gitLog(root)[0], /^autoclaude\(S1\.1\): /);
+  s = loadState(root);
+  assert.deepEqual(s.uncommitted, []);
+  resumeRun(project, s);
+  const done = await gate(root);
+  assert.equal(done.decision, "allow");
+  assert.equal(loadState(root).status, "complete");
+  assert.match(sent.at(-1).title, /plan complete/);
+});
+
 test("pause requested: pauses for review after the verified commit, with the next step recorded", async () => {
   const root = scratch();
   saveState(root, { ...loadState(root), pauseRequested: true });

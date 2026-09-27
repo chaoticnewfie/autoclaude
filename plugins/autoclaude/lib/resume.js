@@ -8,6 +8,20 @@ import path from "node:path";
 import { readText, writeFileAtomic } from "./fsatomic.js";
 import { parsePlan, setMarker, firstUnfinished, MARKERS } from "./plan.js";
 import { updateState, STATUS } from "./state.js";
+import * as git from "./git.js";
+
+// Steps that passed verification but could not be committed (the gate paused the run as
+// "commit-failed"). Commits them in one commit; returns { ok, ids, sha, error }.
+export async function commitPending(project, state, { env } = {}) {
+  const ids = state.uncommitted || [];
+  if (!ids.length) return { ok: true, ids: [], sha: null, error: null };
+  const parsed = parsePlan(readText(path.join(project.root, project.config.plan), ""));
+  const titles = ids.map((id) => { const s = parsed.steps.find((x) => x.id === id); return s ? s.title : id; });
+  const c = await git.commitAll(project.root, `autoclaude(${ids.join(", ")}): ${titles.join("; ")}`, { env });
+  if (!c.ok) return { ok: false, ids, sha: null, error: String(c.stderr || "").trim() || "unknown error" };
+  updateState(project.root, (s) => { s.uncommitted = []; s.headAtLastGate = c.sha || s.headAtLastGate; });
+  return { ok: true, ids, sha: c.sha, error: null };
+}
 
 export function resumeRun(project, state, extra = {}) {
   const { root, config } = project;
