@@ -64,6 +64,15 @@ test("run active: injects the rules, the current step, the progress tail and pen
   assert.match(fs.readFileSync(path.join(root, ".autoclaude", "logs", "hooks.log"), "utf8"), /SessionStart startup injected/);
 });
 
+test("an owner answer to a blocked question is injected first, with its decision id", () => {
+  const root = project();
+  saveState(root, { ...defaultState(), status: "running", currentStep: "S1.2", ownerAnswer: { step: "S1.2", question: "Cookies or localStorage?", answer: "Cookies, httpOnly", at: "2026-09-27T04:00:00.000Z", decisionId: "D-008" } });
+  const ctx = JSON.parse(runHook(root).stdout).hookSpecificOutput.additionalContext;
+  assert.match(ctx, /## Owner answer: act on this first\n\nYou stopped S1\.2 with this question:\n> Cookies or localStorage\?\n\nThe owner answered \(2026-09-27T04:00:00\.000Z\):\n> Cookies, httpOnly\n\nIt is recorded in docs\/DECISIONS\.md as D-008/);
+  assert.match(ctx, /autoclaude:decider/, "the rules name the decider agent");
+  assert.match(ctx, /## D-### \(\d{4}-\d\d-\d\d, S1\.2\)/, "the decision entry format carries today's date and the step");
+});
+
 test("the hook mirrors plugin notify options into the per-machine file, even with no run", () => {
   const root = project();
   const r = runHook(root, { CLAUDE_PLUGIN_OPTION_DISCORD_WEBHOOK: "https://discord.com/api/webhooks/9/xyz", CLAUDE_PLUGIN_OPTION_NOTIFY_CHANNEL: "discord" });

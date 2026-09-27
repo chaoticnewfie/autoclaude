@@ -10,11 +10,11 @@ import { loadState, updateState, describeState, STATUS } from "./state.js";
 import { parsePlan, lintPlan, formatLint, stepById, nextStep, progress } from "./plan.js";
 import { readUsage, formatUsage } from "./usage.js";
 import { notify, readMachineNotify, writeMachineNotify, resolveChannel } from "./notify.js";
-import { readText, readJson, appendLine, ageMs, ensureDir } from "./fsatomic.js";
+import { readText, readJson, appendLine, ageMs, ensureDir, writeFileAtomic } from "./fsatomic.js";
 import { isPidAlive, findOnPath } from "./proc.js";
 import { initProject, formatInitReport } from "./init.js";
 import { writeReady, writeBlocked, readReady } from "./protocol.js";
-import { firstUnfinished, planSlug, MARKERS } from "./plan.js";
+import { firstUnfinished, planSlug, setMarker, MARKERS } from "./plan.js";
 import * as git from "./git.js";
 
 const VERSION = JSON.parse(fs.readFileSync(path.join(pluginRoot(), ".claude-plugin", "plugin.json"), "utf8")).version;
@@ -31,6 +31,7 @@ Project commands (run inside a project):
   start                 Preflight, create the run branch, set the run going on the first unfinished step
   ready [<step>]        Builder: tell the gate the current step is done (verified on the next stop)
   blocked <step> "<q>"  Builder: stop the run with a question only the owner can answer
+  answer "<text>"       Owner: answer the blocked question; recorded as a decision, the run resumes
   pause [--now]         Pause after the next verified commit (or right now with --now)
   note "<text>"         Leave a review note for Claude; it is read on the next resume or session start
   resume                Clear a pause and set the run going again (refuses if PLAN.md fails lint)
@@ -72,6 +73,7 @@ export async function runCli(argv, rawIo = {}) {
       case "start": return cmdStart(rest, io);
       case "ready": return cmdReady(rest, io);
       case "blocked": return cmdBlocked(rest, io);
+      case "answer": return cmdAnswer(rest, io);
       case "pause": return cmdPause(rest, io);
       case "note": return cmdNote(rest, io);
       case "resume": return cmdResume(rest, io);
@@ -222,10 +224,11 @@ async function cmdStart(args, io) {
   if (!co.ok) { io.out(`autoclaude: could not check out ${branch}: ${co.stderr}`); return 1; }
   const ticked = plan.parsed.steps.filter((s) => s.marker === MARKERS.done).map((s) => s.id);
   const now = io.now().toISOString();
+  const baseCommit = await git.head(root, { env: gitEnv });
   updateState(root, (s) => {
     s.status = STATUS.running; s.pauseReason = null; s.pauseRequested = false; s.currentStep = first.id;
-    s.attempts = {}; s.noProgress = 0; s.recoveries = 0; s.tickedByGate = ticked; s.startedAt = now; s.stepStartedAt = now;
-    s.headAtLastGate = null; s.toolCallsAtLastGate = 0;
+    s.attempts = {}; s.infraFailures = {}; s.noProgress = 0; s.recoveries = 0; s.tickedByGate = ticked; s.startedAt = now; s.stepStartedAt = now;
+    s.headAtLastGate = null; s.toolCallsAtLastGate = 0; s.baseCommit = baseCommit; s.ownerAnswer = null; s.lastBlockedQuestion = null;
   });
   io.out(`autoclaude: running on branch ${branch}${co.created ? " (created)" : ""}. First step: ${first.id} ${first.title}.`);
   io.out(`  the builder session works the plan; the gate verifies on every stop. Watch with \`autoclaude status\`.`);
@@ -330,9 +333,86 @@ function cmdResume(args, io) {
     io.out("autoclaude: no run has been started yet; use `autoclaude run` (Phase 6) to start one");
     return 1;
   }
-  const next = updateState(project.root, (s) => { s.status = STATUS.running; s.pauseReason = null; s.pauseRequested = false; s.recoveries = 0; });
+  const changes = resumeRun(project, state);
+  const next = loadState(project.root);
   const notes = next.pendingNotes.length;
-  io.out(`autoclaude: resumed${notes ? ` with ${notes} review note(s) waiting for Claude` : ""}. The supervisor nudges the session on its next pass.`);
+  io.out(`autoclaude: resumed on ${next.currentStep || "?"}${notes ? ` with ${notes} review note(s) waiting for Claude` : ""}. The supervisor nudges the session on its next pass.`);
+  for (const c of changes) io.out(`  ${c}`);
+  return 0;
+}
+
+// Resume re-baselines on the plan as the owner left it (D33): the owner's ticks are the new
+// record, a failed [!] or blocked [?] step goes back to [ ] with fresh attempts, and the current
+// step becomes the first unfinished one if the old one is gone or done. Returns what changed.
+function resumeRun(project, state, extra = {}) {
+  const { root, config } = project;
+  const planFile = path.join(root, config.plan);
+  let text = readText(planFile, "");
+  let parsed = parsePlan(text);
+  const changes = [];
+  for (const s of parsed.steps) {
+    if (s.marker === MARKERS.failed || s.marker === MARKERS.blocked) {
+      text = setMarker(text, s.id, MARKERS.todo);
+      changes.push(`${s.id}: [${s.marker}] reset to [ ] with fresh attempts`);
+    }
+  }
+  if (changes.length) writeFileAtomic(planFile, text);
+  parsed = parsePlan(text);
+  const ticked = parsed.steps.filter((s) => s.marker === MARKERS.done).map((s) => s.id);
+  const before = new Set(state.tickedByGate || []);
+  for (const id of ticked) if (!before.has(id)) changes.push(`${id}: ticked by the owner, accepted as done`);
+  for (const id of before) if (!ticked.includes(id)) changes.push(`${id}: unticked by the owner, will be done again`);
+  // The first unfinished step in plan order is always where the run continues: that is the old
+  // current step unless the owner ticked it, removed it, or unticked something before it.
+  const current = firstUnfinished(parsed);
+  const id = current ? current.id : null;
+  if (id !== (state.currentStep || null)) changes.push(`current step is now ${id || "none (every step is done)"}`);
+  updateState(root, (s) => {
+    s.status = STATUS.running; s.pauseReason = null; s.pauseRequested = false; s.recoveries = 0; s.noProgress = 0;
+    s.tickedByGate = ticked;
+    s.currentStep = id;
+    if (id) { s.attempts = { ...s.attempts, [id]: 0 }; s.infraFailures = { ...(s.infraFailures || {}), [id]: 0 }; }
+    Object.assign(s, extra);
+  });
+  return changes;
+}
+
+// ---------- answer ----------
+
+function nextDecisionId(text) {
+  let max = 0;
+  for (const m of String(text || "").matchAll(/\bD-(\d{3,})\b/g)) max = Math.max(max, Number(m[1]));
+  return `D-${String(max + 1).padStart(3, "0")}`;
+}
+
+function cmdAnswer(args, io) {
+  const project = requireProject(io);
+  if (!project) return 1;
+  const text = args.join(" ").trim();
+  if (!text) { io.err('autoclaude: usage: autoclaude answer "<your answer>"'); return 2; }
+  const state = loadState(project.root);
+  if (!(state.status === STATUS.paused && state.pauseReason === "blocked")) {
+    io.out(`autoclaude: nothing is waiting for an answer (the run is ${describeState(state)})`);
+    return 1;
+  }
+  const plan = loadPlan(project);
+  if (plan.problems.length) {
+    io.out(`autoclaude: not resuming, ${project.config.plan} has ${plan.problems.length} problem(s):`);
+    io.out(formatLint(plan.problems));
+    return 1;
+  }
+  const at = io.now().toISOString();
+  const step = state.currentStep || "?";
+  const question = state.lastBlockedQuestion || "(the question was not recorded)";
+  const file = path.join(project.root, project.config.docs.decisions);
+  const existing = readText(file, null);
+  if (existing === null) { ensureDir(path.dirname(file)); appendLine(file, "# DECISIONS\n"); }
+  const id = nextDecisionId(existing || "");
+  appendLine(file, `\n## ${id} (${at.slice(0, 10)}, ${step}) Owner answer to a blocked question\n\n- Question: ${question}\n- Answer: ${text}\n- Decided by: the owner, with \`autoclaude answer\`\n`);
+  const changes = resumeRun(project, state, { ownerAnswer: { step, question, answer: text, at, decisionId: id }, lastBlockedQuestion: null });
+  io.out(`autoclaude: answer recorded in ${project.config.docs.decisions} as ${id}; the run is going again on ${loadState(project.root).currentStep || "?"}.`);
+  io.out("  Claude gets the answer at its next session start and in the gate's next message.");
+  for (const c of changes) io.out(`  ${c}`);
   return 0;
 }
 

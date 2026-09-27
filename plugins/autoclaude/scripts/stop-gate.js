@@ -30,7 +30,8 @@ try {
   const root = findProjectRoot(input.cwd || process.cwd());
   if (root && loadState(root).status === "running" && !process.env.AUTOCLAUDE_ROLE) {
     const { runGate } = await import("../lib/gate.js");
-    const result = await runGate(input);
+    // notify() falls back to stdout when no channel is set; keep that out of the hook's answer.
+    const result = await runGate(input, { stdout: { write() { return true; } } });
     if (result.decision === "block") process.stdout.write(JSON.stringify({ decision: "block", reason: result.reason }));
   }
 } catch (e) {

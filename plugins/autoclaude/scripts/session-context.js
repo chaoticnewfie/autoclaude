@@ -27,11 +27,12 @@ function mirrorNotifyConfig(env) {
   if (changed) writeMachineNotify(values);
 }
 
-export function buildContext({ root, state, config, planText, progressText, promptTemplate, cli = "autoclaude" }) {
+export function buildContext({ root, state, config, planText, progressText, promptTemplate, cli = "autoclaude", now = new Date() }) {
   const parsed = parsePlan(planText || "");
   const step = (state.currentStep && stepById(parsed, state.currentStep)) || nextStep(parsed);
   const fill = (s) => s
     .replace(/\{\{AUTOCLAUDE_CMD\}\}/g, cli)
+    .replace(/\{\{DATE\}\}/g, now.toISOString().slice(0, 10))
     .replace(/\{\{PROJECT_ROOT\}\}/g, root)
     .replace(/\{\{STEP_ID\}\}/g, step ? step.id : "<step>")
     .replace(/\{\{PLAN_FILE\}\}/g, config.plan)
@@ -47,6 +48,10 @@ export function buildContext({ root, state, config, planText, progressText, prom
   }
   const progressLines = (progressText || "").split(/\r?\n/).filter((l) => l.trim()).slice(-10);
   if (progressLines.length) parts.push(`## Recent progress (last ${progressLines.length} lines of ${config.docs.progress})\n\n${progressLines.join("\n")}`);
+  if (state.ownerAnswer && state.ownerAnswer.answer) {
+    const a = state.ownerAnswer;
+    parts.push(`## Owner answer: act on this first\n\nYou stopped ${a.step || "the run"} with this question:\n> ${a.question || "(question not recorded)"}\n\nThe owner answered (${a.at}):\n> ${a.answer}\n\nIt is recorded in ${config.docs.decisions} as ${a.decisionId || "a decision"}. Carry on with the step using this answer.`);
+  }
   if (state.pendingNotes && state.pendingNotes.length) {
     parts.push(`## Owner review notes: act on these first\n\n${state.pendingNotes.map((n) => `- (${n.at}) ${n.text}`).join("\n")}\n\nRecord how you handled each one in ${config.docs.decisions} as N-###.`);
   }

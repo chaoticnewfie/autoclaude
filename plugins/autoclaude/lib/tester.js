@@ -138,7 +138,7 @@ export function evaluateVerdict(kind, v) {
 // Files a checker created in the project while it ran (seen live: screenshots saved by name
 // land in the process's working directory) are moved into its report folder, so the gate's
 // step commit can never pick them up. Needs git; a no-op outside a repository.
-async function untrackedSet(root, env) {
+export async function untrackedSet(root, env) {
   const st = await git.status(root, { env });
   return st.ok ? new Set(st.entries.filter((e) => String(e.code).includes("?")).map((e) => e.path)) : null;
 }

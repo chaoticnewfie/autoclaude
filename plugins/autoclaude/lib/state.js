@@ -26,6 +26,10 @@ export function defaultState() {
     supervisorPid: null,
     sessionId: null,
     tickedByGate: [],
+    baseCommit: null,
+    ownerAnswer: null,
+    lastBlockedQuestion: null,
+    usageStaleWarned: false,
     updatedAt: null
   };
 }

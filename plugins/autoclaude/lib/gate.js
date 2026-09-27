@@ -13,6 +13,7 @@ import { runChecks } from "./checks.js";
 import { writeReport, checkFailureSection, summarize, fence } from "./report.js";
 import { restartDevServer, stopDevServer } from "./devserver.js";
 import { runBrowserCheck } from "./tester.js";
+import { runSecurityReview, securityWanted } from "./security.js";
 import { ensureDir } from "./fsatomic.js";
 import * as git from "./git.js";
 import { notify } from "./notify.js";
@@ -30,6 +31,39 @@ export function cliCommand(env = process.env) {
 }
 
 function nowIso(deps) { return (deps.now ? deps.now() : new Date()).toISOString(); }
+
+// Non-blocking security findings, one row each in the security findings file (the template's
+// table: Date | Severity | File | Issue | Fix | Status), committed with the step.
+function appendSecurityFindings(root, config, step, findings, date) {
+  const file = path.join(root, config.docs.security);
+  if (!fs.existsSync(file)) {
+    ensureDir(path.dirname(file));
+    fs.writeFileSync(file, "# SECURITY-FINDINGS\n\nFindings from the AutoClaude security reviewer that did not fail a step. One row each, appended; close a row by changing its status.\n\n| Date | Severity | File | Issue | Fix | Status |\n|---|---|---|---|---|---|\n");
+  }
+  const cell = (s) => String(s || "").replace(/\r?\n/g, " ").replace(/\|/g, "\\|").trim();
+  for (const f of findings) {
+    const where = f.line ? `${f.file}:${f.line}` : f.file;
+    appendLine(file, `| ${date} | ${cell(f.severity)} | ${cell(where)} | ${cell(f.issue)} (found at ${step.id}) | ${cell(f.fix)} | open |`);
+  }
+}
+
+// Owner notes and an owner answer not yet passed to the builder in a gate message. The text goes
+// in front of the gate's reason (so truncation never cuts it); `mark` flags them as delivered.
+// Session-start injection still repeats everything pending until the step passes.
+export function ownerInput(state, config) {
+  const notes = (state.pendingNotes || []).filter((n) => !n.delivered);
+  const ans = state.ownerAnswer && state.ownerAnswer.answer && !state.ownerAnswer.delivered ? state.ownerAnswer : null;
+  if (!notes.length && !ans) return { text: "", mark: (s) => s };
+  const parts = [];
+  if (ans) parts.push(`OWNER ANSWER to your blocked question "${ans.question}": ${ans.answer} (recorded as ${ans.decisionId || "a decision"}). Act on it first.`);
+  if (notes.length) parts.push(`OWNER REVIEW NOTES, act on these first and record how you handled each in ${config.docs.decisions} as N-###:\n${notes.map((n) => `- ${n.text}`).join("\n")}`);
+  const mark = (s) => ({
+    ...s,
+    pendingNotes: (s.pendingNotes || []).map((n) => ({ ...n, delivered: true })),
+    ownerAnswer: s.ownerAnswer ? { ...s.ownerAnswer, delivered: true } : null
+  });
+  return { text: parts.join("\n\n") + "\n\n", mark };
+}
 
 // Medium and low bugs, and possible weakened tests, from a passing browser check: one row each
 // in the blockers file (the template's table), committed with the step.
@@ -136,10 +170,11 @@ export async function runGate(input, deps = {}) {
       await say({ title: `AutoClaude stuck on ${step.id}`, message: `The session stopped ${next.noProgress} times without tool use or new commits. Look at the project, then \`${cli} resume\`.`, priority: "high" });
       return allow(events);
     }
-    saveState(root, next);
+    const owner = ownerInput(next, config);
+    saveState(root, owner.mark(next));
     ev("nudge", { noProgress: next.noProgress });
     const wrong = ready ? `The ready marker named ${ready.step}, but the current step is ${step.id}. ` : "";
-    return block(`${wrong}Continue ${step.id} (${step.title}). When every Accept line holds, rewrite ${config.docs.continueHere} and run \`${cli} ready ${step.id}\`. If you truly cannot proceed without a human, run \`${cli} blocked ${step.id} "<question with options>"\`.\n\n${stepText(parsed, step)}`, events);
+    return block(`${owner.text}${wrong}Continue ${step.id} (${step.title}). When every Accept line holds, rewrite ${config.docs.continueHere} and run \`${cli} ready ${step.id}\`. If you truly cannot proceed without a human, run \`${cli} blocked ${step.id} "<question with options>"\`.\n\n${stepText(parsed, step)}`, events);
   }
 
   // Ready: verify.
@@ -184,30 +219,44 @@ export async function runGate(input, deps = {}) {
   } else if (!failure && !testerWanted && !bugBashWanted) {
     ev("tester-skipped");
   }
-  const kinds = !failure && devServerReady ? [testerWanted && "tester", bugBashWanted && "bugbash"].filter(Boolean) : [];
-  for (const kind of kinds) {
-    const r = await runBrowser({ kind, root, config, step, parsed, env, attempt, deadlineMs });
-    ev(kind, { status: r.status, verdictFile: r.verdictFile });
+  // The independent checkers, in order: browser tester, bug bash (both need the dev server),
+  // then the security reviewer (P5.4, needs only the diff). Same rules for all three: a failure
+  // counts as an attempt; a checker that cannot run never does, and pauses the second time.
+  const checkers = [];
+  if (!failure && devServerReady) {
+    if (testerWanted) checkers.push({ kind: "tester", label: "browser tester", run: () => runBrowser({ kind: "tester", root, config, step, parsed, env, attempt, deadlineMs }) });
+    if (bugBashWanted) checkers.push({ kind: "bugbash", label: "bug bash", run: () => runBrowser({ kind: "bugbash", root, config, step, parsed, env, attempt, deadlineMs }) });
+  }
+  const runSecurity = "runSecurity" in deps ? deps.runSecurity : runSecurityReview;
+  if (!failure && runSecurity && securityWanted(config, step, parsed)) {
+    checkers.push({ kind: "security", label: "security review", run: () => runSecurity({ root, config, step, parsed, state, env, attempt, deadlineMs }) });
+  }
+  const securityFindings = [];
+  let failureKind = failure ? "checks" : null;
+  for (const c of checkers) {
+    const r = await c.run();
+    ev(c.kind, { status: r.status, verdictFile: r.verdictFile });
     sections.push(...(r.sections || []));
     if (r.status === "infra") {
       // The checker could not run: a machine problem, never the builder's attempt (P4.2).
       const n = ((state.infraFailures || {})[step.id] || 0) + 1;
-      const report = writeReport({ root, step: step.id, attempt: `${attempt}-infra${n}`, title: `AutoClaude report: ${step.id}, ${kind} could not run`, sections });
-      logLine(root, `${step.id}: ${kind} could not run (${n}): ${r.failed} (${report.relPath})`);
-      ev("infra", { kind, count: n, report: report.relPath });
+      const report = writeReport({ root, step: step.id, attempt: `${attempt}-infra${n}`, title: `AutoClaude report: ${step.id}, ${c.label} could not run`, sections });
+      logLine(root, `${step.id}: ${c.label} could not run (${n}): ${r.failed} (${report.relPath})`);
+      ev("infra", { kind: c.kind, count: n, report: report.relPath });
       const infraFailures = { ...(state.infraFailures || {}), [step.id]: n };
       if (n >= 2) {
         saveState(root, { ...state, infraFailures, status: STATUS.paused, pauseReason: "infra" });
         stopDevServer({ root });
         ev("paused", { reason: "infra" });
-        await say({ title: `AutoClaude paused: the ${kind === "tester" ? "browser tester" : "bug bash"} cannot run`, message: `${r.failed}\nReport: ${report.relPath}\nCheck Playwright and the claude CLI on this machine, then \`${cli} resume\`.`, priority: "high" });
+        await say({ title: `AutoClaude paused: the ${c.label} cannot run`, message: `${r.failed}\nReport: ${report.relPath}\nCheck ${c.kind === "security" ? "the claude CLI" : "Playwright and the claude CLI"} on this machine, then \`${cli} resume\`.`, priority: "high" });
         return allow(events);
       }
       saveState(root, { ...state, infraFailures });
-      return block(`The ${kind === "tester" ? "browser tester" : "bug bash"} could not run: ${r.failed}. That is a problem on this machine, not with ${step.id}, and it did not count as an attempt. Run \`${cli} ready ${step.id}\` again. Report: ${report.relPath}`, events);
+      return block(`The ${c.label} could not run: ${r.failed}. That is a problem on this machine, not with ${step.id}, and it did not count as an attempt. Run \`${cli} ready ${step.id}\` again. Report: ${report.relPath}`, events);
     }
-    followUps.push(...(r.followUps || []));
-    if (r.status === "failed") { failure = r.failed; break; }
+    if (c.kind === "security") securityFindings.push(...(r.findings || []));
+    else followUps.push(...(r.followUps || []));
+    if (r.status === "failed") { failure = r.failed; failureKind = c.kind; break; }
   }
 
   if (failure) {
@@ -218,15 +267,17 @@ export async function runGate(input, deps = {}) {
     if (attempt >= config.retries.maxAttemptsPerStep) {
       planText = setMarker(planText, step.id, MARKERS.failed);
       writeFileAtomic(planFile, planText);
-      saveState(root, { ...state, attempts, status: STATUS.paused, pauseReason: "step-failed" });
+      const reason = failureKind === "security" ? "security" : "step-failed";
+      saveState(root, { ...state, attempts, status: STATUS.paused, pauseReason: reason });
       stopDevServer({ root });
-      ev("paused", { reason: "step-failed" });
+      ev("paused", { reason });
       await say({ title: `AutoClaude paused: ${step.id} failed ${attempt} times`, message: `${failure}\nReport: ${report.relPath}\nFix it or adjust the plan, then \`${cli} resume\`.`, priority: "high" });
       return allow(events);
     }
-    saveState(root, { ...state, attempts });
+    const owner = ownerInput(state, config);
+    saveState(root, owner.mark({ ...state, attempts }));
     const failingSections = sections.filter((s) => /FAILED|failed/.test(s.title));
-    return block(summarize({ headline: `${step.id} attempt ${attempt}/${config.retries.maxAttemptsPerStep} failed: ${failure}. Fix the causes, then run \`${cli} ready ${step.id}\` again.`, sections: failingSections, reportPath: report.relPath, maxChars: MAX_REASON }), events);
+    return block(owner.text + summarize({ headline: `${step.id} attempt ${attempt}/${config.retries.maxAttemptsPerStep} failed: ${failure}. Fix the causes, then run \`${cli} ready ${step.id}\` again.`, sections: failingSections, reportPath: report.relPath, maxChars: MAX_REASON - owner.text.length }), events);
   }
 
   // Pass.
@@ -238,6 +289,7 @@ export async function runGate(input, deps = {}) {
   const date = nowIso(deps).slice(0, 10);
   appendLine(path.join(root, config.docs.progress), `- ${date} ${step.id} ${step.title} (attempt ${attempt})`);
   if (followUps.length) appendFollowUps(root, config, step, followUps, date);
+  if (securityFindings.length) appendSecurityFindings(root, config, step, securityFindings, date);
   let sha = null;
   if (config.git.commitEachStep) {
     const c = await git.commitAll(root, `autoclaude(${step.id}): ${step.title}`);
@@ -251,7 +303,13 @@ export async function runGate(input, deps = {}) {
   ev("passed", { step: step.id, attempt, sha, phaseEnd });
   logLine(root, `${step.id} verified${sha ? ` (${sha.slice(0, 7)})` : ""}`);
 
-  const base = { ...state, tickedByGate: ticked, attempts: { ...state.attempts, [step.id]: 0 }, infraFailures: { ...(state.infraFailures || {}), [step.id]: 0 }, noProgress: 0, headAtLastGate: sha || state.headAtLastGate };
+  // Owner input that reached the builder (in a gate message) belonged to this step: done with.
+  // Notes not yet delivered stay pending for the next step or the next session start.
+  const base = {
+    ...state, tickedByGate: ticked, attempts: { ...state.attempts, [step.id]: 0 }, infraFailures: { ...(state.infraFailures || {}), [step.id]: 0 },
+    noProgress: 0, headAtLastGate: sha || state.headAtLastGate,
+    pendingNotes: (state.pendingNotes || []).filter((n) => !n.delivered), ownerAnswer: null
+  };
   const next = nextStep(parsed);
   if (!next) return await complete(root, base, config, parsed, ev, events, say, deps);
 
@@ -264,7 +322,18 @@ export async function runGate(input, deps = {}) {
     return allow(events);
   }
 
+  // Usage gate (P5.5). Stale or missing data never pauses a run; it is logged once until fresh
+  // data arrives again.
   const usage = readUsage({ staleAfterMin: config.usage.staleAfterMin, now: deps.now ? deps.now().getTime() : Date.now() });
+  if (usage.stale) {
+    if (!state.usageStaleWarned) {
+      logLine(root, `WARNING usage data is ${usage.source ? `${Math.round(usage.ageMin)} min old` : "missing"} (staleAfterMin ${config.usage.staleAfterMin}); the weekly-limit pause is not enforced until fresh data arrives`);
+      ev("usage-stale");
+    }
+    base.usageStaleWarned = true;
+  } else {
+    base.usageStaleWarned = false;
+  }
   if (!usage.stale && usage.sevenDay && usage.sevenDay.pct >= config.usage.weeklyPauseAtPct) {
     saveState(root, { ...base, currentStep: next.id, status: STATUS.paused, pauseReason: "weekly-limit", stepStartedAt: null });
     stopDevServer({ root });
@@ -274,9 +343,10 @@ export async function runGate(input, deps = {}) {
     return allow(events);
   }
 
-  saveState(root, { ...base, currentStep: next.id, stepStartedAt: nowIso(deps), toolCallsAtLastGate: readHeartbeat(root).count });
+  const owner = ownerInput(base, config);
+  saveState(root, owner.mark({ ...base, currentStep: next.id, stepStartedAt: nowIso(deps), toolCallsAtLastGate: readHeartbeat(root).count }));
   ev("advanced", { next: next.id });
-  return block(`${step.id} verified and committed${sha ? ` (${sha.slice(0, 7)})` : ""}. Next: ${next.id} ${next.title}. When every Accept line holds, rewrite ${config.docs.continueHere} and run \`${cli} ready ${next.id}\`.\n\n${stepText(parsed, next)}`, events);
+  return block(`${owner.text}${step.id} verified and committed${sha ? ` (${sha.slice(0, 7)})` : ""}. Next: ${next.id} ${next.title}. When every Accept line holds, rewrite ${config.docs.continueHere} and run \`${cli} ready ${next.id}\`.\n\n${stepText(parsed, next)}`, events);
 }
 
 async function complete(root, state, config, parsed, ev, events, say, deps) {

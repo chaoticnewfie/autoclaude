@@ -17,6 +17,15 @@ test("mergeConfig fills every default and lets the user override deep keys", () 
   assert.equal(validateConfig(cfg).length, 0);
 });
 
+test("guard.deny is validated: objects with a valid regex pattern and a string reason", () => {
+  assert.deepEqual(validateConfig(mergeConfig({ guard: { deny: [{ pattern: "\\bssh\\b", reason: "keys" }] } })), []);
+  const errors = validateConfig(mergeConfig({ guard: { deny: [{ pattern: "[(" }, "ssh", { pattern: 5 }, { pattern: "x", reason: 3 }] } }));
+  const paths = errors.map((e) => e.path);
+  for (const p of ["guard.deny[0].pattern", "guard.deny[1]", "guard.deny[2].pattern", "guard.deny[3].reason"]) assert.ok(paths.includes(p), `missing ${p}: ${paths.join(", ")}`);
+  assert.match(errors.find((e) => e.path === "guard.deny[0].pattern").message, /not a valid regular expression/);
+  assert.deepEqual(mergeConfig({}).guard, { deny: [] });
+});
+
 test("the defaults validate clean", () => {
   assert.deepEqual(validateConfig(mergeConfig({})), []);
 });

@@ -50,6 +50,21 @@ test("reads of protected files are allowed even with redirects elsewhere on the 
   assert.match(d("Bash", { command: "Set-Content -Path PLAN.md -Value x" }), /Shell writes to PLAN\.md/);
 });
 
+test("guard.deny: project rules block matching commands, case-insensitively, with their reason", () => {
+  const rules = { root, config: mergeConfig({ guard: { deny: [
+    { pattern: "\\bssh\\b|\\bscp\\b", reason: "this machine holds keys to other hosts" },
+    { pattern: "\\b(qm|pct|zpool|zfs)\\b", reason: "no infrastructure commands" },
+    { pattern: "[(" , reason: "a broken pattern is skipped, not fatal" }
+  ] } }) };
+  const g = (command) => decide({ tool_name: "Bash", tool_input: { command } }, rules);
+  assert.match(g("ssh root@10.0.0.2 uptime"), /does not allow that command.*keys to other hosts/);
+  assert.match(g("SCP file host:/tmp"), /keys to other hosts/);
+  assert.match(g("zpool create tank /dev/sdb"), /no infrastructure commands/);
+  assert.equal(g("npm test"), null);
+  assert.equal(g("echo sshd_config is a file name"), null, "word boundaries keep near misses out");
+  assert.equal(decide({ tool_name: "Edit", tool_input: { file_path: path.join(root, "ssh.js") } }, rules), null, "rules apply to shell commands only");
+});
+
 test("push is allowed when the config says so", () => {
   const allowPush = { root, config: mergeConfig({ git: { push: true } }) };
   assert.equal(decide({ tool_name: "Bash", tool_input: { command: "git push origin HEAD" } }, allowPush), null);

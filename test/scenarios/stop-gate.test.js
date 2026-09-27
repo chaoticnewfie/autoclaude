@@ -13,6 +13,9 @@ import { loadState, saveState, defaultState } from "../../plugins/autoclaude/lib
 import { writeReady, writeBlocked, bumpHeartbeat } from "../../plugins/autoclaude/lib/protocol.js";
 import { parsePlan, stepById } from "../../plugins/autoclaude/lib/plan.js";
 
+// Every gate scenario reads usage from its own empty Claude config dir, never the machine's.
+process.env.CLAUDE_CONFIG_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "autoclaude-gate-cfg-"));
+
 const node = JSON.stringify(process.execPath);
 const env = gitEnv({ ...process.env, PATH: `${path.dirname(process.execPath)}${path.delimiter}${process.env.PATH || ""}` });
 const PASS = [{ name: "unit", command: `${node} -e "process.exit(0)"`, timeoutSec: 60 }];
@@ -26,7 +29,8 @@ function scratch(plan = "happy", checks = PASS) {
 }
 
 const sent = [];
-const deps = { env, notify: async (msg) => { sent.push(msg); return { ok: true }; }, stdout: { write() {} } };
+// No real checker ever runs in these scenarios: tests that need one inject a fake.
+const deps = { env, notify: async (msg) => { sent.push(msg); return { ok: true }; }, stdout: { write() {} }, runTester: null, runSecurity: null };
 const gate = (root, extra = {}) => runGate({ cwd: root, session_id: "s", hook_event_name: "Stop", stop_hook_active: false }, { ...deps, root, ...extra });
 const gitLog = (root) => spawnSync("git", ["log", "--format=%s"], { cwd: root, encoding: "utf8", env }).stdout.trim().split("\n");
 const planOf = (root) => parsePlan(fs.readFileSync(path.join(root, "PLAN.md"), "utf8"));
@@ -299,6 +303,169 @@ test("a dev server that will not start fails the attempt with its log", async ()
   assert.deepEqual(calls, []);
   assert.match(r.reason, /failed: the dev server did not start: dev server did not answer/);
   assert.match(r.reason, /EADDRINUSE/);
+});
+
+// ---------- Phase 5: security reviewer ----------
+
+function fakeSecurity(results) {
+  const calls = [];
+  const runSecurity = async ({ step, state, attempt }) => {
+    calls.push(`${step.id}#${attempt}`);
+    const r = results[Math.min(calls.length - 1, results.length - 1)];
+    return r;
+  };
+  return { calls, runSecurity };
+}
+const secHigh = { status: "failed", failed: "security review: high: lib/search.js:7 SQL built from the request parameter q", sections: [{ title: "Security review: FAILED", body: "- high: lib/search.js:7 SQL built from the request parameter q\n  Fix: use a parameterised query" }], findings: [] };
+const secLow = { status: "passed", sections: [{ title: "Security review: passed", body: "- low: server.js:3 no rate limit" }], findings: [{ severity: "low", file: "server.js", line: 3, issue: "no rate limit on POST /api/todos", fix: "add a simple limiter" }] };
+
+test("security review at a phase end: a high finding fails the attempt; three failures pause as security", async () => {
+  const root = scratch("broken", PASS);
+  const { calls, runSecurity } = fakeSecurity([secHigh]);
+  for (let n = 1; n <= 2; n++) {
+    writeReady(root, "S1.1");
+    const r = await gate(root, { runSecurity });
+    assert.equal(r.decision, "block");
+    assert.match(r.reason, new RegExp(`S1\\.1 attempt ${n}/3 failed: security review: high: lib/search\\.js:7`));
+    assert.match(r.reason, /Fix: use a parameterised query/);
+  }
+  writeReady(root, "S1.1");
+  const r = await gate(root, { runSecurity });
+  assert.equal(r.decision, "allow");
+  assert.deepEqual(calls, ["S1.1#1", "S1.1#2", "S1.1#3"]);
+  const s = loadState(root);
+  assert.deepEqual([s.status, s.pauseReason], ["paused", "security"]);
+});
+
+test("security review passing with low findings files them in SECURITY-FINDINGS.md inside the step commit", async () => {
+  const root = scratch("broken", PASS);
+  const { runSecurity } = fakeSecurity([secLow]);
+  writeReady(root, "S1.1");
+  const r = await gate(root, { runSecurity });
+  assert.equal(r.decision, "allow");
+  assert.equal(loadState(root).status, "complete");
+  const text = fs.readFileSync(path.join(root, "docs", "SECURITY-FINDINGS.md"), "utf8");
+  assert.match(text, /\| \d{4}-\d\d-\d\d \| low \| server\.js:3 \| no rate limit on POST \/api\/todos \(found at S1\.1\) \| add a simple limiter \| open \|/);
+  const files = spawnSync("git", ["show", "--name-only", "--format=", "HEAD"], { cwd: root, encoding: "utf8", env }).stdout;
+  assert.match(files, /docs\/SECURITY-FINDINGS\.md/);
+});
+
+test("security runs mid-phase only for a step tagged security, and its infra failure is not an attempt", async () => {
+  const root = scratch();
+  const planFile = path.join(root, "PLAN.md");
+  fs.writeFileSync(planFile, fs.readFileSync(planFile, "utf8").replace("  - Tags: ui\n", "  - Tags: ui, security\n"));
+  spawnSync("git", ["commit", "-qam", "tag S1.1 security"], { cwd: root, env });
+  const infra = { status: "infra", failed: "Security review could not run (2 tries): timed out; timed out", sections: [{ title: "Security review: could not run", body: "x" }], findings: [] };
+  const { calls, runSecurity } = fakeSecurity([infra]);
+  writeReady(root, "S1.1");
+  let r = await gate(root, { runSecurity });
+  assert.equal(calls.length, 1, "S1.1 is now tagged security");
+  assert.match(r.reason, /The security review could not run.*did not count as an attempt/s);
+  assert.equal(loadState(root).attempts["S1.1"] || 0, 0);
+  // S1.2 is not tagged security and is not a phase end: no review.
+  saveState(root, { ...loadState(root), currentStep: "S1.2", tickedByGate: ["S1.1"] });
+  const file = path.join(root, "PLAN.md");
+  fs.writeFileSync(file, fs.readFileSync(file, "utf8").replace("- [ ] **S1.1**", "- [x] **S1.1**"));
+  writeReady(root, "S1.2");
+  r = await gate(root, { runSecurity });
+  assert.equal(calls.length, 1);
+  assert.match(r.reason, /S1\.2 verified/);
+});
+
+// ---------- Phase 5: owner input, usage gate, review pauses ----------
+
+function writeUsage(pct, { minutesAgo = 1 } = {}) {
+  const dir = path.join(process.env.CLAUDE_CONFIG_DIR, "autoclaude");
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, "usage.json"), JSON.stringify({ updatedAt: new Date(Date.now() - minutesAgo * 60000).toISOString(), rate_limits: { five_hour: { used_percentage: 20, resets_at: 1790479800 }, seven_day: { used_percentage: pct, resets_at: 1790776800 } } }));
+}
+function clearUsage() {
+  fs.rmSync(path.join(process.env.CLAUDE_CONFIG_DIR, "autoclaude", "usage.json"), { force: true });
+}
+
+test("owner notes and an owner answer reach the builder in the gate's next message, once, then clear when the step passes", async () => {
+  const root = scratch();
+  saveState(root, { ...loadState(root), pendingNotes: [{ at: "2026-09-27T04:00:00Z", text: "Keep the button grey" }], ownerAnswer: { step: "S1.1", question: "Cookies or localStorage?", answer: "Cookies", at: "t", decisionId: "D-008" } });
+  let r = await gate(root);
+  assert.match(r.reason, /^OWNER ANSWER to your blocked question "Cookies or localStorage\?": Cookies \(recorded as D-008\)/);
+  assert.match(r.reason, /OWNER REVIEW NOTES[\s\S]*- Keep the button grey/);
+  assert.match(r.reason, /Continue S1\.1/);
+  r = await gate(root);
+  assert.doesNotMatch(r.reason, /OWNER/, "delivered once");
+  writeReady(root, "S1.1");
+  r = await gate(root);
+  assert.match(r.reason, /S1\.1 verified/);
+  const s = loadState(root);
+  assert.deepEqual([s.pendingNotes, s.ownerAnswer], [[], null]);
+});
+
+test("a note left while the builder finishes a step arrives with the next step", async () => {
+  const root = scratch();
+  saveState(root, { ...loadState(root), pendingNotes: [{ at: "t", text: "Use the existing table" }] });
+  writeReady(root, "S1.1");
+  const r = await gate(root);
+  assert.match(r.reason, /^OWNER REVIEW NOTES[\s\S]*Use the existing table[\s\S]*S1\.1 verified and committed/);
+  assert.equal(loadState(root).pendingNotes.length, 1, "kept (delivered) until S1.2 passes");
+});
+
+test("weekly usage at the threshold pauses after the verified commit and names the reset", async () => {
+  const root = scratch();
+  writeUsage(86);
+  try {
+    writeReady(root, "S1.1");
+    const r = await gate(root);
+    assert.equal(r.decision, "allow");
+    const s = loadState(root);
+    assert.deepEqual([s.status, s.pauseReason, s.currentStep], ["paused", "weekly-limit", "S1.2"]);
+    assert.equal(stepById(planOf(root), "S1.1").marker, "x", "the step was committed first");
+    assert.match(sent.at(-1).message, /7-day usage is 86% \(threshold 85%\)\. Resets /);
+  } finally { clearUsage(); }
+});
+
+test("stale usage data never pauses and is logged once", async () => {
+  const root = scratch();
+  writeUsage(99, { minutesAgo: 120 });
+  try {
+    writeReady(root, "S1.1");
+    let r = await gate(root);
+    assert.equal(r.decision, "block", "stale data: no pause");
+    writeReady(root, "S1.2");
+    r = await gate(root);
+    assert.equal(r.decision, "block");
+    const warnings = fs.readFileSync(path.join(root, ".autoclaude", "logs", "gate.log"), "utf8").split("\n").filter((l) => /WARNING usage data/.test(l));
+    assert.equal(warnings.length, 1);
+  } finally { clearUsage(); }
+});
+
+const TWO_PHASES = "# Two plan\n\n## Phase 1: A\n- [ ] **S1.1** One\n  - Accept: a\n  - Tags: no-ui\n- [ ] **S1.2** Two\n  - Accept: b\n  - Tags: no-ui\n\n## Phase 2: B\n- [ ] **S2.1** Three\n  - Accept: c\n  - Tags: no-ui\n";
+
+function twoPhase(pauseAt) {
+  const root = scratch();
+  fs.writeFileSync(path.join(root, "PLAN.md"), TWO_PHASES);
+  const cfgFile = path.join(root, "autoclaude.config.json");
+  fs.writeFileSync(cfgFile, JSON.stringify({ ...JSON.parse(fs.readFileSync(cfgFile, "utf8")), review: { pauseAt } }));
+  spawnSync("git", ["commit", "-qam", "two-phase plan"], { cwd: root, env });
+  return root;
+}
+
+test("review.pauseAt: never keeps going, every-step pauses after each step, phase-end after a phase's last step", async () => {
+  let root = twoPhase("never");
+  writeReady(root, "S1.1");
+  assert.equal((await gate(root)).decision, "block");
+
+  root = twoPhase("every-step");
+  writeReady(root, "S1.1");
+  assert.equal((await gate(root)).decision, "allow");
+  assert.deepEqual([loadState(root).pauseReason, loadState(root).currentStep], ["review", "S1.2"]);
+
+  root = twoPhase("phase-end");
+  writeReady(root, "S1.1");
+  assert.equal((await gate(root)).decision, "block", "not a phase end");
+  writeReady(root, "S1.2");
+  assert.equal((await gate(root)).decision, "allow");
+  const s = loadState(root);
+  assert.deepEqual([s.status, s.pauseReason, s.currentStep], ["paused", "review", "S2.1"]);
+  assert.match(sent.at(-1).message, /Verified S1\.2 Two\. Next: S2\.1 Three/);
 });
 
 test("re-baseline (D33): a current step the owner unticked or removed is re-resolved", async () => {

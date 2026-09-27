@@ -9,7 +9,8 @@ import path from "node:path";
 import { findProjectRoot } from "../lib/paths.js";
 import { loadState, STATUS } from "../lib/state.js";
 import { loadConfig } from "../lib/config.js";
-import { appendLine } from "../lib/fsatomic.js";
+import { recordDenial } from "../lib/denials.js";
+import { notify } from "../lib/notify.js";
 
 function deny(reason) {
   process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: reason } }));
@@ -36,6 +37,13 @@ export function decide(input, { root, config }) {
   }
   if (tool === "Bash") {
     const cmd = String(ti.command || "");
+    // The project's own off-limits list first (guard.deny in autoclaude.config.json, D37).
+    const rules = (config.guard && Array.isArray(config.guard.deny)) ? config.guard.deny : [];
+    for (const rule of rules) {
+      let re;
+      try { re = new RegExp(rule.pattern, "i"); } catch { continue; }
+      if (re.test(cmd)) return `This project does not allow that command during an AutoClaude run: ${rule.reason || `it matches the guard.deny rule /${rule.pattern}/`}. Find another way that stays inside the project, or if the step truly needs it, run \`${cli} blocked <step> "<why, with the options>"\`.`;
+    }
     if (/git\s+push\b[^\n]*(--force|-f\b|--force-with-lease)/.test(cmd)) return "Force pushes are not allowed during an AutoClaude run.";
     if (/git\s+push\b/.test(cmd) && !config.git.push) return "Pushing is off for this run (git.push is false in autoclaude.config.json). The owner pushes after review.";
     if (/git\s+reset\s+--hard/.test(cmd)) return "git reset --hard is not allowed during an AutoClaude run. Use a new commit or revert instead.";
@@ -68,7 +76,7 @@ export function writesTo(cmd, target) {
   return patterns.some((p) => new RegExp(p, "m").test(cmd));
 }
 
-function main() {
+async function main() {
   if (process.env.AUTOCLAUDE_ROLE) return; // nested runs have their own narrow tool list
   let raw = "";
   try { raw = fs.readFileSync(0, "utf8"); } catch {}
@@ -82,10 +90,13 @@ function main() {
   if (cfg.errors.length) return;
   const reason = decide(input, { root, config: cfg.config });
   if (reason) {
-    try { appendLine(path.join(root, ".autoclaude", "logs", "denials.log"), `${new Date().toISOString()} ${input.tool_name} ${JSON.stringify(input.tool_input || {}).slice(0, 200)} -> ${reason.slice(0, 80)}`); } catch {}
     deny(reason);
+    const r = recordDenial(root, { kind: "guard", tool: input.tool_name, detail: JSON.stringify(input.tool_input || {}), reason });
+    if (r.notify) {
+      await notify({ title: `AutoClaude: ${r.count} denials in the last hour`, message: `The run on ${state.currentStep || "?"} keeps trying things the rules forbid (latest: ${input.tool_name}). It may be stuck. Look at .autoclaude/logs/denials.log.`, priority: "high" }, { logFile: path.join(root, ".autoclaude", "logs", "notify.log"), stdout: { write() { return true; } } });
+    }
   }
 }
 
 const isMain = process.argv[1] && path.resolve(process.argv[1]) === path.resolve(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1"));
-if (isMain) { try { main(); } catch {} }
+if (isMain) { try { await main(); } catch {} }

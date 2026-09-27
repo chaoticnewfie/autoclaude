@@ -100,8 +100,57 @@ test("pause, note and resume move the state correctly", async () => {
 
   r = await run(["resume"], root);
   assert.equal(r.code, 0, r.out);
-  assert.match(r.out, /resumed with 1 review note/);
+  assert.match(r.out, /resumed on S1\.1 with 1 review note/);
   assert.equal(loadState(root).status, "running");
+});
+
+test("answer: records the owner's answer as the next D-###, resets [?], resumes, and hands the answer to Claude", async () => {
+  const root = project({ plan: PLAN.replace("- [ ] **S1.1**", "- [?] **S1.1**") });
+  fs.mkdirSync(path.join(root, "docs"));
+  fs.writeFileSync(path.join(root, "docs", "DECISIONS.md"), "# DECISIONS\n\n## D-007 (2026-09-26, S0.1) older\n");
+  let r = await run(["answer", "use cookies"], root);
+  assert.equal(r.code, 1);
+  assert.match(r.out, /nothing is waiting for an answer/);
+
+  saveState(root, { ...defaultState(), status: "paused", pauseReason: "blocked", currentStep: "S1.1", lastBlockedQuestion: "Cookies or localStorage?", attempts: { "S1.1": 2 } });
+  r = await run(["answer", "Use", "cookies,", "httpOnly"], root, { now: () => new Date("2026-09-27T04:00:00Z") });
+  assert.equal(r.code, 0, r.out + r.err);
+  assert.match(r.out, /recorded in docs\/DECISIONS\.md as D-008/);
+  const decisions = fs.readFileSync(path.join(root, "docs", "DECISIONS.md"), "utf8");
+  assert.match(decisions, /## D-008 \(2026-09-27, S1\.1\) Owner answer to a blocked question\n\n- Question: Cookies or localStorage\?\n- Answer: Use cookies, httpOnly\n/);
+  const s = loadState(root);
+  assert.deepEqual([s.status, s.pauseReason, s.currentStep, s.attempts["S1.1"], s.lastBlockedQuestion], ["running", null, "S1.1", 0, null]);
+  assert.deepEqual({ ...s.ownerAnswer }, { step: "S1.1", question: "Cookies or localStorage?", answer: "Use cookies, httpOnly", at: "2026-09-27T04:00:00.000Z", decisionId: "D-008" });
+  assert.match(fs.readFileSync(path.join(root, "PLAN.md"), "utf8"), /- \[ \] \*\*S1\.1\*\*/);
+});
+
+test("resume re-baselines on the plan the owner left (D33): failed steps get fresh attempts, owner ticks count", async () => {
+  const root = project({ plan: PLAN.replace("- [ ] **S1.1**", "- [!] **S1.1**") });
+  saveState(root, { ...defaultState(), status: "paused", pauseReason: "step-failed", currentStep: "S1.1", attempts: { "S1.1": 3 }, tickedByGate: [] });
+  let r = await run(["resume"], root);
+  assert.equal(r.code, 0, r.out);
+  assert.match(r.out, /S1\.1: \[!\] reset to \[ \] with fresh attempts/);
+  let s = loadState(root);
+  assert.deepEqual([s.status, s.currentStep, s.attempts["S1.1"]], ["running", "S1.1", 0]);
+
+  // Owner pauses, ticks S1.1 by hand ("skip it") and resumes: accepted, the run moves to S1.2.
+  saveState(root, { ...s, status: "paused", pauseReason: "review" });
+  const planFile = path.join(root, "PLAN.md");
+  fs.writeFileSync(planFile, fs.readFileSync(planFile, "utf8").replace("- [ ] **S1.1**", "- [x] **S1.1**"));
+  r = await run(["resume"], root);
+  assert.match(r.out, /S1\.1: ticked by the owner, accepted as done/);
+  assert.match(r.out, /current step is now S1\.2/);
+  s = loadState(root);
+  assert.deepEqual([s.currentStep, s.tickedByGate], ["S1.2", ["S1.1"]]);
+
+  // Owner unticks S1.1 again to have it redone.
+  saveState(root, { ...s, status: "paused", pauseReason: "review" });
+  fs.writeFileSync(planFile, fs.readFileSync(planFile, "utf8").replace("- [x] **S1.1**", "- [ ] **S1.1**"));
+  r = await run(["resume"], root);
+  assert.match(r.out, /S1\.1: unticked by the owner, will be done again/);
+  assert.match(r.out, /current step is now S1\.1/);
+  s = loadState(root);
+  assert.deepEqual([s.currentStep, s.tickedByGate], ["S1.1", []], "the run goes back to the first unfinished step");
 });
 
 test("resume refuses when the plan fails lint", async () => {

@@ -19,6 +19,9 @@ export const DEFAULTS = Object.freeze({
   gate: { timeoutSec: 1800 },
   notify: { morningSummaryAt: null },
   review: { pauseAt: "never" },
+  // Extra Bash commands a run may never execute in this project, on top of the built-in list
+  // (D37). Each rule: { "pattern": "<regular expression, case-insensitive>", "reason": "..." }.
+  guard: { deny: [] },
   docs: {
     progress: "PROGRESS.md",
     continueHere: "CONTINUE_HERE.md",
@@ -131,6 +134,16 @@ export function validateConfig(cfg) {
     if (typeof cfg.notify.morningSummaryAt !== "string" || !/^([01]\d|2[0-3]):[0-5]\d$/.test(cfg.notify.morningSummaryAt)) err("notify.morningSummaryAt", "expected null or a time like 07:30");
   }
   if (expect("review", cfg.review, "object")) oneOf("review.pauseAt", cfg.review.pauseAt, PAUSE_AT);
+  if (expect("guard", cfg.guard, "object") && expect("guard.deny", cfg.guard.deny, "array")) {
+    cfg.guard.deny.forEach((rule, i) => {
+      const p = `guard.deny[${i}]`;
+      if (!expect(p, rule, "object")) return;
+      if (expect(`${p}.pattern`, rule.pattern, "string")) {
+        try { new RegExp(rule.pattern, "i"); } catch (e) { err(`${p}.pattern`, `not a valid regular expression: ${e.message}`); }
+      }
+      if (rule.reason !== undefined) expect(`${p}.reason`, rule.reason, "string");
+    });
+  }
   if (expect("docs", cfg.docs, "object")) {
     for (const k of Object.keys(DEFAULTS.docs)) {
       if (expect(`docs.${k}`, cfg.docs[k], "string") && path.isAbsolute(cfg.docs[k])) err(`docs.${k}`, "must be a path relative to the project root");
