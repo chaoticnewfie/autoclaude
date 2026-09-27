@@ -1,12 +1,12 @@
-# Todo fixture plan (UI bug)
+# Todo fixture plan (UI check)
 
 ## Goal
 
-One UI step whose unit tests can pass while the page is still wrong, so only the browser tester can catch it. The fixture ships with the bug: the "Add" form's input has `id="txt"` in the page while the script reads `#text`, so adding a todo does nothing in the browser even though the store and the API work.
+The todo page's Add form must create a todo that shows up in the list straight away. The store and the API already work and their unit tests pass; this step is about the page itself.
 
 ## Constraints & decisions
 
-- Stack: Node 24 built-ins only, no dependencies.
+- Stack: Node 24 built-ins only, no dependencies. `server.js` serves `public/index.html` and a JSON API.
 - When something is unclear: prefer the smallest change that makes the Accept lines true.
 
 ## Phase 1: Adding works

@@ -4,7 +4,7 @@ import { readJson, writeJsonAtomic, ensureDir } from "./fsatomic.js";
 import { projectPaths } from "./paths.js";
 
 export const STATUS = Object.freeze({ idle: "idle", running: "running", paused: "paused", complete: "complete" });
-export const PAUSE_REASONS = Object.freeze(["step-failed", "blocked", "weekly-limit", "stuck", "security", "review", "manual"]);
+export const PAUSE_REASONS = Object.freeze(["step-failed", "blocked", "weekly-limit", "stuck", "security", "review", "manual", "infra"]);
 
 export function defaultState() {
   return {
@@ -15,6 +15,7 @@ export function defaultState() {
     pendingNotes: [],
     currentStep: null,
     attempts: {},
+    infraFailures: {},
     noProgress: 0,
     recoveries: 0,
     toolCallsAtLastGate: 0,

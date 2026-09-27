@@ -6,6 +6,7 @@ import { loadState, STATUS } from "../lib/state.js";
 import { bumpHeartbeat } from "../lib/protocol.js";
 
 try {
+  if (process.env.AUTOCLAUDE_ROLE) throw 0; // nested tester or reviewer: not builder progress
   let raw = "";
   try { raw = fs.readFileSync(0, "utf8"); } catch {}
   let input = {};

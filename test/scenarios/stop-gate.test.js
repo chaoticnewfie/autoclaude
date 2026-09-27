@@ -195,6 +195,111 @@ test("review.pauseAt phase-end pauses after the last step of a phase and tags it
   assert.equal(tags, "ac-phase-1");
 });
 
+// ---------- Phase 4: the browser tester and the bug bash, with an injected fake checker ----------
+
+function scratchUi(plan = "happy") {
+  const root = scratch(plan);
+  const cfgFile = path.join(root, "autoclaude.config.json");
+  const cfg = JSON.parse(fs.readFileSync(cfgFile, "utf8"));
+  cfg.devServer = { command: "npm run dev", url: "http://127.0.0.1:4173", healthPath: "/health", startTimeoutSec: 10 };
+  fs.writeFileSync(cfgFile, JSON.stringify(cfg));
+  spawnSync("git", ["commit", "-qam", "fixture: dev server config"], { cwd: root, env });
+  return root;
+}
+
+function fakeBrowser(byKind) {
+  const calls = [];
+  const runTester = async ({ kind, step }) => {
+    calls.push(`${kind}:${step.id}`);
+    const r = typeof byKind[kind] === "function" ? byKind[kind](calls.length) : byKind[kind];
+    return r || { status: "passed", sections: [{ title: `${kind}: passed`, body: "ok" }], followUps: [] };
+  };
+  return { calls, deps: { runTester, restartDevServer: async () => ({ ok: true, reused: false }) } };
+}
+
+const testerFail = { status: "failed", failed: "browser tester: criterion failed: the page shows a button labelled \"Clear completed\"", sections: [{ title: "Browser tester: FAILED", body: "- [FAIL] the page shows a button labelled \"Clear completed\"\n  Evidence: no such button in the list footer" }], followUps: [] };
+
+test("tester failure counts as an attempt and its evidence reaches the builder", async () => {
+  const root = scratchUi();
+  const { calls, deps: b } = fakeBrowser({ tester: testerFail });
+  writeReady(root, "S1.1");
+  const r = await gate(root, b);
+  assert.equal(r.decision, "block");
+  assert.deepEqual(calls, ["tester:S1.1"]);
+  assert.match(r.reason, /S1\.1 attempt 1\/3 failed: browser tester: criterion failed/);
+  assert.match(r.reason, /Evidence: no such button in the list footer/);
+  assert.equal(loadState(root).attempts["S1.1"], 1);
+  assert.equal(stepById(planOf(root), "S1.1").marker, " ");
+});
+
+test("tester pass with minor bugs: verified, and the follow-ups land in BLOCKERS.md inside the step commit", async () => {
+  const root = scratchUi();
+  const { deps: b } = fakeBrowser({ tester: { status: "passed", sections: [{ title: "Browser tester: passed", body: "all good" }], followUps: [{ severity: "medium", title: "button hard to see", actual: "grey on grey", repro: "open /", expected: "contrast", foundBy: "tester" }] } });
+  writeReady(root, "S1.1");
+  const r = await gate(root, b);
+  assert.match(r.reason, /S1\.1 verified and committed/);
+  const blockers = fs.readFileSync(path.join(root, "docs", "BLOCKERS.md"), "utf8");
+  assert.match(blockers, /\| \d{4}-\d\d-\d\d \| browser tester \| S1\.1 \| medium: button hard to see\. Actual: grey on grey\. Expected: contrast\. Repro: open \/ \| Claude \| open \|/);
+  const files = spawnSync("git", ["show", "--name-only", "--format=", "HEAD"], { cwd: root, encoding: "utf8", env }).stdout;
+  assert.match(files, /docs\/BLOCKERS\.md/);
+});
+
+test("tester infrastructure failure: not an attempt the first time, a pause the second time", async () => {
+  const root = scratchUi();
+  const infra = { status: "infra", failed: "Browser tester could not run (2 tries): timed out; timed out", sections: [{ title: "Browser tester: could not run", body: "x" }], followUps: [] };
+  const { deps: b } = fakeBrowser({ tester: infra });
+  writeReady(root, "S1.1");
+  let r = await gate(root, b);
+  assert.equal(r.decision, "block");
+  assert.match(r.reason, /did not count as an attempt/);
+  let s = loadState(root);
+  assert.equal(s.attempts["S1.1"] || 0, 0);
+  assert.equal(s.infraFailures["S1.1"], 1);
+  assert.ok(fs.existsSync(path.join(root, ".autoclaude", "reports", "S1.1-1-infra1.md")));
+  writeReady(root, "S1.1");
+  r = await gate(root, b);
+  assert.equal(r.decision, "allow");
+  s = loadState(root);
+  assert.deepEqual([s.status, s.pauseReason], ["paused", "infra"]);
+  assert.equal(sent.at(-1).priority, "high");
+  assert.match(sent.at(-1).title, /browser tester cannot run/);
+});
+
+test("a no-ui step, in a phase with no UI step, runs no browser check at all", async () => {
+  const root = scratchUi("broken");
+  const { calls, deps: b } = fakeBrowser({});
+  writeReady(root, "S1.1");
+  const r = await gate(root, b);
+  assert.equal(r.decision, "allow");
+  assert.deepEqual(calls, []);
+  assert.equal(loadState(root).status, "complete");
+});
+
+test("the last step of a phase gets the tester and then the bug bash; a high bug fails the step", async () => {
+  const root = scratchUi();
+  saveState(root, { ...loadState(root), currentStep: "S1.3", tickedByGate: ["S1.1", "S1.2"] });
+  const file = path.join(root, "PLAN.md");
+  fs.writeFileSync(file, fs.readFileSync(file, "utf8").replace("- [ ] **S1.1**", "- [x] **S1.1**").replace("- [ ] **S1.2**", "- [x] **S1.2**"));
+  const bugbashFail = { status: "failed", failed: "bug bash: high bug: editing to an empty text deletes the todo", sections: [{ title: "Bug bash: FAILED", body: "- high: editing to an empty text deletes the todo" }], followUps: [] };
+  const { calls, deps: b } = fakeBrowser({ bugbash: bugbashFail });
+  writeReady(root, "S1.3");
+  const r = await gate(root, b);
+  assert.deepEqual(calls, ["tester:S1.3", "bugbash:S1.3"]);
+  assert.equal(r.decision, "block");
+  assert.match(r.reason, /S1\.3 attempt 1\/3 failed: bug bash: high bug: editing to an empty text deletes the todo/);
+});
+
+test("a dev server that will not start fails the attempt with its log", async () => {
+  const root = scratchUi();
+  const { calls, deps: b } = fakeBrowser({});
+  writeReady(root, "S1.1");
+  const r = await gate(root, { ...b, restartDevServer: async () => ({ ok: false, error: "dev server did not answer at http://127.0.0.1:4173/health within 10 s", logTail: ["Error: listen EADDRINUSE"] }) });
+  assert.equal(r.decision, "block");
+  assert.deepEqual(calls, []);
+  assert.match(r.reason, /failed: the dev server did not start: dev server did not answer/);
+  assert.match(r.reason, /EADDRINUSE/);
+});
+
 test("re-baseline (D33): a current step the owner unticked or removed is re-resolved", async () => {
   const root = scratch();
   saveState(root, { ...loadState(root), currentStep: "S9.9" });

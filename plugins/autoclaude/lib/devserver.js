@@ -137,6 +137,30 @@ async function startDevServer({ root, env, command, url, check, startTimeoutSec,
   return { ok: false, error, pid, logTail: tail(logFile) };
 }
 
+// Waits until nothing answers at url (after a kill the port can take a moment to free up).
+async function waitUntilDown(url, timeoutMs = 10000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (!(await isHealthy(url, { timeoutMs: 1000 }))) return true;
+    await sleep(POLL_MS);
+  }
+  return false;
+}
+
+// Before every verification (PLAN.md P4.3): a server the gate started is stopped and started
+// again, so the checks and the browser tester see the code as it is now; a plain `node server.js`
+// does not reload on its own. A server someone else started is reused (reported as reused).
+// Same result shape as ensureDevServer, plus `restarted`.
+export async function restartDevServer(devServer, opts) {
+  const { root } = opts;
+  const stopped = stopDevServer({ root });
+  if (stopped.stopped && devServer && devServer.url) {
+    await waitUntilDown(healthUrl(devServer.url, devServer.healthPath));
+  }
+  const r = await ensureDevServer(devServer, opts);
+  return { ...r, restarted: stopped.stopped };
+}
+
 // Ends the server we started, if any, and forgets it. A server we merely reused is left alone.
 export function stopDevServer({ root }) {
   const info = devServerInfo({ root });

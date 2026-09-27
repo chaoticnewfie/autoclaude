@@ -59,6 +59,8 @@ async function main() {
   let input = {};
   try { input = JSON.parse(raw); } catch {}
 
+  // A nested tester or reviewer run must never receive the builder's rules.
+  if (process.env.AUTOCLAUDE_ROLE) return;
   try { mirrorNotifyConfig(process.env); } catch {}
 
   const root = findProjectRoot(input.cwd || process.cwd());

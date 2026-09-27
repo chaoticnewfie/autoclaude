@@ -10,8 +10,10 @@ import { parsePlan, lintPlan, stepById, nextStep, firstUnfinished, isPhaseEnd, s
 import { readText, writeFileAtomic, appendLine } from "./fsatomic.js";
 import { readReady, clearReady, readBlocked, clearBlocked, readHeartbeat } from "./protocol.js";
 import { runChecks } from "./checks.js";
-import { writeReport, checkFailureSection, summarize } from "./report.js";
-import { ensureDevServer, stopDevServer } from "./devserver.js";
+import { writeReport, checkFailureSection, summarize, fence } from "./report.js";
+import { restartDevServer, stopDevServer } from "./devserver.js";
+import { runBrowserCheck } from "./tester.js";
+import { ensureDir } from "./fsatomic.js";
 import * as git from "./git.js";
 import { notify } from "./notify.js";
 import { readUsage } from "./usage.js";
@@ -28,6 +30,21 @@ export function cliCommand(env = process.env) {
 }
 
 function nowIso(deps) { return (deps.now ? deps.now() : new Date()).toISOString(); }
+
+// Medium and low bugs, and possible weakened tests, from a passing browser check: one row each
+// in the blockers file (the template's table), committed with the step.
+function appendFollowUps(root, config, step, items, date) {
+  const file = path.join(root, config.docs.blockers);
+  if (!fs.existsSync(file)) {
+    ensureDir(path.dirname(file));
+    fs.writeFileSync(file, "# BLOCKERS\n\nFollow-ups the AutoClaude gate found that did not fail a step. One row each, appended; close a row by changing its status.\n\n| Date | Found by | Step | What | Owner | Status |\n|---|---|---|---|---|---|\n");
+  }
+  const cell = (s) => String(s || "").replace(/\r?\n/g, " ").replace(/\|/g, "\\|").trim();
+  for (const b of items) {
+    const what = [`${b.severity}: ${b.title}`, b.actual && `Actual: ${b.actual}`, b.expected && `Expected: ${b.expected}`, b.repro && `Repro: ${b.repro}`].filter(Boolean).join(". ");
+    appendLine(file, `| ${date} | ${b.foundBy === "bugbash" ? "bug bash" : "browser tester"} | ${step.id} | ${cell(what)} | Claude | open |`);
+  }
+}
 
 function logLine(root, text) {
   try { appendLine(path.join(root, ".autoclaude", "logs", "gate.log"), `${new Date().toISOString()} ${text}`); } catch {}
@@ -132,14 +149,23 @@ export async function runGate(input, deps = {}) {
   const sections = [];
   let failure = null;
 
-  const needsServer = config.checks.some((c) => c.needsDevServer);
+  // Which browser checks this verification needs (Phase 4). The tester skips `no-ui` steps; the
+  // bug bash runs at a phase's last step when the phase has any UI step at all.
+  const deadlineMs = Date.now() + Math.max(120, config.gate.timeoutSec - 60) * 1000;
+  const runBrowser = "runTester" in deps ? deps.runTester : runBrowserCheck;
+  const restart = deps.restartDevServer || restartDevServer;
+  const testerWanted = !!(runBrowser && config.tester.enabled && !step.tags.includes("no-ui"));
+  const bugBashWanted = !!(runBrowser && config.bugBash.atPhaseEnd && step.phase && isPhaseEnd(parsed, step.id) && step.phase.steps.some((s) => !s.tags.includes("no-ui")));
+  const needsServer = config.checks.some((c) => c.needsDevServer) || testerWanted || bugBashWanted;
   let devServerReady = false;
-  if (needsServer && config.devServer.command) {
-    const ds = await ensureDevServer(config.devServer, { root, env });
-    if (ds.ok) devServerReady = true;
-    else {
-      failure = `dev server: ${ds.error}`;
-      sections.push({ title: "Dev server failed to start", body: `${ds.error}\n\n\`\`\`\n${ds.logTail || ""}\n\`\`\`` });
+  if (needsServer && config.devServer.command && config.devServer.url) {
+    const ds = await restart(config.devServer, { root, env });
+    if (ds.ok) {
+      devServerReady = true;
+      if (ds.reused) sections.push({ title: "Dev server reused", body: `Something the gate did not start already answers at ${config.devServer.url}. It was used as it is and may be running older code.` });
+    } else {
+      failure = `the dev server did not start: ${ds.error}`;
+      sections.push({ title: "Dev server FAILED to start", body: `${ds.error}\n\n${fence((ds.logTail || []).join("\n") || "(no log output)")}` });
     }
   }
 
@@ -150,12 +176,37 @@ export async function runGate(input, deps = {}) {
     if (!checkResults.ok) failure = `check "${checkResults.failed.name}" failed`;
   }
 
-  if (!failure && deps.tester) {
-    const t = await deps.tester({ root, config, step, parsed, env });
-    if (t && t.sections) sections.push(...t.sections);
-    if (t && t.failed) failure = t.failed;
-  } else if (!failure) {
+  const followUps = [];
+  if (!failure && (testerWanted || bugBashWanted) && !devServerReady) {
+    ev("browser-skipped", { reason: "no dev server" });
+    sections.push({ title: "Browser checks skipped", body: "No devServer command and url are set in autoclaude.config.json, so the browser tester and the bug bash could not open the app. Set devServer to have UI steps checked in a browser." });
+  } else if (!failure && !testerWanted && !bugBashWanted) {
     ev("tester-skipped");
+  }
+  const kinds = !failure && devServerReady ? [testerWanted && "tester", bugBashWanted && "bugbash"].filter(Boolean) : [];
+  for (const kind of kinds) {
+    const r = await runBrowser({ kind, root, config, step, parsed, env, attempt, deadlineMs });
+    ev(kind, { status: r.status, verdictFile: r.verdictFile });
+    sections.push(...(r.sections || []));
+    if (r.status === "infra") {
+      // The checker could not run: a machine problem, never the builder's attempt (P4.2).
+      const n = ((state.infraFailures || {})[step.id] || 0) + 1;
+      const report = writeReport({ root, step: step.id, attempt: `${attempt}-infra${n}`, title: `AutoClaude report: ${step.id}, ${kind} could not run`, sections });
+      logLine(root, `${step.id}: ${kind} could not run (${n}): ${r.failed} (${report.relPath})`);
+      ev("infra", { kind, count: n, report: report.relPath });
+      const infraFailures = { ...(state.infraFailures || {}), [step.id]: n };
+      if (n >= 2) {
+        saveState(root, { ...state, infraFailures, status: STATUS.paused, pauseReason: "infra" });
+        stopDevServer({ root });
+        ev("paused", { reason: "infra" });
+        await say({ title: `AutoClaude paused: the ${kind === "tester" ? "browser tester" : "bug bash"} cannot run`, message: `${r.failed}\nReport: ${report.relPath}\nCheck Playwright and the claude CLI on this machine, then \`${cli} resume\`.`, priority: "high" });
+        return allow(events);
+      }
+      saveState(root, { ...state, infraFailures });
+      return block(`The ${kind === "tester" ? "browser tester" : "bug bash"} could not run: ${r.failed}. That is a problem on this machine, not with ${step.id}, and it did not count as an attempt. Run \`${cli} ready ${step.id}\` again. Report: ${report.relPath}`, events);
+    }
+    followUps.push(...(r.followUps || []));
+    if (r.status === "failed") { failure = r.failed; break; }
   }
 
   if (failure) {
@@ -185,6 +236,7 @@ export async function runGate(input, deps = {}) {
   const phaseEnd = isPhaseEnd(parsed, step.id);
   const date = nowIso(deps).slice(0, 10);
   appendLine(path.join(root, config.docs.progress), `- ${date} ${step.id} ${step.title} (attempt ${attempt})`);
+  if (followUps.length) appendFollowUps(root, config, step, followUps, date);
   let sha = null;
   if (config.git.commitEachStep) {
     const c = await git.commitAll(root, `autoclaude(${step.id}): ${step.title}`);
@@ -198,7 +250,7 @@ export async function runGate(input, deps = {}) {
   ev("passed", { step: step.id, attempt, sha, phaseEnd });
   logLine(root, `${step.id} verified${sha ? ` (${sha.slice(0, 7)})` : ""}`);
 
-  const base = { ...state, tickedByGate: ticked, attempts: { ...state.attempts, [step.id]: 0 }, noProgress: 0, headAtLastGate: sha || state.headAtLastGate };
+  const base = { ...state, tickedByGate: ticked, attempts: { ...state.attempts, [step.id]: 0 }, infraFailures: { ...(state.infraFailures || {}), [step.id]: 0 }, noProgress: 0, headAtLastGate: sha || state.headAtLastGate };
   const next = nextStep(parsed);
   if (!next) return await complete(root, base, config, parsed, ev, events, say, deps);
 

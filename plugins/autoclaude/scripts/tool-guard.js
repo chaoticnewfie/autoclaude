@@ -69,6 +69,7 @@ export function writesTo(cmd, target) {
 }
 
 function main() {
+  if (process.env.AUTOCLAUDE_ROLE) return; // nested runs have their own narrow tool list
   let raw = "";
   try { raw = fs.readFileSync(0, "utf8"); } catch {}
   let input = {};

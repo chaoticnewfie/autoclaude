@@ -60,7 +60,8 @@ test("rename over a file locked by another process is retried until the lock dro
   const script = "$f=[System.IO.File]::Open('" + file.replace(/\\/g, "\\\\") + "','Open','Read','None'); Start-Sleep -Milliseconds 2500; $f.Close()";
   const locker = spawn("powershell.exe", ["-NoProfile", "-Command", script], { stdio: "ignore" });
   // Wait until the lock is really held (PowerShell startup time varies): opening for write fails then.
-  const deadline = Date.now() + 8000;
+  // PowerShell can take well over 8 s to start while the full suite runs in parallel.
+  const deadline = Date.now() + 30000;
   let locked = false;
   while (Date.now() < deadline) {
     try {
