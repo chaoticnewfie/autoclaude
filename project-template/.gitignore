@@ -1,0 +1,19 @@
+# AutoClaude runtime state. Never committed.
+.autoclaude/
+
+# Dependencies and build output
+node_modules/
+dist/
+
+# Environment files: only the example is tracked
+.env
+.env.*
+!.env.example
+
+# Logs
+*.log
+
+# OS junk
+.DS_Store
+Thumbs.db
+desktop.ini
