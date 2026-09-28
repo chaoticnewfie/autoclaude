@@ -220,3 +220,34 @@ CHECKPOINT 7 together with the speed options (entry 18).
 **Trigger.** CHECKPOINT 7.
 **No rework.** The guard, the deny list and the decider already exist; this changes their
 defaults and the planning questions.
+
+## 20. Docker images in the run's footprint
+
+**What.** Record the Docker images present at run start, and at completion report (or remove)
+images the run pulled or built that nothing uses.
+**Why it waits.** The footprint (P8.5) covers containers, volumes and networks, which is what the
+rehearsal leaked (33 volumes). Images are large but shared and cached on purpose; removing one a
+later project needs costs a slow pull, and telling "pulled by this run" from "pulled by the owner
+meanwhile" needs more than a before/after list.
+**Trigger.** A HANDOFF.md or a full disk that shows images piling up after runs.
+**Path.** Add an `images` kind to `lib/footprint.js` (`docker image ls --format`), report new
+dangling or unused images in HANDOFF.md, and remove only with a `footprint.images: true` switch.
+**No rework.** The footprint already records kinds separately and never compares a kind it did
+not list at start.
+
+## 21. Tool guard blind spots
+
+**What.** Close the gaps the Phase 8 guard rewrite left, each only if a run hits it: a
+`guard.deny` pattern that spans two commands of a pipe (rules now match one command at a time);
+PowerShell `-EncodedCommand` (not decoded); make targets and scripts run from inside other
+programs (invisible, as before); secrets written outside `secrets/`, such as a root `.env`
+(not tracked by the footprint).
+**Why it waits.** The guard is best-effort by design (docs/USAGE.md section 12); the account the
+run uses is the real boundary, and planning now pre-approves exactly what the plan allows. None
+of these was seen in the rehearsal, while the rehearsal's 13 false positives were real.
+**Trigger.** A denial log or review that shows one of them happening.
+**Path.** Per gap: a pipe-aware rule mode (`"scope": "line"`); decode base64 UTF-16LE after
+`-EncodedCommand` or `-enc`; resolve `make <target>` like `npm run`; add `.env*` to the
+footprint's secret scan.
+**No rework.** `ruleTexts` in the guard already builds the list of texts a rule is tested
+against, and the footprint already scans one folder for secrets.

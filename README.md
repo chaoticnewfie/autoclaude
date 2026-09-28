@@ -5,29 +5,38 @@ setting up and using every part of AutoClaude.
 
 AutoClaude lets Claude Code build a project from its plan while you are away. You write the plan
 with Claude first: phases, small steps, and for every step the "Accept" lines that say how to tell
-it is done. Then you start a run and leave it. Claude builds one step at a time, and a separate
-check verifies each step before it is committed: the project's own tests, then a real headless
-browser for anything with a web page, plus a bug bash and a security review at the end of each
-phase. You get a message on your phone when something needs you.
+it is done. Then you start a run and leave it. Claude builds the whole project the plan
+describes, one feature (phase) at a time, including the infrastructure you allowed while
+planning. When a feature is built, a separate check verifies all of it before the run moves on:
+the project's own tests, a real headless browser for anything with a web page, a bug bash and a
+security review. Each verified feature is committed and pushed, and you get a message on your
+phone when a feature is done or something needs you.
 
 It is a Claude Code plugin plus a small command-line tool, `autoclaude`. It runs on Windows 11 and
 Windows Server without WSL. Linux and macOS use the same code but have not been tested live yet.
 
 ## How a run works
 
-1. `/autoclaude:plan` interviews you and writes the plan. Every decision with more than one
-   reasonable answer is made now, because nobody answers questions during the run.
+1. `/autoclaude:plan` interviews you in rounds of questions and writes the plan: what to build,
+   what the run may touch (servers, containers, repositories) and what is off limits. Every
+   decision with more than one reasonable answer is made now, because nobody answers questions
+   during the run.
 2. `autoclaude run` opens a window named `ac-<project>`. A supervisor there starts one Claude Code
    session, the builder, on the first unfinished step.
-3. When the builder says a step is done, a gate checks it: your test and lint commands, then a
-   browser tester that works through the step's Accept lines. It commits a pass and ticks the box
-   in the plan. It sends a failure back to the builder with a report, up to 3 attempts.
-4. Questions the builder cannot settle from the plan go to a "decider" helper. Routine answers are
-   logged in `docs/DECISIONS.md`. A critical question pauses the run and messages you.
+3. Each finished step is committed as built. When the last step of a feature is done, a gate
+   verifies the whole feature: your test and lint commands, a browser tester that works through
+   every Accept line, a bug bash and a security review. A pass is committed, tagged and pushed,
+   and the next feature starts in a fresh session. A failure goes back to the builder with a
+   report naming what failed, up to 3 attempts.
+4. Questions the builder cannot settle from the plan go to a "decider" helper. Its answers are
+   logged in `docs/DECISIONS.md` and the run keeps going. Only a question that truly needs you
+   pauses the run and messages you.
 5. The supervisor restarts a crashed, stalled or idle session, waits out usage limits, and pauses
    before your weekly limit runs out. An optional scheduled watchdog brings the supervisor back if
    its window dies.
-6. At the end you review the run branch (one commit per step) and merge it yourself.
+6. At the end the run writes `HANDOFF.md`: what was done, what is left for you (with the
+   commands), the decisions it made, and what it left on the machine. You review the branch and
+   merge it yourself.
 
 Answering a question or resuming a paused run needs a terminal on the machine, in person or over
 remote desktop. The run waits until you get there.
@@ -77,11 +86,11 @@ reviews the project, interviews you, writes and checks the plan, sets up the tes
 the dev server, and commits it all. It ends with a list of things for you to do before the run.
 
 Then exit Claude Code, do everything on that list, and open a new terminal in the project, so it
-sees the new `autoclaude` command. Set up alerts once per machine; use your own webhook address:
+sees the new `autoclaude` command. Open the settings page to set up alerts (your own Discord
+webhook or ntfy topic), send a test alert, and look over the other settings:
 
 ```
-autoclaude notify-setup --discord "https://discord.com/api/webhooks/..."
-autoclaude notify-test
+autoclaude config
 ```
 
 Before you leave it running for hours, turn off sleep and plan to disconnect instead of signing
@@ -100,7 +109,7 @@ autoclaude run
 ```
 
 Watch with `autoclaude status` or in the `ac-<project>` window. `autoclaude pause` stops it after
-the next verified step; `autoclaude pause --now` stops it at once. Everything else is in
+the next committed step; `autoclaude pause --now` stops it at once. Everything else is in
 [docs/USAGE.md](docs/USAGE.md).
 
 ## For Claude: adding AutoClaude to a project
@@ -123,7 +132,7 @@ leaves the project's working tree dirty), read it, and delete the clone afterwar
 |---|---|
 | `plugins/autoclaude/` | The plugin: hooks, skills, the CLI (`bin/autoclaude.js`), prompts, templates, and the project template `init` copies |
 | `.claude-plugin/marketplace.json` | The marketplace entry that `claude plugin marketplace add` reads |
-| `docs/USAGE.md` | The full guide: install, plan, run, pause, alerts, recovery, uninstall, troubleshooting |
+| `docs/USAGE.md` | The full guide: install, plan, run, pause, alerts, settings, recovery, uninstall, troubleshooting |
 | `PLAN.md`, `docs/DECISIONS.md`, `docs/SESSION_LOG.md` | How AutoClaude itself was built, and why it works the way it does |
 | `test/` | `node scripts/check.js` runs every test |
 

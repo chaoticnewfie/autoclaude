@@ -660,3 +660,77 @@ Scott's answers, over eight rounds of questions after the DB rehearsal (P7.3) an
 **Why.** The rehearsal worked (28 of 28 steps, no false alarms) but was slow and narrow: builder
 time was two thirds test runs, planning never asked the scope, and nothing reached the VM Scott
 wanted built. Each item above is his answer to a question with alternatives shown.
+
+### D50 How Phase 8 was built: the smaller choices (2026-09-28)
+
+**Decision.** Choices made while building D47 to D49, each between real alternatives:
+
+- **Settings layers.** An invalid or project-only value in this computer's `defaults.json` is
+  ignored with a warning, not an error, so one bad default cannot stop every project. `init`
+  writes only the project-only keys (`plan`, `branch`, `devServer`, `checks`, `guard`, `docs`,
+  `permissions`), so a new project follows the computer defaults.
+- **Live settings.** Safe while running: `notify.*`, `usage.*`, `review.pauseAt`,
+  `supervisor.*`, `git.push`, `git.tagPhaseEnds`, `footprint.*`. Everything else, and any
+  computer default a running project inherits, is locked on the page until the run is paused.
+- **The settings page.** Served on 127.0.0.1 with a random port and a 48-hex-digit token in the
+  address, closed after 30 idle minutes. Alert switches in the project section write to the
+  project; the computer defaults have their own section. The test alert uses the saved
+  `notify.json` channel, not the plugin userConfig. Secrets are shown masked to the host until
+  Show is pressed.
+- **`autoclaude decide`** is synchronous (up to about 9 minutes; the builder gives the call a
+  600000 ms timeout), prints JSON (classification, recommendation, reasoning ending in how to
+  undo it, question_for_owner, owner_review), logs to `.autoclaude/logs/decide.log`, and never
+  writes `docs/DECISIONS.md` itself: the builder writes the `D-###` with `- By: decider`. The
+  Agent-tool decider stays as the fallback when the command fails. Replaces the background
+  decider that left the rehearsal's session idle until a "Continue" nudge.
+- **Per-feature gate.** A mid-feature step is committed as `autoclaude(<id>): <title>` with the
+  body "Built, not verified yet", marked `[~]`, and PROGRESS says "(built; verified with Phase
+  N)". The feature commit keeps the closing step's id in its subject and names the feature,
+  Accept lines, checks, decisions, findings and report in its body. A pass report is written for
+  every verification so the body can name it. PROGRESS and the plan tick are written before the
+  checks run, and reverted on a failure, so the verified commit always holds a passing tree.
+- **Fresh sessions.** Also at phase ends in `gate.verifyAt: "step"` mode, and after a session
+  that failed to resume twice fast. A fresh session is not counted as a recovery.
+- **Alerts.** "Phase N verified" is not sent for the last feature; the plan-complete alert
+  covers it. A push failure is its own always-on alert at default priority: the work is safe
+  locally and the next feature pushes again.
+- **Hand-back.** HANDOFF.md is committed as `autoclaude: hand-back` and pushed. Decisions and
+  owner reviews count only entries dated on or after the run started. "Left for you" is the
+  plan's After the run list plus BLOCKERS rows marked for the owner.
+- **Footprint.** Docker containers, volumes and networks are listed at run start; only ones
+  created after it and now unused are removed. A kind not listed at start is never compared,
+  and nothing is removed when Docker was unreachable at start. A running container the run
+  created is only reported. Images are not tracked yet (DEFERRED 20).
+- **Tester.** In phase mode it skips `no-ui` steps; a coverage shortfall is noted in the report,
+  not failed.
+- **Secrets.** `init` adds `secrets/` to `.gitignore`, and the gate's commit never stages it,
+  even when the project's `.gitignore` lost the line.
+- **Items left for the owner during a run** go to `docs/BLOCKERS.md` rows with Owner "owner"
+  and Status "left for the owner: <why>", and secrets the run created are named in their `D-###`
+  entry and the footprint, because the builder may not edit the plan. HANDOFF.md merges them with
+  the plan's own "After the run" list, which planning writes with the owner. Rejected: a guard
+  exception letting the builder write that one plan section.
+- **Resume at a feature boundary.** With a live supervisor and a pause other than a blocked
+  question, `resume` starts a fresh builder for the next feature; an answered question carries
+  on in the same session, which holds the context of the question.
+- **Counting.** The completion alert's "decisions the run made" leaves out planning entries and
+  the owner's own answers. Push times in the summary and HANDOFF.md are labelled UTC.
+- **Deadlines.** The decider and the checkers' wrap-up turns are capped by a deadline, so
+  `autoclaude decide` finishes inside one 10-minute Bash call and a checker never overruns the
+  gate's time budget.
+- **Session context.** A fresh builder gets the current feature's steps with their markers, the
+  last 10 PROGRESS lines and, during a fix-up pass, the findings.
+- **Guard.** `guard.deny` is tested against the words of each command a line runs (and the
+  script behind `npm run <name>`), not heredoc bodies, strings or files being read. Recursive
+  deletes in the temp folder are allowed. A plain push is allowed when `git.push` is true; a
+  force push never is.
+- **Checks environment.** `autoclaude run` records its PATH in `.autoclaude/run-env.json` and
+  `autoclaude checks` uses it, so a check behaves the same in the gate and by hand. A check's
+  `requires` command runs in the preflight.
+
+**Why.** Each follows from a rehearsal finding or from D49; the alternatives were the obvious
+opposite in each line (failing on a bad default, writing every key at init, a live page for all
+settings, a background decider, verifying mid-feature, and so on), rejected for the reasons
+given with each.
+
+**Rejected.** Recorded per line above.
