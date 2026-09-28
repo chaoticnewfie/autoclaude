@@ -61,6 +61,7 @@ Everything Scott has asked for after 2026-09-24, with where it landed. Nothing i
 | 2026-09-27 | "we should probably make sure the autoclaude files and stuff doesn't get pushed to the projects github repos that it's used to build too" | D45: asked 2026-09-27, Scott chose "Leave it as is": only `.autoclaude/` stays out of git; INSTRUCTIONS.md says what is committed | Done |
 | 2026-09-27 | "We don't ever need to use haiku, sonnet is okay if something is very basic but id set whatever the newest sonnet is as the floor for models usage. and whatever the newest Opus is as the celing and the main model used" | D44: builder, decider, tester, bug bash and security default to opus; config refuses Haiku | Done |
 | 2026-09-27 | Keep AutoClaude a one-time install per device and pull the instructions into each project: "lets do it. I like having it as a one time setup per device" | D46: `init` copies INSTRUCTIONS.md into every project as AUTOCLAUDE.md, stamped with the version | Done |
+| 2026-09-27 | "it's so so so so so much slower than just using claude code extension in vs code... Will it be possible to make it work at a more normal speed once I'm able to work on this again? I don't want to just burn tokens for no reason" | DEFERRED 18 (faster runs), measured and decided at CHECKPOINT 7 | Planned |
 
 ### How each requirement is met
 

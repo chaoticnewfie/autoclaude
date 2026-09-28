@@ -283,3 +283,13 @@ One entry per working session: what was done, what was committed. Append only.
 - The fsatomic lock test timed out once under full-suite load (PowerShell took over 30 s to
   start); its wait is now 60 s.
 - 268 tests pass.
+
+## 2026-09-27 (Code VM) - Rehearsal under way; speed noted
+
+- Scott installed the plugin from GitHub himself and started the DB rehearsal; it runs cleanly
+  (9 of 28 steps verified by 19:34, no blocks). He finds it much slower than working in the
+  VS Code extension. From his screenshots only (the DB project stays unopened, D37): about 27
+  minutes per step, 2 points of the weekly limit for 6 steps, the builder spending about 4
+  minutes running the checks the gate then runs again, and the builder on his default xhigh
+  effort because AutoClaude never sets one. Speed options recorded as DEFERRED 18, to be measured
+  and decided at CHECKPOINT 7. Docs only; no plugin change during the run.
