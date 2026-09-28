@@ -145,6 +145,9 @@ package at run time, so the version can change between steps and the run needs n
 
 ## 18. Faster runs
 
+**Status (2026-09-28).** Measured at CHECKPOINT 7 and scheduled: options 0 to 4 are PLAN.md P8.2 to
+P8.4 (D49). Option 6, parallel steps, stays deferred until the effect of those is measured.
+
 **What.** Cut the time per step without cutting the verification. Candidates, cheapest first:
 0. **Verify per feature, not per step** (Scott's own picture, 2026-09-27). A `gate.verifyAt`
    setting, `step` (today) or `phase`: with `phase`, `ready` on a mid-phase step only records it
@@ -177,6 +180,8 @@ the heartbeat gaps give build time; pick the levers that the numbers say matter.
 **No rework.** Each lever is a config key or a prompt line on top of what exists.
 
 ## 19. Full-scope runs (D47)
+
+**Status (2026-09-28).** Scheduled as PLAN.md P8.1 (D49).
 
 **What.** Make a run work on the whole project the way a watched session would.
 1. Plan skill: the stall review stops treating "touches other machines" as a stall. For each such

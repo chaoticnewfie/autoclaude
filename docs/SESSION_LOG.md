@@ -309,3 +309,21 @@ One entry per working session: what was done, what was committed. Append only.
   DEFERRED 19 item 6: the scope question is mandatory and confirmed.
 - Scott set the planning principle: many questions up front rather than assumptions; the run
   builds the bulk, he fine-tunes interactively after. Recorded as D48 and DEFERRED 19 item 7.
+
+## 2026-09-28 (Code VM) - Rehearsal review (CHECKPOINT 7) and Phase 8 planned
+
+- The DB rehearsal finished: 28 of 28 steps, 18 h 23 min, 26 first time, no pauses or relaunches,
+  one alert, 10 weekly points. P7.3 ticked. Scott lifted the blind rule for the review.
+- Two read-only agents measured and reviewed the run. Builder time 850 min, of which 568 min were
+  the builder's own test runs (291 min of full-suite runs) and 216 min model time; the gate spent
+  253 min re-running the same suite. Planning asked 8 questions, none about scope, and wrote the
+  deny rules itself; the VM was left to Scott. Other findings: one 18-hour context (459K tokens
+  average), the last commit and tags unpushed, a verified commit failing its own test, 13
+  false-positive denials, the checks' environment differing from the gate's, background deciders
+  triggering "Continue" nudges, 33 leaked Docker volumes. Scripts and reports in
+  spikes/out/review/.
+- Eight rounds of questions with Scott settled Phase 8 (D49): verify once per feature, targeted
+  tests while building, a fresh builder per feature, pushes per feature, full scope with a
+  snapshot offer and pre-approved permissions, secrets into secrets/, a fix-up pass for findings,
+  HANDOFF.md, Docker cleanup, per-event alerts, layered settings and a browser config page,
+  version 0.10.0 after a practice run Claude does itself, 1.0 after the DB project's next part.

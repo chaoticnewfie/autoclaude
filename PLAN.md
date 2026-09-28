@@ -61,10 +61,12 @@ Everything Scott has asked for after 2026-09-24, with where it landed. Nothing i
 | 2026-09-27 | "we should probably make sure the autoclaude files and stuff doesn't get pushed to the projects github repos that it's used to build too" | D45: asked 2026-09-27, Scott chose "Leave it as is": only `.autoclaude/` stays out of git; INSTRUCTIONS.md says what is committed | Done |
 | 2026-09-27 | "We don't ever need to use haiku, sonnet is okay if something is very basic but id set whatever the newest sonnet is as the floor for models usage. and whatever the newest Opus is as the celing and the main model used" | D44: builder, decider, tester, bug bash and security default to opus; config refuses Haiku | Done |
 | 2026-09-27 | Keep AutoClaude a one-time install per device and pull the instructions into each project: "lets do it. I like having it as a one time setup per device" | D46: `init` copies INSTRUCTIONS.md into every project as AUTOCLAUDE.md, stamped with the version | Done |
-| 2026-09-27 | "it's so so so so so much slower than just using claude code extension in vs code... Will it be possible to make it work at a more normal speed once I'm able to work on this again? I don't want to just burn tokens for no reason" | DEFERRED 18 (faster runs), measured and decided at CHECKPOINT 7 | Planned |
-| 2026-09-27 | "I kinda pictured the checks to run after a full feature has been built. Like if we adding an admin page, build the page, and all the features within the page, and before moving to another page or other major feature or whatever, then run the checks. I want it to build a decent amount and run the checks to make sure everything is working before going to another major piece." | DEFERRED 18 option 0: verify per phase (a phase is a feature); decided at CHECKPOINT 7 | Planned |
-| 2026-09-27 | "I want it to work on the project start to finish no different than if I was watching the whole time, and I can specify differently if I want while making the plan... Can we adjust it to be closer to how I want eventually?" (after learning a run would not create the DB project's VM) | D47; DEFERRED 19 (full-scope runs); built after the rehearsal, with CHECKPOINT 7 | Planned |
-| 2026-09-27 | "Id rather 25 questions or more and end up with what I want than everything assumed and waste tokens. The point is a little extra planning time and I save most of the build time. Thats the goal. And I'll sit and work with claude code as I'm used to, to fine tune and make sure everything is working and looking how I want" | D48; DEFERRED 19 item 7 (ask, never assume); built after the rehearsal | Planned |
+| 2026-09-27 | "it's so so so so so much slower than just using claude code extension in vs code... Will it be possible to make it work at a more normal speed once I'm able to work on this again? I don't want to just burn tokens for no reason" | DEFERRED 18 (faster runs), measured at CHECKPOINT 7; P8.2 to P8.4 | Planned |
+| 2026-09-27 | "I kinda pictured the checks to run after a full feature has been built. Like if we adding an admin page, build the page, and all the features within the page, and before moving to another page or other major feature or whatever, then run the checks. I want it to build a decent amount and run the checks to make sure everything is working before going to another major piece." | P8.2 (verify once per feature), D49 | Planned |
+| 2026-09-27 | "I want it to work on the project start to finish no different than if I was watching the whole time, and I can specify differently if I want while making the plan... Can we adjust it to be closer to how I want eventually?" (after learning a run would not create the DB project's VM) | D47; P8.1 | Planned |
+| 2026-09-27 | "Id rather 25 questions or more and end up with what I want than everything assumed and waste tokens. The point is a little extra planning time and I save most of the build time. Thats the goal. And I'll sit and work with claude code as I'm used to, to fine tune and make sure everything is working and looking how I want" | D48; P8.1 | Planned |
+| 2026-09-28 | "a autoclaude:config command so we can change the config easily. Like have it open a page we can scroll up and down through to change things like the limit we stop at on the weekly, maybe be able to change the webhook url, everything we can set in there would be nice. It'll also be nice when other people use the project as well and might want different settings than me." | P8.7, D49 | Planned |
+| 2026-09-28 | "I also wouldn't mind getting more updates in general, like get one each time a feature is finished... configurable alerts" | P8.6, D49 | Planned |
 
 ### How each requirement is met
 
@@ -646,23 +648,69 @@ autoclaude/
   - Accept: `README.md` (what it is, a 5-minute quickstart) and `docs/USAGE.md` (install, init, plan, run, watch, pause and notes, alerts, answering blockers, recovery, uninstall, troubleshooting; Windows notes on RDP disconnect versus log-off, power settings and the standard-user recommendation; Linux and macOS notes), all written for someone who has never seen this repo or Scott's machines
   - Accept: the docs cover installing from the private repo as an invited collaborator (D41)
   - Accept: a GitHub install works on a machine that has never seen the repo: everything `init`, the CLI shim and the watchdog need ships inside the plugin folder and survives a plugin update, proven by a scripted install into a throwaway Claude config (D42)
-- [ ] **P7.3** Dress rehearsal on a real project, as a blind test: Scott's DB repo (D36, D37)
+- [x] **P7.3** Dress rehearsal on a real project, as a blind test: Scott's DB repo (D36, D37) (2026-09-28: onboarded by link on 0.9.4, planned, then ran 18 h 23 min unattended: 28 of 28 steps verified in 30 attempts, 26 first time, one commit per step, no pauses, no relaunches, one alert (plan complete), nothing sent to pve or other hosts. The review (two read-only agents over the logs, reports, planning and builder transcripts) found 16 issues, among them: planning never asked the run's scope and wrote the deny rules itself, so the VM was left to Scott; the full test suite ran twice per step (about 46% of the run); one 18-hour builder context; the last commit and the tags never pushed; a verified commit failing its own test; 13 false-positive denials; 33 leaked Docker volumes. Every issue is a step of Phase 8 or a DEFERRED entry. The run branch is not merged yet, as the Accept line requires)
   - Accept: nothing in AutoClaude, its docs or this plan is prepared for that project; whoever builds AutoClaude does not open it. The only preparation is generic: the local-directory install of the plugin is removed from this machine, so the rehearsal installs from GitHub the way a new machine would
   - Accept: onboarding by link: in a Claude Code session in that project, Scott gives Claude only the repo URL `https://github.com/chaoticnewfie/autoclaude` and asks it to add AutoClaude; using nothing but the repo's `README.md` and `docs/USAGE.md`, Claude installs the plugin and the CLI, runs `init`, reviews the project's existing plan and rules with Scott, and writes the AutoClaude plan. Every place it had to guess, or asked Scott something the docs should have answered, becomes a fix to the docs
   - Accept: the run goes all day (D41) with no input; the review afterwards finds one verified commit per completed step on the run branch, no false alarms, every pause justified, nothing done outside the project, and every issue turned into a fix or a backlog item. The run branch is merged only after Scott's review
-- [ ] **P7.4** Release
-  - Accept: `plugin.json` version `1.0.0`, git tag `v1.0.0` and `CHANGELOG.md`. No `LICENSE` file: the repo stays private and is shared with invited collaborators (D41)
+**CHECKPOINT 7:** Review of the dress rehearsal with Scott, after the run. (2026-09-28: done with Scott in 8 rounds of questions; the release moved to Phase 9, D49.)
 
-**CHECKPOINT 7:** Review of the dress rehearsal with Scott, after the run.
+### Phase 8: What the rehearsal taught (0.10.0)
 
-### Phase 8: Rollout
+Every step here comes from Scott's answers on 2026-09-28 and the rehearsal review (D47 to D49).
 
-- [ ] **P8.1** The rehearsal project keeps going on AutoClaude after the review, and a second existing repo of Scott's is onboarded the same way
-  - Accept: a second existing project has run at least 3 steps unattended on the Code VM with one verified commit per step and no false alarms
-- [ ] **P8.2** Install on the Windows 11 desktop and confirm an unattended run behaves the same as on the Code VM, including sleep and power settings
+- [ ] **P8.1** Planning asks and never assumes (D47, D48, D49)
+  - Accept: `/autoclaude:plan` puts every interview topic to the owner with AskUserQuestion, in rounds of up to 4 grouped by topic, each question with a recommended option drawn from the code or the owner's notes; it decides alone only where the owner says "you decide", and a question asked only in prose that got no answer stays open
+  - Accept: the run's scope is always asked: for each item that reaches outside the project folder, "the run does it" (the default), "write it for me" or "leave it out"; what the run must never touch; the proposed deny rules as their own approval question; a snapshot before a change to an existing machine (offered, default yes)
+  - Accept: secrets the run needs are generated into a gitignored `secrets/` folder; installing tools and packages, Docker, and creating GitHub repositories are allowed unless the plan says otherwise
+  - Accept: planning asks before installing, pulling or starting anything; `docs/DECISIONS.md` records only options the owner actually saw; the estimate uses the rehearsal's measured rates
+  - Accept: actions the plan allows outside the project are pre-approved for Claude Code's auto mode, after verifying how permission rules interact with auto mode; the decider and the run rules treat work the plan allows as routine
+- [ ] **P8.2** Verify once per feature (D49)
+  - Accept: with `gate.verifyAt: "phase"` (the new default), `ready` on a step inside a phase commits that step and moves on without checks; the phase's last step runs the full verification (every check, the browser tester over every Accept line of the phase, the bug bash, the security review), with up to 3 attempts per feature and a report naming the failing Accept lines; `"step"` keeps the old behaviour
+  - Accept: the run rules tell the builder to run only the tests for what it changed; the full suite runs once, in the gate
+  - Accept: non-blocking findings of a feature get a fix-up pass before the feature closes: each is fixed or left for the owner with a reason, then the checks run once more
+  - Accept: the tree the checks verify is exactly the tree the gate commits (plan ticks and PROGRESS lines are written before the checks and reverted on failure)
+- [ ] **P8.3** A fresh builder per feature, lighter paperwork, pushes, effort (D49)
+  - Accept: after each verified feature the supervisor starts a new builder session with the run rules, the next feature and recent progress injected
+  - Accept: the builder keeps CONTINUE_HERE.md current every step and does the project's other doc duties once per feature
+  - Accept: with `git.push` true (the new default), the gate pushes the run branch and the phase tag after each verified feature, retrying once; a failed push is alerted and shown in the hand-back
+  - Accept: `builder.effort` is optional; unset, the builder uses the owner's own Claude Code default
+- [ ] **P8.4** Run hygiene from the review (D49)
+  - Accept: `guard.deny` matches the command being run, not heredoc bodies or quoted data, and read-only commands on named files pass; recursive deletes inside the OS temp folder pass; the 13 rehearsal false positives are test cases
+  - Accept: `autoclaude checks` runs in the gate's environment (the same PATH), so its pass means the gate's pass
+  - Accept: the decider runs synchronously; a decision that accepts a security risk is logged with "Owner review: yes"; every D-### says who decided
+  - Accept: nothing under `.autoclaude/` changes while the checks run, apart from the checks' own output; the supervisor writes its state only when it changes
+  - Accept: `--help` works on every subcommand; a check can name a prerequisite command (for example `docker version`) that the preflight runs; gate commits carry a body (Accept lines, checks with durations, the step's decisions and findings)
+- [ ] **P8.5** Hand-back and machine footprint (D49)
+  - Accept: at plan completion the run writes `HANDOFF.md`: what was built, what is left for the owner with exact commands, secrets it created and where, open findings, owner-review decisions, push state, and the machine footprint
+  - Accept: Docker containers, volumes and networks are recorded at run start; at the end the run removes the unused ones it created and reports anything else
+  - Accept: the completion alert counts only the run's own decisions and lists owner-review decisions and open items
+- [ ] **P8.6** Configurable alerts (D49)
+  - Accept: `notify.events` switches each informational alert: feature verified (on by default), step verified, morning summary, run started, resumed or paused by the owner; critical alerts cannot be switched off
+- [ ] **P8.7** Layered settings and the config page (D49)
+  - Accept: settings resolve as built-in defaults, then this computer's defaults (`<Claude config>/autoclaude/defaults.json`), then the project's `autoclaude.config.json`; project-only keys (plan, branch, devServer, checks, guard, docs) exist only in the project
+  - Accept: `autoclaude config` and `/autoclaude:config` open one scrollable page in the browser, served from this computer only behind a random token, in sections, each setting with its explanation, its default and where its current value comes from: the project's settings, this computer's defaults, the alert channel (secrets hidden with a Show button, a test button), the watchdog and the status line bridge
+  - Accept: during a run, safe settings apply at once and the rest are locked with the reason; values are validated before saving
+- [ ] **P8.8** Docs and version 0.10.0
+  - Accept: INSTRUCTIONS.md (and its template copy), docs/USAGE.md and README.md describe all of Phase 8; the plugin is version 0.10.0; `test/live/gh-install.live.mjs` passes against GitHub
+- [ ] **P8.9** Practice run, done by Claude (headless where possible)
+  - Accept: on the practice project, the plan skill with scripted answers, then an unattended run of at least two features, one with work outside the project that the plan allows (a Docker container): verified once per feature, a fresh builder per feature, a feature alert, pushes to a local bare remote, HANDOFF.md, the footprint cleanup, and the config page changing a setting during the run
+
+**CHECKPOINT 8:** Show Scott the practice run's hand-back, the alerts received, the config page, and the time per feature compared with the rehearsal.
+
+### Phase 9: Rollout and 1.0
+
+- [ ] **P9.1** The DB project's next part on 0.10.0
+  - Accept: Scott re-plans with the new questions (create the new VM and work there, touch nothing else) and the run does it; the review afterwards turns every issue into a fix or a backlog item
+- [ ] **P9.2** A second existing repo of Scott's is onboarded the same way
+  - Accept: a second existing project has run at least one feature unattended with no false alarms
+- [ ] **P9.3** Install on the Windows 11 desktop and confirm an unattended run behaves the same as on the Code VM, including sleep and power settings
   - Accept: the fixture plan passes unattended on the Windows 11 desktop, and the sleep and power settings that matter are written into `docs/USAGE.md`
-- [ ] **P8.3** Backlog of later ideas lives in `docs/DEFERRED.md`, each with a trigger; review it and file anything new from the rollout
+- [ ] **P9.4** Backlog of later ideas lives in `docs/DEFERRED.md`, each with a trigger; review it and file anything new from the rollout
   - Accept: every later idea raised during the rollout is in `docs/DEFERRED.md` with a trigger, and nothing is left only in chat
+- [ ] **P9.5** Release 1.0.0
+  - Accept: `plugin.json` version `1.0.0`, git tag `v1.0.0` and `CHANGELOG.md`, after Scott's review of P9.1. No `LICENSE` file: the repo stays private and is shared with invited collaborators (D41)
+
+**CHECKPOINT 9:** Review of the second DB run with Scott; if it is good, 1.0.
 
 ---
 

@@ -617,3 +617,46 @@ notes and never asked, which cost him the VM he expected the run to create.
 
 **Rejected.** Keeping the interview short to save the owner's time: a wrong assumption costs a
 whole night of building.
+
+### D49 What the rehearsal review settled (2026-09-28)
+
+Scott's answers, over eight rounds of questions after the DB rehearsal (P7.3) and its review.
+
+- **Verification once per feature** (`gate.verifyAt: "phase"`, the new default): a mid-phase
+  `ready` commits the step without checks; the phase's last step runs everything over all of the
+  phase's Accept lines. A commit per step, verified per feature; 3 attempts per feature.
+- **The builder runs only the tests for what it changed**; the full suite runs once, in the gate.
+  The rehearsal ran the full suite about 66 times; the builder's own runs were 67% of its time.
+- **Builder effort follows the owner's Claude Code default** (Scott uses ultracode); an optional
+  `builder.effort` exists for others.
+- **A fresh builder session per feature**: one 18-hour context averaged 459K tokens per request.
+- **Paperwork**: CONTINUE_HERE per step, the project's other doc duties per feature.
+- **Push the run branch and the phase tag after each verified feature**; `git.push` defaults to
+  true.
+- **Full scope** (D47) with: a snapshot offered, default yes, before a change to an existing
+  machine; Claude Code permissions pre-approved for exactly what the plan allows; new secrets
+  generated into a gitignored `secrets/`; installing tools, Docker and new GitHub repositories
+  allowed; planning asks before installing or pulling anything.
+- **Planning interview in rounds** of up to four questions with a recommendation each (D48).
+- **Decisions mid-run**: decide, log, keep going; a decision that accepts a security risk is
+  flagged "Owner review: yes" and listed in the hand-back and the completion alert.
+- **Non-blocking findings** get a fix-up pass at the end of each feature.
+- **Hand-back**: a HANDOFF.md and a richer completion alert.
+- **Machine footprint**: Docker state recorded at run start; unused things the run created are
+  removed at the end; the rest reported.
+- **Alerts per event**, set on the config page; "feature verified" on by default; critical alerts
+  cannot be switched off.
+- **Settings in layers**: built-in, then this computer's defaults, then the project; existing
+  projects follow a changed default unless they set their own. Project-only keys stay in the
+  project.
+- **The config page**: a browser page served from this computer only, opened by `autoclaude
+  config` or `/autoclaude:config`; project settings, computer defaults, alert channel (secrets
+  hidden with a Show button), watchdog and status line; safe settings live during a run, the rest
+  locked until paused.
+- **Parallel steps**: later, after these speed fixes are measured.
+- **Release path**: 0.10.0 after a short practice run that Claude does itself; then the DB
+  project's next part; then a review; then 1.0 (P7.4 moved to P9.5).
+
+**Why.** The rehearsal worked (28 of 28 steps, no false alarms) but was slow and narrow: builder
+time was two thirds test runs, planning never asked the scope, and nothing reached the VM Scott
+wanted built. Each item above is his answer to a question with alternatives shown.

@@ -4,53 +4,17 @@
 
 ## Where things are
 
-**Phase 7: P7.1 (plan skill) and P7.2 (docs) are done; P7.3, Scott's blind rehearsal, is next.**
-Phases 0 to 6 done. Version 0.9.4 is on GitHub (`main`), 268 tests pass, remote in sync.
-
-This round (see `docs/SESSION_LOG.md` and D41 to D46):
-- The repo stays private, shared by invitation, no license; the rehearsal runs all day (D41).
-- Everything the plugin needs ships inside `plugins/autoclaude/`, and a launcher keeps the
-  command and the watchdog working across plugin updates (D42).
-- Six reviewers and four fixers closed real bugs before the rehearsal: the guard now covers the
-  PowerShell tool and paths with spaces; the builder is one known session (`--session-id`,
-  `--resume <id>`, `AUTOCLAUDE_BUILDER=1`) and other sessions in the project are left alone;
-  `pause --now` ends the session; finished plans continue with `autoclaude run`; new commands
-  `run --check`, `checks`, `guard-test`, `uninstall` (D43).
-- Verified live: `test/live/gh-install.live.mjs` 9/9 from GitHub; a real run on the fixture
-  (session id, builder identity, pause --now, resume by id, 3/3 steps); an onboarding rehearsal
-  by link on a scratch project that reached the preflight on its own.
-
-**This machine has no AutoClaude installed, on purpose**: plugin, marketplace, command, status
-line bridge and watchdog were removed with `autoclaude uninstall` and `claude plugin uninstall`.
-Kept: the Discord setting in `~/.claude/autoclaude/notify.json`. The registry is empty.
-
-## Blind rehearsal rule (D37)
-
-**Do not open or inspect Scott's DB project, and do not tailor AutoClaude to it.** Scott gives a
-Claude session in that project only the repo URL; that Claude works from `README.md` and
-`docs/USAGE.md`.
+**Phase 7 done (CHECKPOINT 7 held 2026-09-28); Phase 8 planned and being built.** The DB
+rehearsal ran 28 of 28 steps unattended; its review and eight rounds of questions with Scott
+became Phase 8 in PLAN.md (D49). Version 0.9.4 is on GitHub; Phase 8 ends at 0.10.0. The DB
+project may now be read (Scott lifted the blind rule for the review); its run branch is not merged.
 
 ## The exact next step
 
-**P7.3, done by Scott:**
-1. Open Claude Code in the DB project and say: "Add AutoClaude to this project:
-   https://github.com/chaoticnewfie/autoclaude". Approve its installs; when it says to, exit and
-   start a new session there, and run `/autoclaude:init`, then `/autoclaude:plan`.
-2. In the interview, when asked what the run must never touch, name everything this VM can
-   reach: the Proxmox host (this account has a root SSH key to it), other VMs, GitHub pushes.
-3. Do the plan's "Before the run" list (trust, sleep off, watchdog), then from a new terminal in
-   the project: `autoclaude run --check`, then `autoclaude run`.
-4. Report anything odd from the onboarding; every guess the other Claude had to make becomes a
-   docs fix here (generic only, D37), with a version bump and push. Scott updates with
-   `claude plugin marketplace update autoclaude` and `claude plugin update autoclaude@autoclaude`
-   while the run is paused.
-
-The rehearsal is running now (started by Scott; 9 of 28 steps verified at 19:34, no blocks).
-Then CHECKPOINT 7 (review of the run with Scott), which also measures where the time per step
-goes and picks from the speed options in DEFERRED 18 (Scott finds runs much slower than the
-VS Code extension, and pictured checks once per feature), and builds D47 / DEFERRED 19: runs do
-the whole project like a watched session, infrastructure included, limits only where the plan
-sets them. Then P7.4 (version 1.0.0, tag, CHANGELOG).
+Build PLAN.md P8.1 to P8.8, then P8.9: a practice run on the fixture that Claude does itself,
+headless where possible (Scott: "you do it all yourself unless you need me"). Then CHECKPOINT 8.
+Release numbering: 0.10.0 after the practice run (updates in place from 0.9.4), 1.0 only after
+the DB project's next part and a review (Phase 9).
 
 ## Notes for whoever continues
 
