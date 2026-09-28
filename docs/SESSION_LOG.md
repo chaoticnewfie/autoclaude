@@ -301,3 +301,9 @@ One entry per working session: what was done, what was committed. Append only.
   Proxmox host off limits). He never wanted that: a run should do the whole project like a
   watched session, with limits only where he sets them. Recorded as D47 and DEFERRED 19, to build
   after the rehearsal with CHECKPOINT 7.
+- Scott: the planning session never asked him what was off limits; he meant to say "do not touch
+  any other VM or project, but create the VM and work on it there". Cause, from the skill text
+  (the DB project stays unopened): the interview only asks what the docs do not already answer,
+  and his notes list the Proxmox host and VMs, so the session decided the scope itself; 3d adds
+  deny rules without a confirmation step, and 1b turns outside work into scripts. Recorded as
+  DEFERRED 19 item 6: the scope question is mandatory and confirmed.

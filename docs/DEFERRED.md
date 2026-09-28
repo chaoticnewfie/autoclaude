@@ -194,6 +194,15 @@ the heartbeat gaps give build time; pick the levers that the numbers say matter.
    rules for what the plan permits.
 5. Docs (INSTRUCTIONS, USAGE section 12) and the onboarding advice: stop telling owners to name
    every reachable host as off limits.
+6. **The scope question is always asked, never inferred** (bug found in the rehearsal: Scott was
+   never asked what was off limits). Today the interview says "ask what the code and docs do not
+   already answer", 3d says to look in the repo and add deny rules, and 1b turns work on other
+   machines into scripts, so a session that finds hosts in the owner's notes decides the scope
+   itself. Fix: one mandatory question, asked with AskUserQuestion even when the docs suggest an
+   answer: what the run may do outside this folder (create or use which machines) and what it
+   must never touch. Every item that reaches outside the project gets its own "run does it /
+   write it for me / leave it out" choice. Proposed deny rules are shown and approved before
+   they are written, and the hand-over summary lists the scope in plain words.
 **Why it waits.** The DB rehearsal is running on 0.9.4; changes land after it, reviewed at
 CHECKPOINT 7 together with the speed options (entry 18).
 **Trigger.** CHECKPOINT 7.
