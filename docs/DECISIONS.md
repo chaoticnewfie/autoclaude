@@ -578,3 +578,24 @@ CLAUDE.md, so Claude Code never loads it and the builder pays nothing for it.
 **Rejected.** Installing from a git clone (a directory marketplace): a `git pull` would change the
 code under a running build, and it clashes by name with the GitHub marketplace. A per-project
 pointer to the install location: not needed, the plugin is enabled for the user everywhere.
+
+### D47 A run does the whole project, like a watched session; limits are opt-in (2026-09-27)
+
+**Decision.** Supersedes the "never touch anything outside the project" default built into the
+plan skill (P7.1: the stall review turns work on other machines into scripts left to the owner,
+and asks what the run must never touch), the decider (reaching outside the project is critical),
+and the template's "When something is unclear" defaults. From now on a run does everything the
+plan says, including infrastructure (creating a VM, deploying, touching other machines), exactly
+as a session the owner watches would. The plan interview asks what the run may do, records it in
+the plan, and only what the owner marks off limits becomes a `guard.deny` rule. The built-in run
+mechanics (the gate commits, no force push, no questions to a person) stay. Decided now,
+implemented after the DB rehearsal (DEFERRED 19).
+
+**Why.** Scott, on learning the rehearsal would not create the DB project's VM: "Why? I never
+wanted that? I want it to work on the project start to finish no different than if I was
+watching the whole time, and I can specify differently if I want while making the plan." The
+restriction was a default chosen while building AutoClaude, reinforced by advice to name the
+Proxmox host as off limits during planning; he never asked for it.
+
+**Kept, as an offer during planning, not a rule.** A snapshot or backup step before a run changes
+an existing machine, because the homelab has no backup jobs; the owner decides per plan.

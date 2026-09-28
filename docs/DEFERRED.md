@@ -175,3 +175,27 @@ and changing the plugin mid-run is out.
 **Trigger.** CHECKPOINT 7: measure first. The run's `gate.log` gives verification time per step,
 the heartbeat gaps give build time; pick the levers that the numbers say matter.
 **No rework.** Each lever is a config key or a prompt line on top of what exists.
+
+## 19. Full-scope runs (D47)
+
+**What.** Make a run work on the whole project the way a watched session would.
+1. Plan skill: the stall review stops treating "touches other machines" as a stall. For each such
+   item it asks "should the run do this itself?", with yes as the default, and records the
+   permission and the details (hosts, credentials already on the machine, specs) in the plan's
+   Constraints & decisions. Only what the owner marks off limits goes into `guard.deny`. Offer a
+   snapshot or backup step before changes to existing machines.
+2. Decider and run rules (`agents/decider.md`, `prompts/context.md`): work the plan allows is
+   routine, not critical. Critical stays for what the plan did not cover and only the owner can
+   decide, or a secret the machine does not have.
+3. Template "When something is unclear": replace "never touch files outside the project" with
+   "stay within what the plan allows".
+4. Claude Code's own auto-mode checks may still refuse some actions on other hosts. Check how
+   explicit permission allow rules interact with auto mode, and have the plan skill write allow
+   rules for what the plan permits.
+5. Docs (INSTRUCTIONS, USAGE section 12) and the onboarding advice: stop telling owners to name
+   every reachable host as off limits.
+**Why it waits.** The DB rehearsal is running on 0.9.4; changes land after it, reviewed at
+CHECKPOINT 7 together with the speed options (entry 18).
+**Trigger.** CHECKPOINT 7.
+**No rework.** The guard, the deny list and the decider already exist; this changes their
+defaults and the planning questions.

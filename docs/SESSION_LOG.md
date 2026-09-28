@@ -296,3 +296,8 @@ One entry per working session: what was done, what was committed. Append only.
 - Scott pictured checks running once per feature (a phase), not after every step, which is how
   the gate works today (full checks and the browser tester per step, bug bash and security at
   phase ends). Recorded as the first option of DEFERRED 18 for CHECKPOINT 7.
+- Scott expected the rehearsal to create the DB project's VM; runs are built to stay inside the
+  project (the plan skill turns outside work into scripts, and I had advised him to name the
+  Proxmox host off limits). He never wanted that: a run should do the whole project like a
+  watched session, with limits only where he sets them. Recorded as D47 and DEFERRED 19, to build
+  after the rehearsal with CHECKPOINT 7.

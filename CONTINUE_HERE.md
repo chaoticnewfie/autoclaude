@@ -48,7 +48,9 @@ Claude session in that project only the repo URL; that Claude works from `README
 The rehearsal is running now (started by Scott; 9 of 28 steps verified at 19:34, no blocks).
 Then CHECKPOINT 7 (review of the run with Scott), which also measures where the time per step
 goes and picks from the speed options in DEFERRED 18 (Scott finds runs much slower than the
-VS Code extension); then P7.4 (version 1.0.0, tag, CHANGELOG).
+VS Code extension, and pictured checks once per feature), and builds D47 / DEFERRED 19: runs do
+the whole project like a watched session, infrastructure included, limits only where the plan
+sets them. Then P7.4 (version 1.0.0, tag, CHANGELOG).
 
 ## Notes for whoever continues
 
