@@ -45,7 +45,10 @@ Claude session in that project only the repo URL; that Claude works from `README
    `claude plugin marketplace update autoclaude` and `claude plugin update autoclaude@autoclaude`
    while the run is paused.
 
-Then CHECKPOINT 7 (review of the run with Scott) and P7.4 (version 1.0.0, tag, CHANGELOG).
+The rehearsal is running now (started by Scott; 9 of 28 steps verified at 19:34, no blocks).
+Then CHECKPOINT 7 (review of the run with Scott), which also measures where the time per step
+goes and picks from the speed options in DEFERRED 18 (Scott finds runs much slower than the
+VS Code extension); then P7.4 (version 1.0.0, tag, CHANGELOG).
 
 ## Notes for whoever continues
 
