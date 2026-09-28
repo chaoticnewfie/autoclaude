@@ -203,6 +203,13 @@ the heartbeat gaps give build time; pick the levers that the numbers say matter.
    must never touch. Every item that reaches outside the project gets its own "run does it /
    write it for me / leave it out" choice. Proposed deny rules are shown and approved before
    they are written, and the hand-over summary lists the scope in plain words.
+7. **Ask, never assume** (D48). The interview asks about every open decision instead of filling
+   it in from the code, the docs or the owner's notes: what those suggest becomes the
+   recommended option of a question, confirmed by the owner, not an answer. There is no cap on
+   the number of questions (AskUserQuestion takes up to 4 at a time, so it asks in rounds, grouped
+   by topic). The session decides on its own only where the owner says "you decide". The run's
+   job is the bulk of the build; the owner fine-tunes afterwards in normal sessions, so the plan
+   does not need to settle polish.
 **Why it waits.** The DB rehearsal is running on 0.9.4; changes land after it, reviewed at
 CHECKPOINT 7 together with the speed options (entry 18).
 **Trigger.** CHECKPOINT 7.

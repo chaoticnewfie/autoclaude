@@ -307,3 +307,5 @@ One entry per working session: what was done, what was committed. Append only.
   and his notes list the Proxmox host and VMs, so the session decided the scope itself; 3d adds
   deny rules without a confirmation step, and 1b turns outside work into scripts. Recorded as
   DEFERRED 19 item 6: the scope question is mandatory and confirmed.
+- Scott set the planning principle: many questions up front rather than assumptions; the run
+  builds the bulk, he fine-tunes interactively after. Recorded as D48 and DEFERRED 19 item 7.

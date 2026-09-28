@@ -599,3 +599,21 @@ Proxmox host as off limits during planning; he never asked for it.
 
 **Kept, as an offer during planning, not a rule.** A snapshot or backup step before a run changes
 an existing machine, because the homelab has no backup jobs; the owner decides per plan.
+
+### D48 Planning asks; it never assumes (2026-09-27)
+
+**Decision.** `/autoclaude:plan` asks the owner about every open decision, the run's scope
+included, however many questions that takes. What the code, the docs or the owner's own notes
+suggest is offered as the recommended answer and confirmed, never applied silently. The session
+decides by itself only where the owner says "you decide". The purpose of a run is the bulk of
+the build; the owner fine-tunes afterwards in normal Claude Code sessions. Supersedes the plan
+skill's "ask what the code and docs do not already answer". Implemented with D47 after the DB
+rehearsal (DEFERRED 19 items 6 and 7).
+
+**Why.** Scott: "Id rather 25 questions or more and end up with what I want than everything
+assumed and waste tokens. The point is a little extra planning time and I save most of the build
+time. Thats the goal." In the rehearsal the planning session inferred the run's scope from his
+notes and never asked, which cost him the VM he expected the run to create.
+
+**Rejected.** Keeping the interview short to save the owner's time: a wrong assumption costs a
+whole night of building.
