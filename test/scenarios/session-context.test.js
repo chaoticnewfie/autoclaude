@@ -53,7 +53,10 @@ test("run active: injects the rules, the current step, the progress tail and pen
   assert.match(ctx, /(autoclaude|autoclaude\.js") ready S1\.2/);
   assert.match(ctx, /## Current step: S1\.2 Build the thing \(attempt 2 of 3\)/);
   assert.match(ctx, /Accept: the list has 3 items/);
-  assert.doesNotMatch(ctx, /S1\.3/);
+  // The rest of the feature is listed by title (a fresh session per feature, D49); only the
+  // current step comes with its Accept lines.
+  assert.match(ctx, /## Current feature: Phase 1 One\n\n- \[x\] S1\.1 Done already\n- \[ \] S1\.2 Build the thing {2}<- current\n- \[ \] S1\.3 Later\n/);
+  assert.doesNotMatch(ctx, /Accept: c/);
   assert.match(ctx, /## Recent progress \(last 10 lines of PROGRESS\.md\)/);
   assert.match(ctx, /- line 14/);
   assert.doesNotMatch(ctx, /- line 4\n/);

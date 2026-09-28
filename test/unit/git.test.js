@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { runCommand } from "../../plugins/autoclaude/lib/proc.js";
-import { isRepo, status, currentBranch, head, branchExists, tagExists, checkoutBranch, commitAll, tag, log } from "../../plugins/autoclaude/lib/git.js";
+import { git as gitRun, isRepo, status, currentBranch, head, branchExists, tagExists, checkoutBranch, commitAll, tag, log, showFile, remoteFor, unpushedCount, pushRun } from "../../plugins/autoclaude/lib/git.js";
 
 // Git is not on PATH in every shell on the dev VM; on Windows the tests prepend its cmd dir.
 const GIT_DIR = "C:\\Program Files\\Git\\cmd";
@@ -86,6 +86,22 @@ test("commitAll commits everything with a multi-line message, then reports nothi
   assert.deepEqual(await log(root, opts), [{ sha: c.sha, subject: 'autoclaude(S1.1): first "quoted" step' }]);
 });
 
+test("commitAll never stages secrets/, even when the project does not ignore it", async () => {
+  const root = await makeRepo();
+  fs.mkdirSync(path.join(root, "secrets"));
+  fs.writeFileSync(path.join(root, "secrets", "db-password"), "hunter2\n");
+  fs.writeFileSync(path.join(root, "a.txt"), "a\n");
+  const c = await commitAll(root, "first", opts);
+  assert.equal(c.ok, true, c.stderr);
+  assert.equal(c.committed, true);
+  assert.equal(await sh("git ls-files", root), "a.txt");
+  // Only a new secret changed: nothing to commit, and the secret stays untracked.
+  fs.writeFileSync(path.join(root, "secrets", "api-key"), "k\n");
+  const again = await commitAll(root, "only a secret", opts);
+  assert.deepEqual(again, { ok: true, committed: false, sha: c.sha, stderr: "" });
+  assert.deepEqual((await status(root, opts)).entries.map((e) => e.path).sort(), ["secrets/api-key", "secrets/db-password"]);
+});
+
 test("commitAll uses the AutoClaude identity only when no user.name is configured", async () => {
   const root = await makeRepo({ identity: false });
   const globalConfig = path.join(tmpDir(), "gitconfig");
@@ -159,6 +175,96 @@ test("log returns newest first with sha and subject, limited by count", async ()
   assert.deepEqual(all.map((e) => e.subject), ["step three", "step two", "step one"]);
   assert.deepEqual(all.map((e) => e.sha), shas.slice().reverse());
   assert.equal((await log(root, { ...opts, count: 2 })).length, 2);
+});
+
+test("showFile reads a file at a revision and gives null for a missing one", async () => {
+  const root = await makeRepo();
+  fs.mkdirSync(path.join(root, "docs"));
+  fs.writeFileSync(path.join(root, "docs", "DECISIONS.md"), "# DECISIONS\n\n## D-001 (2026-09-28, S1.1) First\n");
+  await commitAll(root, "one", opts);
+  assert.match(await showFile(root, "HEAD", "docs/DECISIONS.md", opts), /## D-001/);
+  assert.match(await showFile(root, "HEAD", "docs\\DECISIONS.md", opts), /## D-001/, "Windows separators work");
+  assert.equal(await showFile(root, "HEAD", "docs/NOPE.md", opts), null);
+});
+
+// A repository with a commit on a run branch, and a bare repository as its "origin".
+async function repoWithRemote({ remote = true } = {}) {
+  const root = await makeRepo();
+  fs.writeFileSync(path.join(root, "a.txt"), "a\n");
+  await commitAll(root, "base", opts);
+  await checkoutBranch(root, "autoclaude/demo", opts);
+  fs.writeFileSync(path.join(root, "b.txt"), "b\n");
+  await commitAll(root, "autoclaude(S1.1): one", opts);
+  await tag(root, "ac-phase-1", opts);
+  let bare = null;
+  if (remote) {
+    bare = path.join(tmpDir(), "remote.git");
+    await sh(`git init -q --bare "${bare}"`, root);
+    await sh(`git remote add origin "${bare}"`, root);
+  }
+  return { root, bare };
+}
+
+test("pushRun pushes the branch with an upstream and the tag to a bare remote, then reports nothing unpushed", async () => {
+  const { root, bare } = await repoWithRemote();
+  assert.equal(await remoteFor(root, "autoclaude/demo", opts), "origin");
+  assert.equal(await unpushedCount(root, "origin", opts), 2, "nothing is on the remote yet");
+  const r = await pushRun(root, { tags: ["ac-phase-1"], ...opts });
+  assert.equal(r.ok, true, r.error);
+  assert.deepEqual([r.skipped, r.remote, r.branch, r.pushedTags, r.unpushedTags, r.unpushedCommits, r.tries], [false, "origin", "autoclaude/demo", ["ac-phase-1"], [], 0, 1]);
+  const local = await head(root, opts);
+  assert.equal(await sh("git rev-parse refs/heads/autoclaude/demo", bare), local);
+  assert.equal(await sh("git rev-list -n 1 ac-phase-1", bare), local);
+  assert.equal(await sh("git config --get branch.autoclaude/demo.remote", root), "origin", "-u set the upstream");
+  // A second push with nothing new is still fine.
+  fs.writeFileSync(path.join(root, "c.txt"), "c\n");
+  await commitAll(root, "autoclaude(S1.2): two", opts);
+  assert.equal(await unpushedCount(root, "origin", opts), 1);
+  const again = await pushRun(root, { branch: "autoclaude/demo", ...opts });
+  assert.deepEqual([again.ok, again.unpushedCommits], [true, 0]);
+});
+
+test("pushRun with no remote skips and says so; a rejected push retries once and reports what is left", async () => {
+  const { root } = await repoWithRemote({ remote: false });
+  const none = await pushRun(root, { tags: ["ac-phase-1"], ...opts });
+  assert.deepEqual([none.ok, none.skipped, none.error, none.unpushedTags, none.tries], [false, true, "no git remote is configured", ["ac-phase-1"], 0]);
+
+  // The injectable runner: every push fails, everything else is real git.
+  const calls = [];
+  const failing = async (r, args, o) => {
+    if (args[0] === "push") { calls.push(args.join(" ")); return { ok: false, code: 1, stdout: "", stderr: "fatal: unable to access remote\n  (network down)" }; }
+    return gitRun(r, args, o);
+  };
+  const { root: withRemote } = await repoWithRemote();
+  const r = await pushRun(withRemote, { tags: ["ac-phase-1"], run: failing, ...opts });
+  assert.equal(r.ok, false);
+  assert.equal(r.skipped, false);
+  assert.equal(r.tries, 2, "one retry");
+  assert.deepEqual(calls, ["push -u origin autoclaude/demo", "push -u origin autoclaude/demo"], "no tag goes out before its branch");
+  assert.equal(r.error, "fatal: unable to access remote (network down)");
+  assert.deepEqual(r.unpushedTags, ["ac-phase-1"]);
+  assert.equal(r.unpushedCommits, 2);
+
+  // The first push fails, the retry works: ok, two tries.
+  let n = 0;
+  const flaky = async (rt, args, o) => (args[0] === "push" && args[1] === "-u" && n++ === 0 ? { ok: false, code: 1, stdout: "", stderr: "ssh: connect to host timed out" } : gitRun(rt, args, o));
+  const ok = await pushRun(withRemote, { tags: ["ac-phase-1"], run: flaky, ...opts });
+  assert.deepEqual([ok.ok, ok.tries, ok.pushedTags, ok.error], [true, 2, ["ac-phase-1"], null]);
+});
+
+test("pushRun never forces: a tag moved after it was pushed is reported, not overwritten", async () => {
+  const { root, bare } = await repoWithRemote();
+  assert.equal((await pushRun(root, { tags: ["ac-phase-1"], ...opts })).ok, true);
+  const first = await sh("git rev-list -n 1 ac-phase-1", bare);
+  fs.writeFileSync(path.join(root, "d.txt"), "d\n");
+  await commitAll(root, "later", opts);
+  await tag(root, "ac-phase-1", { ...opts, force: true });
+  const r = await pushRun(root, { tags: ["ac-phase-1"], ...opts });
+  assert.equal(r.ok, false);
+  assert.match(r.error, /^tag ac-phase-1: /);
+  assert.deepEqual(r.unpushedTags, ["ac-phase-1"]);
+  assert.equal(r.unpushedCommits, 0, "the branch itself went out");
+  assert.equal(await sh("git rev-list -n 1 ac-phase-1", bare), first, "the remote tag is untouched");
 });
 
 test("a git failure comes back as ok false with stderr instead of a throw", async () => {

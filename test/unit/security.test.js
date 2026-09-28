@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { SECURITY_SCHEMA, SECURITY_TOOLS, securityWanted, securityBase, reviewDiff, evaluateSecurity, securitySection, runSecurityReview, constraintsSection, buildSecurityPrompt, CONSTRAINTS_MAX_CHARS } from "../../plugins/autoclaude/lib/security.js";
+import { SECURITY_SCHEMA, SECURITY_TOOLS, securityWanted, securityBase, reviewDiff, evaluateSecurity, securitySection, runSecurityReview, constraintsSection, buildSecurityPrompt, reviewedSteps, CONSTRAINTS_MAX_CHARS } from "../../plugins/autoclaude/lib/security.js";
 import { parsePlan, stepById } from "../../plugins/autoclaude/lib/plan.js";
 import { mergeConfig } from "../../plugins/autoclaude/lib/config.js";
 import { prepareFixture, gitEnv } from "../fixtures/prepare.js";
@@ -296,6 +296,42 @@ test("the security prompt shows the plan's Constraints & decisions and says how 
   assert.doesNotMatch(prompt, /\{\{[A-Z_]+\}\}/);
   const none = buildSecurityPrompt({ template, step: S("S1.2"), parsed, base: null, diff: "(diff)", root: "/proj" });
   assert.match(none, /\(The plan has no "Constraints & decisions" section\.\)/);
+});
+
+test("securityBase: the feature's first commit wins over tags and the run start", async () => {
+  const root = fixture();
+  gitRun(root, ["tag", "ac-phase-1"]);
+  assert.equal(await securityBase(root, { baseCommit: "abc1234", phaseBaseCommit: "fea7123" }, env), "fea7123");
+  assert.equal(await securityBase(root, { baseCommit: "abc1234", phaseBaseCommit: null }, env), "ac-phase-1");
+});
+
+test("reviewedSteps: the given list, else the phase up to this step when the diff runs from the feature's start, else the step", () => {
+  assert.deepEqual(reviewedSteps(S("S1.3"), { phaseBaseCommit: "x" }).map((s) => s.id), ["S1.1", "S1.2", "S1.3"]);
+  assert.deepEqual(reviewedSteps(S("S1.2"), { phaseBaseCommit: "x" }).map((s) => s.id), ["S1.1", "S1.2"]);
+  assert.deepEqual(reviewedSteps(S("S1.3"), { phaseBaseCommit: null }).map((s) => s.id), ["S1.3"]);
+  assert.deepEqual(reviewedSteps(S("S1.3"), null, [S("S1.2")]).map((s) => s.id), ["S1.2"]);
+});
+
+test("runSecurityReview with a feature base: the diff holds the whole feature and the prompt lists its steps", async () => {
+  const root = fixture();
+  fs.appendFileSync(path.join(root, "lib", "todos.js"), "// before the feature\n");
+  gitRun(root, ["commit", "-q", "-am", "an earlier feature"]);
+  const featureBase = gitRun(root, ["rev-parse", "HEAD"]);
+  fs.appendFileSync(path.join(root, "server.js"), "// S1.1 built and committed\n");
+  gitRun(root, ["commit", "-q", "-am", "autoclaude(S1.1): built"]);
+  fs.appendFileSync(path.join(root, "server.js"), "// S1.3 uncommitted\n");
+  const { run, calls } = fakeRun([ok(verdictOf([]))]);
+  const r = await runSecurityReview({ root, config, step: S("S1.3"), parsed, state: { baseCommit: null, phaseBaseCommit: featureBase }, env, attempt: 1, run });
+  assert.equal(r.status, "passed");
+  const prompt = calls[0].prompt;
+  assert.match(prompt, /\+\/\/ S1\.1 built and committed/);
+  assert.match(prompt, /\+\/\/ S1\.3 uncommitted/);
+  assert.doesNotMatch(prompt, /before the feature/, "an earlier feature is not reviewed again");
+  assert.match(prompt, /## What is being verified: Phase 1: Things \(steps S1\.1, S1\.2, S1\.3\)/);
+  assert.ok(["S1.1", "S1.2", "S1.3"].every((id) => prompt.includes(`**${id}**`)));
+  assert.match(prompt, /they form one feature and the diff below holds all of their changes/);
+  const saved = JSON.parse(fs.readFileSync(path.join(root, r.verdictFile), "utf8"));
+  assert.deepEqual([saved.base, saved.steps], [featureBase, ["S1.1", "S1.2", "S1.3"]]);
 });
 
 test("runSecurityReview passes the fixture plan's decisions to the reviewer", async () => {

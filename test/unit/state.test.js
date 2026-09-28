@@ -35,6 +35,14 @@ test("updateState mutates in place and keeps unknown keys", () => {
   assert.equal(loadState(root).futureKey, "kept");
 });
 
+test("a state file from before 0.10.0 gets the new keys filled in", () => {
+  const root = tmpDir();
+  fs.mkdirSync(path.join(root, ".autoclaude"));
+  fs.writeFileSync(path.join(root, ".autoclaude", "state.json"), JSON.stringify({ version: 1, status: "paused", currentStep: "S2.1" }));
+  const s = loadState(root);
+  assert.deepEqual([s.status, s.currentStep, s.fixup, s.freshSession, s.pushState], ["paused", "S2.1", null, false, null]);
+});
+
 test("a corrupt state file reads as defaults instead of throwing", () => {
   const root = tmpDir();
   fs.mkdirSync(path.join(root, ".autoclaude"));
@@ -44,7 +52,7 @@ test("a corrupt state file reads as defaults instead of throwing", () => {
 
 test("describeState reads well", () => {
   assert.equal(describeState({ ...defaultState(), status: "paused", pauseReason: "review" }), "paused (review)");
-  assert.equal(describeState({ ...defaultState(), status: "running", pauseRequested: true }), "running, pause requested after the next verified commit");
+  assert.equal(describeState({ ...defaultState(), status: "running", pauseRequested: true }), "running, pause requested after the next committed step");
   assert.equal(describeState({ ...defaultState(), status: "complete" }), "complete");
 });
 
@@ -52,5 +60,6 @@ test("defaults carry the builder session fields, and PAUSE_REASONS lists the rea
   const s = defaultState();
   assert.equal(s.builderSessionId, null);
   assert.equal(s.haltSession, false);
+  assert.deepEqual([s.fixup, s.freshSession, s.phaseBaseCommit, s.phaseStartedAt, s.pushState], [null, false, null, null, null]);
   assert.deepEqual([...PAUSE_REASONS].sort(), ["blocked", "commit-failed", "infra", "review", "security", "step-failed", "stuck", "weekly-limit"]);
 });

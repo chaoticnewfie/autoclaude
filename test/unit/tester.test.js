@@ -3,7 +3,9 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { buildPrompt, evaluateVerdict, mcpConfigFor, testChanges, runBrowserCheck, verdictSection, VERDICT_SCHEMA, ALLOWED_TOOLS } from "../../plugins/autoclaude/lib/tester.js";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
+import { buildPrompt, evaluateVerdict, mcpConfigFor, testChanges, runBrowserCheck, verdictSection, turnScale, acceptCount, VERDICT_SCHEMA, ALLOWED_TOOLS } from "../../plugins/autoclaude/lib/tester.js";
 import { parsePlan, stepById } from "../../plugins/autoclaude/lib/plan.js";
 import { mergeConfig } from "../../plugins/autoclaude/lib/config.js";
 import { prepareFixture, gitEnv } from "../fixtures/prepare.js";
@@ -184,4 +186,126 @@ test("runBrowserCheck: no retry when the gate deadline is too close", async () =
   const { r, calls } = await check([infra("timed out")], { deadlineMs: 1000, now: () => (t += 10) });
   assert.deepEqual([r.status, calls.length], ["infra", 1]);
   assert.match(r.failed, /no time left for a retry/);
+});
+
+// ---------- verification once per feature (D49) ----------
+
+const PHASE_PLAN = `# Shop plan
+
+## Phase 1: Things
+- [~] **S1.1** List things
+  - Accept: /things lists 3 items
+  - Accept: each item shows its name
+- [~] **S1.2** Count things
+  - Accept: GET /api/count returns 3
+  - Test: test/count.test.js
+  - Tags: no-ui
+- [ ] **S1.3** Price things
+${Array.from({ length: 10 }, (_, i) => `  - Accept: price rule ${i + 1} costs $${i}.00`).join("\n")}
+  - Note: log in as demo / demo
+
+## Phase 2: Later
+- [ ] **S2.1** Only
+  - Accept: only
+`;
+const phased = parsePlan(PHASE_PLAN);
+const phaseSteps = phased.phases[0].steps;
+const realTemplate = (name) => fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "plugins", "autoclaude", "prompts", name), "utf8");
+
+test("turnScale: tester.maxTurns per 5 Accept lines, at least 1x, at most 4x; acceptCount sums the steps", () => {
+  assert.deepEqual([0, 1, 5, 6, 10, 11, 20, 21, 90].map(turnScale), [1, 1, 1, 2, 2, 3, 4, 4, 4]);
+  assert.equal(acceptCount(phaseSteps), 13);
+});
+
+test("buildPrompt, phase mode: every step with its Accept lines, the count, no smoke check, nothing left unfilled", () => {
+  const out = buildPrompt("tester", { template: realTemplate("tester.md"), url: "http://x", step: phaseSteps[2], steps: phaseSteps, parsed: phased, testChanges: "", screenshotDir: "d", turns: 120 });
+  assert.match(out, /## The feature under test: Phase 1: Things \(steps S1\.1, S1\.2, S1\.3\)/);
+  for (const s of phaseSteps) assert.ok(out.includes(`**${s.id}** ${s.title}`), s.id);
+  assert.match(out, /price rule 10 costs \$9\.00/, "$ stays literal");
+  assert.match(out, /check EVERY `Accept:` line above \(13 in all\): one criterion per Accept line, in the order they appear/);
+  assert.match(out, /for example "S1\.1: <the Accept text>"/);
+  assert.match(out, /nothing else to smoke-check/);
+  assert.doesNotMatch(out, /Features already verified in this phase|Smoke-check the features/);
+  assert.match(out, /## Test changes in this feature/);
+  assert.match(out, /You have 120 turns/);
+  assert.doesNotMatch(out, /\{\{[A-Z_]+\}\}/);
+
+  const one = buildPrompt("tester", { template: realTemplate("tester.md"), url: "http://x", step: stepById(parsed, "S1.2"), parsed, screenshotDir: "d" });
+  assert.match(one, /## The step under test: S1\.2/);
+  assert.match(one, /## Features already verified in this phase\n\n- \[x\] \*\*S1\.1\*\* List things/);
+  assert.match(one, /Smoke-check the features that were already verified/);
+  assert.match(one, /\(1 in all\)/);
+  assert.doesNotMatch(one, /\{\{[A-Z_]+\}\}/);
+});
+
+test("buildPrompt, bug bash: the phase's steps in phase mode, and built [~] steps count as features without it", () => {
+  const withSteps = buildPrompt("bugbash", { template: "{{FEATURES}}|{{PHASE}}", url: "u", step: phaseSteps[2], steps: phaseSteps, parsed: phased, screenshotDir: "d" });
+  assert.ok(["S1.1", "S1.2", "S1.3"].every((id) => withSteps.includes(`**${id}**`)));
+  assert.match(withSteps, /\|Phase 1: Things$/);
+  const without = buildPrompt("bugbash", { template: "{{FEATURES}}", url: "u", step: phaseSteps[2], parsed: phased, screenshotDir: "d" });
+  assert.ok(["S1.1", "S1.2", "S1.3"].every((id) => without.includes(`**${id}**`)), "built steps are part of the feature");
+  assert.doesNotMatch(without, /S2\.1/);
+  assert.doesNotMatch(buildPrompt("bugbash", { template: realTemplate("bugbash.md"), url: "u", steps: phaseSteps, parsed: phased, screenshotDir: "d" }), /\{\{[A-Z_]+\}\}/);
+});
+
+test("runBrowserCheck, phase mode: no-ui steps left out, turns and timeout scale with the Accept lines, coverage noted", async () => {
+  const root = tmp();
+  const { run, calls } = fakeRun([ok({ ...good, criteria: [{ text: "S1.1: /things lists 3 items", result: "pass", evidence: "3 rows" }] })]);
+  const r = await runBrowserCheck({ kind: "tester", root, config, step: phaseSteps[2], steps: phaseSteps, parsed: phased, state: { phaseBaseCommit: null }, env: process.env, attempt: 2, run });
+  assert.equal(r.status, "passed");
+  const c = calls[0];
+  assert.doesNotMatch(c.prompt, /\*\*S1\.2\*\*/, "the no-ui step is verified by its tests, not the browser");
+  assert.match(c.prompt, /\(12 in all\)/);
+  assert.equal(c.args[c.args.indexOf("--max-turns") + 1], "120", "12 lines: 3 x 40 turns");
+  assert.equal(c.timeoutMs, 3 * 900 * 1000);
+  assert.equal(c.cwd, path.join(root, ".autoclaude", "reports", "S1.3-2-tester"));
+  assert.match(r.sections[0].body, /Coverage: 1 criteria reported for 12 Accept lines/);
+  const saved = JSON.parse(fs.readFileSync(path.join(root, r.verdictFile), "utf8"));
+  assert.deepEqual([saved.step, saved.steps, saved.acceptLines, saved.maxTurns], ["S1.3", ["S1.1", "S1.3"], 12, 120]);
+
+  // The deadline still caps the scaled timeout; the bug bash keeps its own budget.
+  const bb = fakeRun([ok(good)]);
+  await runBrowserCheck({ kind: "bugbash", root: tmp(), config, steps: phaseSteps, parsed: phased, env: process.env, run: bb.run, deadlineMs: Date.now() + 100000 });
+  assert.equal(bb.calls[0].args[bb.calls[0].args.indexOf("--max-turns") + 1], "60");
+  assert.ok(bb.calls[0].timeoutMs <= 100000);
+  assert.match(bb.calls[0].prompt, /\*\*S1\.2\*\*/, "the bug bash reads every step of the phase");
+
+  const cap = parsePlan(`# P\n\n## Phase 1: A\n- [ ] **S1.1** Big\n${Array.from({ length: 30 }, (_, i) => `  - Accept: line ${i}`).join("\n")}\n`);
+  const capped = fakeRun([ok(good)]);
+  await runBrowserCheck({ kind: "tester", root: tmp(), config, steps: cap.steps, parsed: cap, state: {}, run: capped.run });
+  assert.equal(capped.calls[0].args[capped.calls[0].args.indexOf("--max-turns") + 1], "160", "capped at 4x");
+});
+
+test("runBrowserCheck, phase mode: a feature of no-ui steps only is skipped without a browser", async () => {
+  const noUi = parsePlan("# P\n\n## Phase 1: A\n- [~] **S1.1** Logic\n  - Accept: a\n  - Test: t.js\n  - Tags: no-ui\n");
+  const { run, calls } = fakeRun([ok(good)]);
+  const r = await runBrowserCheck({ kind: "tester", root: tmp(), config, steps: noUi.steps, parsed: noUi, state: {}, run });
+  assert.deepEqual([r.status, calls.length, r.sections[0].title], ["passed", 0, "Browser tester: skipped"]);
+});
+
+test("testChanges from the feature's first commit shows committed and uncommitted test changes; runBrowserCheck reads the base from the run state", async () => {
+  const env = gitEnv(process.env);
+  const root = tmp();
+  prepareFixture({ dest: root, plan: "happy", git: true, env });
+  const git = (args) => spawnSync("git", args, { cwd: root, encoding: "utf8", env }).stdout.trim();
+  const base = git(["rev-parse", "HEAD"]);
+  const t = path.join(root, "test", "todos.test.js");
+  fs.writeFileSync(t, fs.readFileSync(t, "utf8").replace(/  assert\.throws\(\(\) => s\.toggle\(9\), \/no todo\/\);\n/, ""));
+  git(["commit", "-q", "-am", "autoclaude(S1.1): built"]);
+  fs.writeFileSync(path.join(root, "test", "new.test.js"), "// new\n");
+
+  const since = await testChanges(root, env, 6000, base);
+  assert.match(since, /M +test\/todos\.test\.js/);
+  assert.match(since, /\?\? test\/new\.test\.js/);
+  assert.match(since, /-  assert\.throws\(\(\) => s\.toggle\(9\)/, "the committed weakening is visible");
+  assert.match(since, new RegExp(`against the commit this feature started from \\(${base.slice(0, 7)}\\)`));
+  const last = await testChanges(root, env);
+  assert.doesNotMatch(last, /todos\.test\.js/, "without a base only the uncommitted changes show");
+  assert.match(await testChanges(root, env, 6000, "no-such-commit"), /against the last verified commit/, "an unknown base falls back");
+
+  fs.mkdirSync(path.join(root, ".autoclaude"), { recursive: true });
+  fs.writeFileSync(path.join(root, ".autoclaude", "state.json"), JSON.stringify({ status: "running", phaseBaseCommit: base }));
+  const { run, calls } = fakeRun([ok(good)]);
+  await runBrowserCheck({ kind: "tester", root, config, steps: phaseSteps, parsed: phased, env, run });
+  assert.match(calls[0].prompt, /-  assert\.throws\(\(\) => s\.toggle\(9\)/);
 });

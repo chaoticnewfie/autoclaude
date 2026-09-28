@@ -1,6 +1,6 @@
 {
   "name": "autoclaude",
-  "version": "0.9.4",
+  "version": "0.10.0",
   "description": "Runs a project's PLAN.md step by step, unattended, and verifies every step (tests, then a real headless browser) before moving on.",
   "author": {
     "name": "AutoClaude"

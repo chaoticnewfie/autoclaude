@@ -22,7 +22,8 @@ function copyPlugin() {
 
 function project() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "autoclaude-space-proj-"));
-  fs.writeFileSync(path.join(root, "autoclaude.config.json"), JSON.stringify({ version: 1 }));
+  // Pushing is on by default since 0.10.0; off here so a plain push is something the guard denies.
+  fs.writeFileSync(path.join(root, "autoclaude.config.json"), JSON.stringify({ version: 1, git: { push: false } }));
   fs.writeFileSync(path.join(root, "PLAN.md"), "# P plan\n\n## Phase 1: A\n- [ ] **S1.1** One\n  - Accept: a\n");
   saveState(root, { ...defaultState(), status: "running", currentStep: "S1.1" });
   return root;

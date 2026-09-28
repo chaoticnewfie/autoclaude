@@ -112,3 +112,77 @@ test("stdout channel prints and logs; a failing server falls back to stdout with
   assert.match(out2.text, /delivery through ntfy failed/);
   assert.match(fs.readFileSync(log, "utf8"), /FAILED: ntfy responded 500/);
 });
+
+// ---------- configurable alerts (P8.6) ----------
+
+test("SWITCHABLE_EVENTS are exactly the notify.events keys of the config defaults", async () => {
+  const { SWITCHABLE_EVENTS } = await import("../../plugins/autoclaude/lib/notify.js");
+  const { DEFAULTS } = await import("../../plugins/autoclaude/lib/config.js");
+  assert.deepEqual([...SWITCHABLE_EVENTS], ["featureVerified", "stepVerified", "runStarted", "runResumed", "pausedByOwner"]);
+  assert.deepEqual(Object.keys(DEFAULTS.notify.events), [...SWITCHABLE_EVENTS]);
+});
+
+test("eventEnabled: switchable events follow the config, falling back to the defaults; critical events are always on", async () => {
+  const { eventEnabled } = await import("../../plugins/autoclaude/lib/notify.js");
+  const { mergeConfig } = await import("../../plugins/autoclaude/lib/config.js");
+  const defaults = mergeConfig({});
+  assert.equal(eventEnabled(defaults, "featureVerified"), true);
+  assert.equal(eventEnabled(defaults, "stepVerified"), false);
+  assert.equal(eventEnabled(defaults, "runStarted"), false);
+  const cfg = mergeConfig({ notify: { events: { featureVerified: false, stepVerified: true, runResumed: true } } });
+  assert.deepEqual(["featureVerified", "stepVerified", "runResumed", "pausedByOwner"].map((e) => eventEnabled(cfg, e)), [false, true, true, false]);
+  // Critical alerts cannot be switched off, even by a config that names them.
+  const silenced = { notify: { events: { planComplete: false, blocked: false, stepFailed: false } } };
+  for (const e of ["planComplete", "blocked", "stepFailed", "pushFailed", "anythingElse"]) assert.equal(eventEnabled(silenced, e), true, e);
+  // No config at all: the built-in defaults.
+  assert.equal(eventEnabled(null, "featureVerified"), true);
+  assert.equal(eventEnabled({}, "pausedByOwner"), false);
+});
+
+test("notifyEvent: an event that is on is sent and logged in the project; one that is off is only logged as skipped", async () => {
+  const { notifyEvent } = await import("../../plugins/autoclaude/lib/notify.js");
+  const { mergeConfig } = await import("../../plugins/autoclaude/lib/config.js");
+  const root = tmpDir();
+  const log = path.join(root, ".autoclaude", "logs", "notify.log");
+  const cfg = mergeConfig({});
+  const out = new FakeOut();
+  const r1 = await notifyEvent(root, cfg, "featureVerified", "Phase 2 (Admin page) passed: 5 steps, 14 Accept lines", { env: {}, machineFile: NO_FILE, stdout: out });
+  assert.deepEqual([r1.event, r1.sent, r1.skipped, r1.channel, r1.ok], ["featureVerified", true, false, "stdout", true]);
+  assert.match(out.text, /AutoClaude: feature verified\nPhase 2 \(Admin page\) passed/);
+  assert.match(fs.readFileSync(log, "utf8"), /\[default\] stdout AutoClaude: feature verified: Phase 2 \(Admin page\) passed/);
+
+  const calls = [];
+  const fake = async (msg, opts) => { calls.push({ msg, opts }); return { channel: "ntfy", ok: true, status: 200, error: null, fallback: false }; };
+  const r2 = await notifyEvent(root, cfg, "stepVerified", "S2.3 committed", { notify: fake });
+  assert.deepEqual([r2.sent, r2.skipped], [false, true]);
+  assert.equal(calls.length, 0, "a switched-off event is never sent");
+  assert.match(fs.readFileSync(log, "utf8"), /skipped: event stepVerified is off/);
+
+  // A critical event goes out even when every switchable one is off; message objects keep their fields.
+  const allOff = mergeConfig({ notify: { events: { featureVerified: false, stepVerified: false, runStarted: false, runResumed: false, pausedByOwner: false } } });
+  const r3 = await notifyEvent(root, allOff, "planComplete", { title: "AutoClaude: plan complete", message: "28 of 28", priority: "high" }, { notify: fake, env: { X: "1" } });
+  assert.equal(r3.sent, true);
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0].msg, { title: "AutoClaude: plan complete", message: "28 of 28", priority: "high" });
+  assert.equal(calls[0].opts.logFile, log);
+  assert.deepEqual(calls[0].opts.env, { X: "1" });
+  assert.equal(calls[0].opts.notify, undefined, "the sender itself is not passed on");
+
+  // Switched on by the owner: runStarted goes out; a sender that throws never breaks the caller.
+  const on = mergeConfig({ notify: { events: { runStarted: true } } });
+  const r4 = await notifyEvent(root, on, "runStarted", "Starting P1.1", { notify: async () => { throw new Error("boom"); } });
+  assert.deepEqual([r4.sent, r4.ok, r4.error], [false, false, "boom"]);
+  assert.match(fs.readFileSync(log, "utf8"), /event runStarted FAILED: boom/);
+});
+
+test("notifyEvent delivers a feature alert through a real ntfy endpoint", async () => {
+  const { notifyEvent } = await import("../../plugins/autoclaude/lib/notify.js");
+  const { mergeConfig } = await import("../../plugins/autoclaude/lib/config.js");
+  const { server, requests, url } = await startServer();
+  const root = tmpDir();
+  const r = await notifyEvent(root, mergeConfig({}), "featureVerified", "Phase 1 passed", { ntfyUrl: url + "/topic", env: {}, machineFile: NO_FILE, stdout: new FakeOut() });
+  server.close();
+  assert.deepEqual([r.sent, r.channel, r.status], [true, "ntfy", 200]);
+  assert.equal(requests[0].headers.title, "AutoClaude: feature verified");
+  assert.equal(requests[0].body, "Phase 1 passed");
+});

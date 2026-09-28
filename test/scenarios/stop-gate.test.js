@@ -21,18 +21,27 @@ const env = gitEnv({ ...process.env, PATH: `${path.dirname(process.execPath)}${p
 const PASS = [{ name: "unit", command: `${node} -e "process.exit(0)"`, timeoutSec: 60 }];
 const FAIL = [{ name: "unit", command: `${node} -e "console.log('boom'); process.exit(1)"`, timeoutSec: 60 }];
 
-function scratch(plan = "happy", checks = PASS) {
+// Most scenarios test the per-step path (gate.verifyAt "step"); the per-feature ones, further
+// down, ask for "phase", the default since 0.10.0.
+function scratch(plan = "happy", checks = PASS, { verifyAt = "step" } = {}) {
   const dest = fs.mkdtempSync(path.join(os.tmpdir(), "autoclaude-gate-"));
   prepareFixture({ dest, plan, git: true, checks, devServer: { command: null, url: null, healthPath: "/", startTimeoutSec: 10 }, env });
+  const cfgFile = path.join(dest, "autoclaude.config.json");
+  fs.writeFileSync(cfgFile, JSON.stringify({ ...JSON.parse(fs.readFileSync(cfgFile, "utf8")), gate: { verifyAt } }, null, 2) + "\n");
+  spawnSync("git", ["commit", "-qam", `fixture: verify per ${verifyAt}`], { cwd: dest, env });
   saveState(dest, { ...defaultState(), status: "running", currentStep: "S1.1", tickedByGate: [], startedAt: new Date().toISOString() });
   return dest;
 }
 
 const sent = [];
-// No real checker ever runs in these scenarios: tests that need one inject a fake.
-const deps = { env, notify: async (msg) => { sent.push(msg); return { ok: true }; }, stdout: { write() {} }, runTester: null, runSecurity: null };
+// No real checker ever runs in these scenarios: tests that need one inject a fake. Nothing
+// touches this machine's Docker: the footprint cleanup and the hand-back are off unless a test
+// injects a fake.
+const deps = { env, notify: async (msg) => { sent.push(msg); return { ok: true }; }, stdout: { write() {} }, runTester: null, runSecurity: null, finishFootprint: null, writeHandoff: null };
 const gate = (root, extra = {}) => runGate({ cwd: root, session_id: "s", hook_event_name: "Stop", stop_hook_active: false }, { ...deps, root, ...extra });
 const gitLog = (root) => spawnSync("git", ["log", "--format=%s"], { cwd: root, encoding: "utf8", env }).stdout.trim().split("\n");
+const gitBody = (root, rev = "HEAD") => spawnSync("git", ["log", "-1", "--format=%B", rev], { cwd: root, encoding: "utf8", env }).stdout.trim().replace(/\r\n/g, "\n");
+const gitTags = (root) => spawnSync("git", ["tag"], { cwd: root, encoding: "utf8", env }).stdout.trim();
 const planOf = (root) => parsePlan(fs.readFileSync(path.join(root, "PLAN.md"), "utf8"));
 
 test("not running or nested role: allow without side effects", async () => {
@@ -70,8 +79,9 @@ test("no ready marker: nudge with the step text, then pause as stuck after 3 sto
   assert.match(sent.at(-1).title, /stuck on S1\.1/);
 });
 
-test("ready with passing checks: tick, progress line, commit, advance to the next step", async () => {
+test("ready with passing checks: tick, progress line, commit with a body, advance to the next step", async () => {
   const root = scratch();
+  fs.appendFileSync(path.join(root, "docs", "DECISIONS.md"), "\n## D-001 (2026-09-28, S1.1) Put the button under the list\n- Question: where\n");
   writeReady(root, "S1.1");
   const r = await gate(root);
   assert.equal(r.decision, "block", JSON.stringify(r.events));
@@ -88,6 +98,45 @@ test("ready with passing checks: tick, progress line, commit, advance to the nex
   assert.equal(fs.existsSync(path.join(root, ".autoclaude", "ready.json")), false);
   const st = spawnSync("git", ["status", "--porcelain"], { cwd: root, encoding: "utf8", env }).stdout.trim();
   assert.equal(st, "", "the tree is clean after the gate commit");
+  const body = gitBody(root);
+  assert.match(body, /^autoclaude\(S1\.1\): Clear completed todos\n\nVerified S1\.1, attempt 1\.\n\nAccept:\nS1\.1 Clear completed todos\n  - the page shows a button labelled "Clear completed" under the list\n/);
+  assert.match(body, /\nChecks:\n- unit: passed in \d+ s\n/);
+  assert.match(body, /\nDecisions since the previous gate commit:\n- D-001 \(2026-09-28, S1\.1\) Put the button under the list\n/);
+  assert.match(body, /\nFindings filed: 0\.\nReport: \.autoclaude\/reports\/S1\.1-1\.md\.$/);
+  assert.ok(fs.existsSync(path.join(root, ".autoclaude", "reports", "S1.1-1.md")), "a pass writes its report too");
+  // git.push is on by default since 0.10.0; with no remote the push is skipped, never failed.
+  assert.ok(s.pushState === null || (s.pushState.skipped && s.pushState.error === "no git remote is configured"), JSON.stringify(s.pushState));
+});
+
+test("step mode: the checks see the plan tick and the PROGRESS line, and a failure takes both out again", async () => {
+  const sees = { name: "sees-tick", command: `${node} -e "const f=require('fs');process.exit(f.readFileSync('PLAN.md','utf8').includes('- [x] **S1.1**')&&f.readFileSync('PROGRESS.md','utf8').includes('S1.1 Clear completed todos (attempt 1)')?0:1)"`, timeoutSec: 60 };
+  const root = scratch("happy", [sees, ...FAIL]);
+  const progressBefore = fs.readFileSync(path.join(root, "PROGRESS.md"), "utf8");
+  writeReady(root, "S1.1");
+  const r = await gate(root);
+  assert.match(r.reason, /S1\.1 attempt 1\/3 failed: check "unit" failed/, "sees-tick passed first");
+  assert.equal(stepById(planOf(root), "S1.1").marker, " ");
+  assert.equal(fs.readFileSync(path.join(root, "PROGRESS.md"), "utf8"), progressBefore);
+  assert.equal(spawnSync("git", ["status", "--porcelain"], { cwd: root, encoding: "utf8", env }).stdout.trim(), "");
+  assert.equal(fs.existsSync(path.join(root, ".autoclaude", "verify-pending.json")), false);
+});
+
+test("a verification cut off by the hook's timeout is undone on the next stop", async () => {
+  const root = scratch();
+  const planFile = path.join(root, "PLAN.md");
+  const progressFile = path.join(root, "PROGRESS.md");
+  const plan = fs.readFileSync(planFile, "utf8");
+  const progressText = fs.readFileSync(progressFile, "utf8");
+  fs.writeFileSync(path.join(root, ".autoclaude", "verify-pending.json"), JSON.stringify({ step: "S1.1", plan, progress: progressText }));
+  fs.writeFileSync(planFile, plan.replace("- [ ] **S1.1**", "- [x] **S1.1**"));
+  fs.appendFileSync(progressFile, "- 2026-09-28 S1.1 Clear completed todos (attempt 1)\n");
+  const r = await gate(root);
+  assert.equal(r.events[0].type, "verify-interrupted");
+  assert.equal(r.decision, "block");
+  assert.match(r.reason, /Continue S1\.1/, "no integrity complaint: the tick was the gate's own");
+  assert.equal(fs.readFileSync(planFile, "utf8"), plan);
+  assert.equal(fs.readFileSync(progressFile, "utf8"), progressText);
+  assert.equal(fs.existsSync(path.join(root, ".autoclaude", "verify-pending.json")), false);
 });
 
 test("ready with failing checks: attempts count up, reports are written, the third failure pauses with [!]", async () => {
@@ -168,9 +217,42 @@ test("last step passes: the plan completes, the run stops, the summary goes out"
   assert.equal(s.status, "complete");
   assert.equal(s.currentStep, null);
   assert.match(sent.at(-1).title, /plan complete/);
-  assert.match(sent.at(-1).message, /Steps: 1\/1 verified\.\nAttempts: 1 for 1 step \(1 passed first time\)\./);
-  assert.match(sent.at(-1).message, /Decisions logged: 0\. Follow-ups: 0\. Security findings filed: 0\./);
+  assert.match(sent.at(-1).message, /Steps: 1\/1 verified/);
+  assert.match(sent.at(-1).message, /push/i, "the push state is stated");
   assert.match(sent.at(-1).message, /Review the commits, docs\/DECISIONS\.md and docs\/BLOCKERS\.md before merging/);
+});
+
+test("plan complete: the footprint is cleaned up, the hand-back is written, committed and named in the alert", async () => {
+  const root = scratch("broken", PASS);
+  const calls = [];
+  const finishFootprint = async (r, opts) => { calls.push(["footprint", r, opts]); return { removed: ["volume demo_data"], kept: [], runningCreated: [], secretsCreated: [], errors: [] }; };
+  const writeHandoff = async (a) => {
+    calls.push(["handoff", a.footprint, a.state.status, a.parsed.steps.length]);
+    const file = path.join(a.root, "HANDOFF.md");
+    fs.writeFileSync(file, "# Hand-back\n");
+    return { path: file, summary: { built: 1, ownerItems: [], secretsCreated: [], openFindings: 0, ownerReviewDecisions: [], runDecisions: 0, push: a.state.pushState, footprint: a.footprint } };
+  };
+  writeReady(root, "S1.1");
+  const r = await gate(root, { finishFootprint, writeHandoff });
+  assert.equal(r.decision, "allow", JSON.stringify(r.events));
+  assert.deepEqual([calls[0][0], calls[0][1], calls[0][2].remove, !!calls[0][2].config], ["footprint", root, true, true]);
+  assert.deepEqual(calls[1], ["handoff", { removed: ["volume demo_data"], kept: [], runningCreated: [], secretsCreated: [], errors: [] }, "complete", 1]);
+  assert.equal(gitLog(root)[0], "autoclaude: hand-back");
+  assert.match(spawnSync("git", ["show", "--name-only", "--format=", "HEAD"], { cwd: root, encoding: "utf8", env }).stdout, /HANDOFF\.md/);
+  assert.equal(spawnSync("git", ["status", "--porcelain"], { cwd: root, encoding: "utf8", env }).stdout.trim(), "");
+  assert.match(sent.at(-1).message, /HANDOFF\.md/, "the alert points at the hand-back");
+  assert.equal(loadState(root).status, "complete");
+
+  // A hand-back or footprint module that throws never stops the completion.
+  const root2 = scratch("broken", PASS);
+  writeReady(root2, "S1.1");
+  const r2 = await gate(root2, { finishFootprint: async () => { throw new Error("docker exploded"); }, writeHandoff: async () => { throw new Error("disk full"); } });
+  assert.equal(r2.decision, "allow");
+  assert.equal(loadState(root2).status, "complete");
+  assert.match(sent.at(-1).title, /plan complete/);
+  const log = fs.readFileSync(path.join(root2, ".autoclaude", "logs", "gate.log"), "utf8");
+  assert.match(log, /footprint cleanup failed: docker exploded/);
+  assert.match(log, /hand-back failed: disk full/);
 });
 
 test("a step that passes but cannot be committed pauses the run; resume commits it and the plan then completes", async () => {
@@ -197,6 +279,7 @@ test("a step that passes but cannot be committed pauses the run; resume commits 
   const c = await commitPending(project, loadState(root), { env });
   assert.equal(c.ok, true, c.error);
   assert.match(gitLog(root)[0], /^autoclaude\(S1\.1\): /);
+  assert.equal(gitTags(root), "ac-phase-1", "S1.1 closed its phase, so resume tags it the way the gate would have");
   s = loadState(root);
   assert.deepEqual(s.uncommitted, []);
   resumeRun(project, s);
@@ -248,8 +331,8 @@ function scratchUi(plan = "happy") {
 
 function fakeBrowser(byKind) {
   const calls = [];
-  const runTester = async ({ kind, step }) => {
-    calls.push(`${kind}:${step.id}`);
+  const runTester = async ({ kind, step, steps }) => {
+    calls.push(`${kind}:${step.id}${steps ? `[${steps.map((s) => s.id).join(",")}]` : ""}`);
     const r = typeof byKind[kind] === "function" ? byKind[kind](calls.length) : byKind[kind];
     return r || { status: "passed", sections: [{ title: `${kind}: passed`, body: "ok" }], followUps: [] };
   };
@@ -555,4 +638,322 @@ test("re-baseline (D33): a current step the owner unticked or removed is re-reso
   assert.equal(r.decision, "block");
   assert.equal(r.events.find((e) => e.type === "rebaselined").step, "S1.1");
   assert.match(r.reason, /Continue S1\.1/);
+});
+
+// ---------- Phase 8: verify once per feature (gate.verifyAt "phase", D49) ----------
+
+const FEATURES = "# Features plan\n\n## Phase 1: Lists\n- [ ] **S1.1** One\n  - Accept: the page shows one\n  - Tags: ui\n- [ ] **S1.2** Two\n  - Accept: the page shows two\n  - Accept: two stays after a reload\n  - Tags: ui\n- [ ] **S1.3** Three\n  - Accept: the store counts three\n  - Test: test/todos.test.js\n  - Tags: no-ui\n\n## Phase 2: More\n- [ ] **S2.1** Four\n  - Accept: the page shows four\n  - Tags: ui\n";
+// Every run of this check adds one character to .autoclaude/check-runs (gitignored).
+const COUNT = { name: "unit", command: `${node} -e "require('fs').appendFileSync('.autoclaude/check-runs','x')"`, timeoutSec: 60 };
+const checkRuns = (root) => { try { return fs.readFileSync(path.join(root, ".autoclaude", "check-runs"), "utf8").length; } catch { return 0; } };
+const rev = (cwd, ref) => spawnSync("git", ["rev-parse", "--verify", "-q", ref], { cwd, encoding: "utf8", env }).stdout.trim();
+const treeClean = (root) => spawnSync("git", ["status", "--porcelain"], { cwd: root, encoding: "utf8", env }).stdout.trim() === "";
+
+function scratchFeatures({ checks = [COUNT], git = null } = {}) {
+  const root = scratch("happy", checks, { verifyAt: "phase" });
+  fs.writeFileSync(path.join(root, "PLAN.md"), FEATURES);
+  const cfgFile = path.join(root, "autoclaude.config.json");
+  const cfg = JSON.parse(fs.readFileSync(cfgFile, "utf8"));
+  cfg.devServer = { command: "npm run dev", url: "http://127.0.0.1:4173", healthPath: "/health", startTimeoutSec: 10 };
+  if (git) cfg.git = git;
+  fs.writeFileSync(cfgFile, JSON.stringify(cfg, null, 2) + "\n");
+  spawnSync("git", ["commit", "-qam", "fixture: features plan"], { cwd: root, env });
+  return root;
+}
+
+function setChecks(root, checks) {
+  const cfgFile = path.join(root, "autoclaude.config.json");
+  fs.writeFileSync(cfgFile, JSON.stringify({ ...JSON.parse(fs.readFileSync(cfgFile, "utf8")), checks }, null, 2) + "\n");
+}
+
+async function buildFirstTwo(root, d) {
+  for (const id of ["S1.1", "S1.2"]) {
+    writeReady(root, id);
+    const r = await gate(root, d);
+    assert.match(r.reason, new RegExp(`^${id.replace(".", "\\.")} built and committed`), JSON.stringify(r.events));
+  }
+}
+
+const withFollowUp = { status: "passed", sections: [{ title: "Browser tester: passed", body: "ok" }], followUps: [{ severity: "medium", title: "the two is hard to read", actual: "grey on grey", repro: "open /", expected: "contrast", foundBy: "tester" }] };
+
+test("verifyAt phase: two steps are built without checks, the third verifies the whole phase once, ticks it and tags it", async () => {
+  const root = scratchFeatures();
+  const base = rev(root, "HEAD");
+  const seen = [];
+  const { calls, deps: b } = fakeBrowser({ tester: () => { seen.push({ plan: planOf(root).steps.map((s) => s.marker).join(""), progress: fs.readFileSync(path.join(root, "PROGRESS.md"), "utf8") }); return null; } });
+  writeReady(root, "S1.1");
+  let r = await gate(root, b);
+  assert.equal(r.decision, "block", JSON.stringify(r.events));
+  assert.match(r.reason, /^S1\.1 built and committed \([0-9a-f]{7}\); Phase 1 is verified as a whole when its last step is ready, so run only the tests for what you change\. Next: S1\.2 Two\./);
+  assert.equal(r.events.some((e) => e.type === "verify"), false, "no verification for a built step");
+  assert.equal(checkRuns(root), 0);
+  assert.deepEqual(calls, []);
+  assert.equal(stepById(planOf(root), "S1.1").marker, "~");
+  assert.equal(gitLog(root)[0], "autoclaude(S1.1): One");
+  assert.match(gitBody(root), /\n\nBuilt, not verified yet: S1\.1 is verified with Phase 1 \(Lists\), all of it at once, when the phase's last step is ready\.\n\nAccept:\nS1\.1 One\n  - the page shows one\n\nChecks: none at this step\.\n/);
+  assert.match(fs.readFileSync(path.join(root, "PROGRESS.md"), "utf8"), /S1\.1 One \(built; verified with Phase 1\)/);
+  let s = loadState(root);
+  assert.deepEqual([s.currentStep, s.tickedByGate, s.phaseBaseCommit], ["S1.2", ["S1.1"], base]);
+  assert.ok(s.phaseStartedAt);
+  assert.ok(r.events.some((e) => e.type === "alert-skipped" && e.event === "stepVerified"), "step alerts are off by default");
+  assert.ok(treeClean(root));
+  // An ordinary stop between steps: the [~] is the gate's own tick, so no integrity complaint.
+  r = await gate(root, b);
+  assert.match(r.reason, /^Continue S1\.2/);
+
+  writeReady(root, "S1.2");
+  r = await gate(root, b);
+  assert.match(r.reason, /^S1\.2 built and committed/);
+  assert.equal(loadState(root).phaseBaseCommit, base, "set once, at the phase's first step");
+
+  const sentBefore = sent.length;
+  writeReady(root, "S1.3");
+  r = await gate(root, b);
+  assert.equal(r.decision, "block", JSON.stringify(r.events));
+  assert.equal(checkRuns(root), 1, "the checks ran once for the whole phase");
+  assert.deepEqual(calls, ["tester:S1.3[S1.1,S1.2]", "bugbash:S1.3"], "the tester gets every UI step of the phase");
+  assert.equal(seen[0].plan, "xxx ", "the tester saw the phase ticked, as it is committed");
+  assert.match(seen[0].progress, /S1\.1 One \(attempt 1\)\n- \d{4}-\d\d-\d\d S1\.2 Two \(attempt 1\)\n- \d{4}-\d\d-\d\d S1\.3 Three \(attempt 1\)\n$/);
+  assert.match(r.reason, /^Phase 1 \(Lists\) verified and committed \([0-9a-f]{7}\)\. Next: S2\.1 Four\./);
+  assert.deepEqual(planOf(root).steps.map((x) => x.marker), ["x", "x", "x", " "]);
+  assert.deepEqual(gitLog(root).slice(0, 3), ["autoclaude(S1.3): Three", "autoclaude(S1.2): Two", "autoclaude(S1.1): One"]);
+  const body = gitBody(root);
+  assert.match(body, /\n\nVerified Phase 1 \(Lists\) as one feature: S1\.1, S1\.2, S1\.3, attempt 1\.\n\nAccept:\nS1\.1 One\n  - the page shows one\nS1\.2 Two\n  - the page shows two\n  - two stays after a reload\nS1\.3 Three\n  - the store counts three\n/);
+  assert.match(body, /\nChecks:\n- unit: passed in \d+ s\n- browser tester: passed in \d+ s\n- bug bash: passed in \d+ s\n/);
+  assert.match(body, /Report: \.autoclaude\/reports\/S1\.3-1\.md\.$/);
+  assert.equal(gitTags(root), "ac-phase-1");
+  assert.equal(rev(root, "ac-phase-1"), rev(root, "HEAD"));
+  s = loadState(root);
+  assert.deepEqual([s.currentStep, s.phaseBaseCommit, s.phaseStartedAt, s.fixup, s.freshSession], ["S2.1", null, null, null, false]);
+  assert.deepEqual(s.tickedByGate, ["S1.1", "S1.2", "S1.3"]);
+  const alert = sent.slice(sentBefore).find((m) => /Phase 1 verified/.test(m.title));
+  assert.ok(alert, "the feature alert is on by default");
+  assert.match(alert.message, /^Phase 1 Lists: 3 steps verified in \d+ min\. Next: S2\.1 Four\.$/);
+  assert.ok(treeClean(root));
+});
+
+test("verifyAt phase: a failing feature verification takes the ticks out again, counts an attempt against the last step, and names the failing Accept lines", async () => {
+  const root = scratchFeatures();
+  const fail = { status: "failed", failed: "browser tester: criterion failed: S1.2: two stays after a reload", sections: [{ title: "Browser tester: FAILED", body: "Criteria:\n- [pass] S1.1: the page shows one\n  Evidence: ok\n- [FAIL] S1.2: two stays after a reload\n  Evidence: gone after F5" }], followUps: [] };
+  const { calls, deps: b } = fakeBrowser({ tester: fail });
+  await buildFirstTwo(root, b);
+  const planBefore = fs.readFileSync(path.join(root, "PLAN.md"), "utf8");
+  const progressBefore = fs.readFileSync(path.join(root, "PROGRESS.md"), "utf8");
+  for (let n = 1; n <= 2; n++) {
+    writeReady(root, "S1.3");
+    const r = await gate(root, b);
+    assert.equal(r.decision, "block");
+    assert.match(r.reason, new RegExp(`^Phase 1 \\(Lists\\), verified at S1\\.3, attempt ${n}/3 failed: browser tester: criterion failed: S1\\.2: two stays after a reload\\. The failing Accept lines belong to S1\\.2\\.`));
+    assert.match(r.reason, /## Failing Accept lines\n- S1\.2: two stays after a reload/);
+    assert.equal(fs.readFileSync(path.join(root, "PLAN.md"), "utf8"), planBefore, "the ticks came out again");
+    assert.equal(fs.readFileSync(path.join(root, "PROGRESS.md"), "utf8"), progressBefore);
+    assert.equal(loadState(root).attempts["S1.3"], n);
+    assert.ok(treeClean(root));
+  }
+  assert.match(fs.readFileSync(path.join(root, ".autoclaude", "reports", "S1.3-1.md"), "utf8"), /## Failing Accept lines\n\n- S1\.2: two stays after a reload/);
+  writeReady(root, "S1.3");
+  const r = await gate(root, b);
+  assert.equal(r.decision, "allow");
+  const s = loadState(root);
+  assert.deepEqual([s.status, s.pauseReason], ["paused", "step-failed"]);
+  assert.deepEqual(planOf(root).steps.map((x) => x.marker), ["~", "~", "!", " "]);
+  assert.match(sent.at(-1).title, /Phase 1, verified at S1\.3, failed 3 times/);
+  assert.equal(gitLog(root)[0], "autoclaude(S1.2): Two");
+  assert.equal(calls.length, 3);
+  assert.equal(gitTags(root), "");
+});
+
+test("verifyAt phase: non-blocking findings get a fix-up pass; the next ready runs the checks only and closes the feature", async () => {
+  const root = scratchFeatures();
+  const { calls, deps: b } = fakeBrowser({ tester: withFollowUp });
+  const { calls: secCalls, runSecurity } = fakeSecurity([secLow]);
+  const d = { ...b, runSecurity };
+  await buildFirstTwo(root, d);
+  assert.deepEqual(secCalls, [], "no security review for a built step");
+  writeReady(root, "S1.3");
+  let r = await gate(root, d);
+  assert.equal(r.decision, "block", JSON.stringify(r.events));
+  assert.match(r.reason, /^Phase 1 passed its verification, with 2 non-blocking findings to handle before the feature closes\./);
+  assert.match(r.reason, /1\. \[browser tester, medium\] the two is hard to read \(docs\/BLOCKERS\.md\)\n2\. \[security review, low\] server\.js:3: no rate limit on POST \/api\/todos \(docs\/SECURITY-FINDINGS\.md\)/);
+  assert.match(r.reason, /ready S1\.3`: the checks run once more/);
+  assert.deepEqual(secCalls, ["S1.3#1"]);
+  assert.equal(gitLog(root)[0], "autoclaude(S1.2): Two", "not committed yet");
+  let s = loadState(root);
+  assert.deepEqual([s.fixup.phase, s.fixup.stepId, s.fixup.findings.length, s.currentStep], [1, "S1.3", 2, "S1.3"]);
+  assert.deepEqual(planOf(root).steps.map((x) => x.marker), ["x", "x", "x", " "]);
+  assert.match(fs.readFileSync(path.join(root, "docs", "BLOCKERS.md"), "utf8"), /the two is hard to read/);
+  // A stop without ready repeats the fix-up list, not the step, and the ticks stand.
+  r = await gate(root, d);
+  assert.match(r.reason, /^Phase 1 passed its verification/);
+  assert.equal(r.events.some((e) => e.type === "integrity-reverted"), false);
+  // A fix-up that breaks a check is an attempt, and the pass goes on.
+  setChecks(root, FAIL);
+  writeReady(root, "S1.3");
+  r = await gate(root, d);
+  assert.match(r.reason, /^The fix-up checks of Phase 1 \(attempt 1\/3\) failed: check "unit" failed\./);
+  assert.equal(loadState(root).fixup.stepId, "S1.3", "still in the fix-up pass");
+  setChecks(root, [COUNT]);
+  const runsBefore = checkRuns(root);
+  writeReady(root, "S1.3");
+  r = await gate(root, d);
+  assert.equal(r.decision, "block", JSON.stringify(r.events));
+  assert.match(r.reason, /^Phase 1 \(Lists\) verified and committed/);
+  assert.equal(checkRuns(root), runsBefore + 1);
+  assert.deepEqual(calls, ["tester:S1.3[S1.1,S1.2]", "bugbash:S1.3"], "no browser check in the fix-up pass");
+  assert.deepEqual(secCalls, ["S1.3#1"]);
+  const body = gitBody(root);
+  assert.match(body, /as one feature: S1\.1, S1\.2, S1\.3, attempt 1, then a fix-up pass\./);
+  assert.match(body, /\n- unit: passed in \d+ s\n- browser tester: passed in \d+ s\n- bug bash: passed in \d+ s\n- security review: passed in \d+ s\n- unit \(after the fix-up\): passed in \d+ s\n/);
+  assert.match(body, /Findings filed: 2\.\nReport: \.autoclaude\/reports\/S1\.3-1\.md and \.autoclaude\/reports\/S1\.3-fixup-2\.md\.$/);
+  assert.equal(gitTags(root), "ac-phase-1");
+  s = loadState(root);
+  assert.deepEqual([s.fixup, s.currentStep], [null, "S2.1"]);
+  assert.ok(treeClean(root));
+});
+
+test("git.push: the branch and the phase tag reach the remote after the feature, never after a built step; pushState records it", async () => {
+  const root = scratchFeatures({ git: { commitEachStep: true, tagPhaseEnds: true, push: true } });
+  const bare = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "autoclaude-remote-")), "origin.git");
+  spawnSync("git", ["init", "-q", "--bare", bare], { env });
+  spawnSync("git", ["remote", "add", "origin", bare], { cwd: root, env });
+  const { deps: b } = fakeBrowser({});
+  writeReady(root, "S1.1");
+  await gate(root, b);
+  assert.equal(loadState(root).pushState, null, "a built step is not pushed");
+  assert.equal(rev(bare, "refs/heads/main"), "");
+  writeReady(root, "S1.2");
+  await gate(root, b);
+  const before = sent.length;
+  writeReady(root, "S1.3");
+  const r = await gate(root, b);
+  assert.equal(r.decision, "block", JSON.stringify(r.events));
+  const ps = loadState(root).pushState;
+  assert.deepEqual([ps.ok, ps.skipped, ps.remote, ps.branch, ps.unpushedCommits, ps.unpushedTags, ps.error], [true, false, "origin", "main", 0, [], null]);
+  assert.ok(ps.at);
+  assert.equal(rev(bare, "refs/heads/main"), rev(root, "HEAD"));
+  assert.equal(rev(bare, "refs/tags/ac-phase-1"), rev(root, "HEAD"));
+  assert.match(sent.slice(before).find((m) => /Phase 1 verified/.test(m.title)).message, /Pushed to origin\./);
+});
+
+test("step mode pushes after every verified step; a failed push is alerted and the run goes on", async () => {
+  const root = scratch();
+  const cfgFile = path.join(root, "autoclaude.config.json");
+  fs.writeFileSync(cfgFile, JSON.stringify({ ...JSON.parse(fs.readFileSync(cfgFile, "utf8")), git: { commitEachStep: true, tagPhaseEnds: true, push: true } }));
+  spawnSync("git", ["commit", "-qam", "push on"], { cwd: root, env });
+  spawnSync("git", ["remote", "add", "origin", path.join(os.tmpdir(), "autoclaude-no-such-remote", "gone.git")], { cwd: root, env });
+  const before = sent.length;
+  writeReady(root, "S1.1");
+  const r = await gate(root);
+  assert.equal(r.decision, "block", JSON.stringify(r.events));
+  assert.match(r.reason, /S1\.1 verified and committed/);
+  const s = loadState(root);
+  assert.deepEqual([s.pushState.ok, s.pushState.skipped, s.pushState.remote, s.pushState.branch, s.currentStep], [false, false, "origin", "main", "S1.2"]);
+  assert.ok(s.pushState.error);
+  const alert = sent.slice(before).find((m) => /push failed/.test(m.title));
+  assert.ok(alert, "the push failure is alerted");
+  assert.equal(alert.priority, "default");
+  assert.match(alert.message, /git push -u origin main/);
+  assert.match(fs.readFileSync(path.join(root, ".autoclaude", "logs", "gate.log"), "utf8"), /push FAILED to origin/);
+});
+
+test("a verified feature with a live supervisor sets freshSession and lets the session stop; its next stop is let go too", async () => {
+  const root = scratchFeatures();
+  fs.writeFileSync(path.join(root, ".autoclaude", "supervisor.pid"), String(process.pid));
+  const { deps: b } = fakeBrowser({});
+  const d = { ...b, env: { ...env, AUTOCLAUDE_BUILDER: "1" } };
+  await buildFirstTwo(root, d);
+  writeReady(root, "S1.3");
+  let r = await gate(root, d);
+  assert.equal(r.decision, "allow", JSON.stringify(r.events));
+  assert.equal(r.events.find((e) => e.type === "fresh-session").next, "S2.1");
+  const s = loadState(root);
+  assert.deepEqual([s.status, s.freshSession, s.currentStep], ["running", true, "S2.1"]);
+  assert.ok(s.stepStartedAt);
+  r = await gate(root, d);
+  assert.deepEqual([r.decision, r.events.at(-1).type], ["allow", "fresh-session-pending"]);
+});
+
+test("a review pause at a feature's end: under a live supervisor the resume asks for a fresh session; mid-feature and after an answer it does not", async () => {
+  const root = scratchFeatures();
+  fs.writeFileSync(path.join(root, ".autoclaude", "supervisor.pid"), String(process.pid));
+  const { deps: b } = fakeBrowser({});
+  const d = { ...b, env: { ...env, AUTOCLAUDE_BUILDER: "1" } };
+  const { resumeRun } = await import("../../plugins/autoclaude/lib/resume.js");
+  const { mergeConfig } = await import("../../plugins/autoclaude/lib/config.js");
+  const project = { root, config: mergeConfig(JSON.parse(fs.readFileSync(path.join(root, "autoclaude.config.json"), "utf8"))) };
+  // Mid-feature: S1.2 continues in the resumed session.
+  saveState(root, { ...loadState(root), pauseRequested: true });
+  writeReady(root, "S1.1");
+  await gate(root, d);
+  resumeRun(project, loadState(root));
+  assert.equal(loadState(root).freshSession, false);
+  writeReady(root, "S1.2");
+  await gate(root, d);
+  // The feature closes into a review pause: the next feature needs a fresh session.
+  saveState(root, { ...loadState(root), pauseRequested: true });
+  writeReady(root, "S1.3");
+  const r = await gate(root, d);
+  assert.deepEqual([loadState(root).status, loadState(root).currentStep], ["paused", "S2.1"], JSON.stringify(r.events));
+  const changes = resumeRun(project, loadState(root));
+  assert.ok(changes.some((c) => /S2\.1 starts a new feature/.test(c)), changes.join("\n"));
+  assert.deepEqual([loadState(root).status, loadState(root).freshSession], ["running", true]);
+  // A blocked question at a feature's first step is answered into the session that asked it.
+  saveState(root, { ...loadState(root), status: "paused", pauseReason: "blocked", freshSession: false });
+  resumeRun(project, loadState(root));
+  assert.equal(loadState(root).freshSession, false);
+  // Without a live supervisor nothing would start a fresh session, so none is asked for.
+  fs.rmSync(path.join(root, ".autoclaude", "supervisor.pid"));
+  saveState(root, { ...loadState(root), status: "paused", pauseReason: "review" });
+  resumeRun(project, loadState(root));
+  assert.equal(loadState(root).freshSession, false);
+});
+
+test("resume after a pause in the middle of a phase keeps the built steps, and a paused fix-up pass resumes in it", async () => {
+  const root = scratchFeatures();
+  const { deps: b } = fakeBrowser({});
+  const { resumeRun } = await import("../../plugins/autoclaude/lib/resume.js");
+  const { mergeConfig } = await import("../../plugins/autoclaude/lib/config.js");
+  const project = { root, config: mergeConfig(JSON.parse(fs.readFileSync(path.join(root, "autoclaude.config.json"), "utf8"))) };
+  saveState(root, { ...loadState(root), pauseRequested: true });
+  writeReady(root, "S1.1");
+  let r = await gate(root, b);
+  assert.equal(r.decision, "allow", JSON.stringify(r.events));
+  let s = loadState(root);
+  assert.deepEqual([s.status, s.pauseReason, s.currentStep], ["paused", "review", "S1.2"]);
+  assert.match(sent.at(-1).message, /^Built S1\.1 One \(verified with Phase 1\)\. Next: S1\.2 Two\./);
+  assert.deepEqual(resumeRun(project, s), [], "nothing to report: S1.1 stays built");
+  s = loadState(root);
+  assert.deepEqual([s.status, s.currentStep, s.tickedByGate], ["running", "S1.2", ["S1.1"]]);
+  assert.equal(stepById(planOf(root), "S1.1").marker, "~");
+  writeReady(root, "S1.2");
+  r = await gate(root, b);
+  assert.match(r.reason, /^S1\.2 built and committed/);
+
+  // The owner pauses (pause --now) during the fix-up pass, then resumes.
+  writeReady(root, "S1.3");
+  r = await gate(root, { ...b, runTester: fakeBrowser({ tester: withFollowUp }).deps.runTester });
+  assert.match(r.reason, /^Phase 1 passed its verification, with 1 non-blocking finding to handle/);
+  saveState(root, { ...loadState(root), status: "paused", pauseReason: "review", haltSession: true });
+  const changes = resumeRun(project, loadState(root));
+  assert.ok(changes.some((c) => /resuming the fix-up pass of S1\.3/.test(c)), changes.join("\n"));
+  s = loadState(root);
+  assert.deepEqual([s.status, s.currentStep, s.fixup && s.fixup.stepId, s.haltSession], ["running", "S1.3", "S1.3", false]);
+  writeReady(root, "S1.3");
+  r = await gate(root, b);
+  assert.match(r.reason, /^Phase 1 \(Lists\) verified and committed/, JSON.stringify(r.events));
+  assert.equal(gitTags(root), "ac-phase-1");
+
+  // A fix-up pass whose phase the owner unticked while paused is dropped; the phase is verified again.
+  const root2 = scratchFeatures();
+  const project2 = { root: root2, config: project.config };
+  await buildFirstTwo(root2, b);
+  writeReady(root2, "S1.3");
+  await gate(root2, { ...b, runTester: fakeBrowser({ tester: withFollowUp }).deps.runTester });
+  saveState(root2, { ...loadState(root2), status: "paused", pauseReason: "review" });
+  const planFile = path.join(root2, "PLAN.md");
+  fs.writeFileSync(planFile, fs.readFileSync(planFile, "utf8").replace("- [x] **S1.2**", "- [ ] **S1.2**"));
+  const dropped = resumeRun(project2, loadState(root2));
+  assert.ok(dropped.some((c) => /fix-up pass of S1\.3 is dropped/.test(c)), dropped.join("\n"));
+  s = loadState(root2);
+  assert.deepEqual([s.fixup, s.currentStep], [null, "S1.2"]);
 });

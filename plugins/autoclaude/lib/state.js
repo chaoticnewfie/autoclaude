@@ -31,8 +31,24 @@ export function defaultState() {
     builderSessionId: null,
     // Set by `pause --now`; the supervisor ends the builder session and clears it.
     haltSession: false,
+    // Steps the gate marked [x] or [~]; any other tick is reverted by the integrity check.
     tickedByGate: [],
     baseCommit: null,
+    // The fix-up pass of a verified feature with non-blocking findings (D49):
+    // { phase, stepId, findings: [...], attempt, report, checks }. The next ready runs the checks
+    // only, then closes the feature.
+    fixup: null,
+    // Set by the gate after a verified feature when a supervisor is live; the supervisor ends the
+    // builder, clears it, and starts a fresh session for the next feature.
+    freshSession: false,
+    // The commit the current feature started from (verifyAt "phase"): the security review's
+    // diff base, cleared when the feature closes.
+    phaseBaseCommit: null,
+    // When the current feature's first step started, for the feature alert's "took" time.
+    phaseStartedAt: null,
+    // The last push of the run branch: { branch, remote, ok, skipped, at, error,
+    // unpushedCommits, unpushedTags }, or null when the gate has not pushed.
+    pushState: null,
     ownerAnswer: null,
     lastBlockedQuestion: null,
     usageStaleWarned: false,
@@ -74,6 +90,6 @@ export function isRunning(state) {
 export function describeState(state) {
   if (!state) return "unknown";
   if (state.status === STATUS.paused) return `paused (${state.pauseReason || "no reason recorded"})`;
-  if (state.status === STATUS.running && state.pauseRequested) return "running, pause requested after the next verified commit";
+  if (state.status === STATUS.running && state.pauseRequested) return "running, pause requested after the next committed step";
   return state.status;
 }

@@ -8,8 +8,9 @@ import path from "node:path";
 import { readJson, readText } from "./fsatomic.js";
 import { claudeUserConfigFile, homeDir, isWindows, trustKeyFor } from "./paths.js";
 import { parsePlan, lintPlan, firstUnfinished, MARKERS } from "./plan.js";
-import { findOnPath } from "./proc.js";
+import { findOnPath, runCommand } from "./proc.js";
 import { claudeBinary } from "./headless.js";
+import { checksEnv as runChecksEnv } from "./checks.js";
 import { readUsage } from "./usage.js";
 import { resolveChannel } from "./notify.js";
 import { restartDevServer, stopDevServer, devServerInfo } from "./devserver.js";
@@ -41,7 +42,36 @@ export function checkRunnable(command, root, env = process.env) {
   return { ok: true };
 }
 
-export async function preflight(project, { env = process.env, devServer = true, userConfigFile = claudeUserConfigFile(), now = Date.now(), skip = [], platform = process.platform } = {}) {
+// A check's prerequisite (checks[i].requires, for example "docker version") gets this long.
+export const REQUIRE_TIMEOUT_SEC = 60;
+
+// Runs each check's `requires` command through the same shell as the checks. Returns the
+// problems, one per check whose requirement failed, naming the check and the command.
+export async function checkRequirements(checks, { root, env = process.env, run = runCommand } = {}) {
+  const bad = [];
+  for (const [index, c] of (checks || []).entries()) {
+    const req = typeof c.requires === "string" ? c.requires.trim() : "";
+    if (!req) continue;
+    let why = null;
+    try {
+      const r = await run(req, { cwd: root, env, timeoutMs: REQUIRE_TIMEOUT_SEC * 1000 });
+      if (r.timedOut) why = `timed out after ${REQUIRE_TIMEOUT_SEC} s`;
+      else if (r.code !== 0) {
+        const last = String(r.stderr || r.stdout || "").trim().split(/\r?\n/).pop();
+        why = `exit code ${r.code === null ? "none" : r.code}${last ? `: ${last.slice(0, 200)}` : ""}`;
+      }
+    } catch (e) {
+      why = `could not start: ${e && e.message ? e.message : e}`;
+    }
+    if (why) bad.push({ index, check: c.name, command: req, detail: `${c.name}: its requirement \`${req}\` failed (${why}); install or start what it needs first` });
+  }
+  return bad;
+}
+
+// checksEnv: the environment the checks run in (checks.js checksEnv: the PATH the run recorded,
+// or this shell's without Git Bash's own folders). `autoclaude run` passes the launching
+// terminal's own env, which is the one it records. runRequirement is a test seam.
+export async function preflight(project, { env = process.env, checksEnv = null, runRequirement = runCommand, devServer = true, userConfigFile = claudeUserConfigFile(), now = Date.now(), skip = [], platform = process.platform } = {}) {
   const { root, config } = project;
   const items = [];
   const add = (name, status, detail = "") => { if (!skip.includes(name)) items.push({ name, status, detail }); };
@@ -98,10 +128,15 @@ export async function preflight(project, { env = process.env, devServer = true, 
   } else add("trust", "ok", "onboarding done and the folder is trusted");
 
   // Checks. One with needsDevServer fails every step when no dev server is configured.
+  // A check's `requires` runs first; a check whose requirement fails is not looked at further.
   const hasDevServer = Boolean(config.devServer.command && config.devServer.url);
   const bad = [];
-  for (const c of config.checks) {
-    const r = checkRunnable(c.command, root, env);
+  const cenv = checksEnv || runChecksEnv(root, env).env;
+  const unmet = skip.includes("checks") ? [] : await checkRequirements(config.checks, { root, env: cenv, run: runRequirement });
+  for (const [i, c] of config.checks.entries()) {
+    const miss = unmet.find((u) => u.index === i);
+    if (miss) { bad.push(miss.detail); continue; }
+    const r = checkRunnable(c.command, root, cenv);
     if (!r.ok) bad.push(`${c.name}: ${r.detail}`);
     if (c.needsDevServer && !hasDevServer) bad.push(`${c.name}: needsDevServer is true but devServer.command and devServer.url are not both set, so this check would fail every step`);
   }
@@ -122,7 +157,7 @@ export async function preflight(project, { env = process.env, devServer = true, 
   if (hasDevServer) {
     if (devServer) {
       const before = devServerInfo({ root });
-      const ds = await restartDevServer(config.devServer, { root, env });
+      const ds = await restartDevServer(config.devServer, { root, env: cenv });
       if (!before) stopDevServer({ root });
       if (ds.ok) add("dev server", "ok", `answers at ${config.devServer.url}${ds.reused ? " (already running)" : ""}`);
       // A new project's first steps are often the ones that write the server, so it cannot answer

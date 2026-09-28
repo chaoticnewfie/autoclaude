@@ -189,14 +189,22 @@ export function initProject(root, options = {}) {
   }
 
   // 3. .gitignore
+  // The runtime folder, and secrets/, where a run generates the secrets it needs (D49).
   const gi = path.join(root, ".gitignore");
   const giText = readText(gi, null);
+  const ignores = [
+    { re: /^\s*\/?\.autoclaude\/?\s*$/m, block: "# AutoClaude runtime state\n.autoclaude/\n", name: ".autoclaude/" },
+    { re: /^\s*\/?secrets(\/\*{0,2})?\s*$/m, block: "# Secrets an AutoClaude run generates. Never committed.\nsecrets/\n", name: "secrets/" }
+  ];
   if (giText === null) {
-    writeFileAtomic(gi, "# AutoClaude runtime state\n.autoclaude/\n");
+    writeFileAtomic(gi, ignores.map((i) => i.block).join(""));
     if (!report.created.includes(".gitignore")) report.created.push(".gitignore");
-  } else if (!/^\s*\.autoclaude\/?\s*$/m.test(giText)) {
-    writeFileAtomic(gi, giText.replace(/\s*$/, "") + "\n\n# AutoClaude runtime state\n.autoclaude/\n");
-    report.notes.push(".gitignore: added .autoclaude/");
+  } else {
+    const missing = ignores.filter((i) => !i.re.test(giText));
+    if (missing.length) {
+      writeFileAtomic(gi, giText.replace(/\s*$/, "") + "\n\n" + missing.map((i) => i.block).join(""));
+      report.notes.push(`.gitignore: added ${missing.map((i) => i.name).join(" and ")}`);
+    }
   }
 
   // 4. runtime MCP config for the browser tester (runtime, so always refreshed)

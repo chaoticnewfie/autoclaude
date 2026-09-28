@@ -1,7 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
-import { buildArgs, interpret, runHeadless, hitTurnLimit, wrapUpArgs, runWithWrapUp, WRAP_UP_PROMPT } from "../../plugins/autoclaude/lib/headless.js";
+import fs from "node:fs";
+import { buildArgs, interpret, runHeadless, hitTurnLimit, wrapUpArgs, runWithWrapUp, WRAP_UP_PROMPT, agentBody, buildDeciderPrompt, validDecision, runDecider, DECIDER_SCHEMA, DECIDER_TIMEOUT_MS } from "../../plugins/autoclaude/lib/headless.js";
 
 const fake = fileURLToPath(new URL("../fixtures/fake-claude.mjs", import.meta.url));
 const run = (mode, extra = {}) => runHeadless({ prompt: "check the page", args: ["-p", "--x"], bin: process.execPath, binArgs: [fake], env: { ...process.env, FAKE_CLAUDE_MODE: mode }, role: "tester", timeoutMs: 20000, ...extra });
@@ -100,4 +101,76 @@ test("a run that hits the turn limit is resumed once for its answer; anything el
   calls.length = 0;
   r = await runWithWrapUp(fake([good]), { prompt: "check", args });
   assert.deepEqual([r.ok, r.wrappedUp, calls.length], [true, undefined, 1]);
+  // A deadline (the gate's, or the decide call's) caps the wrap-up too, never below 20 s.
+  calls.length = 0;
+  await runWithWrapUp(fake([limit, good]), { prompt: "explore", args, timeoutMs: 900000, deadlineMs: Date.now() + 60000 });
+  assert.ok(calls[1].timeoutMs <= 60000 && calls[1].timeoutMs >= 50000, String(calls[1].timeoutMs));
+  calls.length = 0;
+  await runWithWrapUp(fake([limit, good]), { prompt: "explore", args, timeoutMs: 900000, deadlineMs: Date.now() - 1000 });
+  assert.equal(calls[1].timeoutMs, 20000);
+});
+
+// ---------- the decider (`autoclaude decide`) ----------
+
+const DECIDER_MD = fileURLToPath(new URL("../../plugins/autoclaude/agents/decider.md", import.meta.url));
+const ROUTINE = { classification: "routine", recommendation: "Use SQLite", reasoning: "The plan's Stack says SQLite. Undo: swap the driver.", question_for_owner: "", owner_review: false };
+
+test("the decider's prompt: the agent's body without its front matter, then the question and the files to read", () => {
+  assert.equal(agentBody("---\nname: x\ntools: Read\n---\n\nYou decide.\n"), "You decide.");
+  assert.equal(agentBody("\uFEFF---\r\nname: x\r\n---\r\nBody"), "Body");
+  assert.equal(agentBody("No front matter"), "No front matter");
+  const template = fs.readFileSync(DECIDER_MD, "utf8");
+  const step = { id: "S2.1", title: "Store sessions" };
+  const p = buildDeciderPrompt({ template, question: "Cookies or localStorage? Options: A cookies, B localStorage", root: "C:/proj", planFile: "C:/proj/PLAN.md", decisionsFile: "C:/proj/docs/DECISIONS.md", step, stepText: "- [ ] **S2.1** Store sessions\n  - Accept: a" });
+  assert.ok(p.startsWith("You are the decider"), "the body comes first");
+  assert.doesNotMatch(p, /^name: decider/m, "no front matter");
+  assert.match(p, /- The plan: C:\/proj\/PLAN\.md\n- The decisions log: C:\/proj\/docs\/DECISIONS\.md\n- The step being worked on: S2\.1 Store sessions/);
+  assert.match(p, /The builder asks:\n\nCookies or localStorage\? Options: A cookies, B localStorage\n/);
+  assert.match(p, /- Accept: a/);
+  assert.match(p, /`owner_review`: true when the recommendation accepts a security or privacy risk/);
+  assert.doesNotMatch(buildDeciderPrompt({ question: "q", root: "r", planFile: "p", decisionsFile: "d" }), /step being worked on/, "no step outside a run");
+});
+
+test("validDecision accepts a complete answer and fills the optional fields; anything else is no answer", () => {
+  assert.deepEqual(validDecision(ROUTINE), ROUTINE);
+  assert.deepEqual(validDecision({ classification: "critical", recommendation: "B", reasoning: "r" }), { classification: "critical", recommendation: "B", reasoning: "r", question_for_owner: "", owner_review: false });
+  assert.equal(validDecision({ ...ROUTINE, owner_review: "yes" }).owner_review, false, "only a real true flags the owner");
+  assert.equal(validDecision({ ...ROUTINE, classification: "maybe" }), null);
+  assert.equal(validDecision({ ...ROUTINE, recommendation: " " }), null);
+  assert.equal(validDecision(null), null);
+  assert.deepEqual(DECIDER_SCHEMA.required, ["classification", "recommendation", "reasoning", "question_for_owner", "owner_review"]);
+  assert.deepEqual(DECIDER_SCHEMA.properties.classification.enum, ["routine", "critical"]);
+  assert.equal(DECIDER_SCHEMA.properties.owner_review.type, "boolean");
+});
+
+test("runDecider: read-only tools, the project's model, the project folder, a schema; failures are answers with ok false", async () => {
+  const calls = [];
+  const fake = (result) => async (o) => { calls.push(o); return result; };
+  let r = await runDecider({ root: "C:/proj", question: "Which port?", planFile: "C:/proj/PLAN.md", decisionsFile: "C:/proj/docs/DECISIONS.md", model: "opus", env: { PATH: "p", AUTOCLAUDE_BUILDER: "1" }, run: fake({ ok: true, structured: { ...ROUTINE, reverse: "extra fields are dropped" }, durationMs: 42000, costUsd: 0.3, numTurns: 5 }) });
+  assert.deepEqual(r, { ok: true, decision: ROUTINE, error: null, durationMs: 42000, costUsd: 0.3, numTurns: 5 });
+  const o = calls[0];
+  const at = (flag) => o.args[o.args.indexOf(flag) + 1];
+  assert.deepEqual([o.cwd, o.role, o.timeoutMs], ["C:/proj", "decider", DECIDER_TIMEOUT_MS]);
+  assert.ok(DECIDER_TIMEOUT_MS < 10 * 60 * 1000, "inside the Bash tool's 10-minute ceiling");
+  assert.ok(o.deadlineMs > Date.now() && o.deadlineMs <= Date.now() + DECIDER_TIMEOUT_MS + 30000 && DECIDER_TIMEOUT_MS + 30000 < 10 * 60 * 1000, "a wrap-up also ends inside the Bash call");
+  assert.deepEqual([at("--model"), at("--allowedTools"), at("--permission-mode"), at("--max-turns")], ["opus", "Read,Glob,Grep", "dontAsk", "30"]);
+  assert.deepEqual(JSON.parse(at("--json-schema")), DECIDER_SCHEMA);
+  assert.equal(at("--settings"), '{"disableAllHooks":true}');
+  assert.ok(!o.args.includes("--mcp-config"), "no MCP servers");
+  assert.deepEqual(o.env, { PATH: "p" }, "the child is not marked as the builder");
+  assert.match(o.prompt, /Which port\?/);
+
+  r = await runDecider({ root: "r", question: "q", planFile: "p", decisionsFile: "d", run: fake({ ok: false, error: "timed out after 540 s", durationMs: 540000 }) });
+  assert.deepEqual([r.ok, r.decision, r.error], [false, null, "timed out after 540 s"]);
+  r = await runDecider({ root: "r", question: "q", planFile: "p", decisionsFile: "d", run: fake({ ok: true, structured: { classification: "routine" } }) });
+  assert.equal(r.ok, false);
+  assert.match(r.error, /the decider's answer is incomplete/);
+  r = await runDecider({ root: "r", question: "q", planFile: "p", decisionsFile: "d", run: async () => { throw new Error("boom"); } });
+  assert.deepEqual([r.ok, r.error], [false, "boom"]);
+
+  // Out of turns: resumed once for the answer.
+  calls.length = 0;
+  const seq = [{ ok: false, subtype: "error_max_turns", sessionId: "s-9", error: "claude ended with error_max_turns: x", durationMs: 1000 }, { ok: true, structured: ROUTINE, durationMs: 500 }];
+  r = await runDecider({ root: "r", question: "q", planFile: "p", decisionsFile: "d", run: async (x) => { calls.push(x); return seq[calls.length - 1]; } });
+  assert.deepEqual([r.ok, r.decision, calls.length, calls[1].prompt], [true, ROUTINE, 2, WRAP_UP_PROMPT]);
 });

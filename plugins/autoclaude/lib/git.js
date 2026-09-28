@@ -1,5 +1,6 @@
-// Git for the gate (PLAN.md D12): a branch per plan, one commit per verified step, a tag at
-// each phase end, never a push. Every function takes the project root first and runs git
+// Git for the gate (PLAN.md D12): a branch per plan, one commit per step, a tag at each phase
+// end, and (git.push, D49) a push of the branch and the tag after each verified feature, never
+// forced. Every function takes the project root first and runs git
 // through runCommand with that cwd; a non-zero exit comes back as ok false with git's stderr,
 // never as a throw. GIT_TERMINAL_PROMPT=0 keeps an unattended run from hanging on a prompt.
 // Each function accepts a trailing options object with `env` (default process.env; must put
@@ -96,13 +97,19 @@ function messageFile(kind, text) {
   return file;
 }
 
-// git add -A, then commit. committed is false (with ok true) when there was nothing to commit.
+// The folder a run generates secrets into (D49). commitAll never stages it, so a project that
+// forgot to ignore it still never commits or pushes a secret.
+export const SECRETS_PATHSPEC = ":(exclude)secrets";
+
+// git add -A (all but secrets/), then commit. committed is false (with ok true) when there was
+// nothing to commit.
 export async function commitAll(root, message, opts = {}) {
-  const add = await git(root, ["add", "-A"], opts);
+  const add = await git(root, ["add", "-A", "--", ".", SECRETS_PATHSPEC], opts);
   if (!add.ok) return { ok: false, committed: false, sha: null, stderr: add.stderr };
-  const st = await status(root, opts);
-  if (!st.ok) return { ok: false, committed: false, sha: null, stderr: st.stderr };
-  if (st.clean) return { ok: true, committed: false, sha: await head(root, opts), stderr: "" };
+  // Staged changes, not the status: an unignored secrets/ stays untracked and must not count.
+  const staged = await git(root, ["diff", "--cached", "--quiet"], opts);
+  if (staged.code !== 0 && staged.code !== 1) return { ok: false, committed: false, sha: null, stderr: staged.stderr };
+  if (staged.code === 0) return { ok: true, committed: false, sha: await head(root, opts), stderr: "" };
   const ident = (await hasIdentity(root, opts)) ? [] : FALLBACK_IDENTITY;
   const file = messageFile("commit", message);
   try {
@@ -130,6 +137,78 @@ export async function tag(root, name, { message = null, force = false, env, time
   } finally {
     try { fs.unlinkSync(file); } catch {}
   }
+}
+
+// A file as it is at a revision (say HEAD), or null when the revision or the path is missing.
+export async function showFile(root, rev, relPath, { env, timeoutMs, run = git } = {}) {
+  const r = await run(root, ["show", `${rev}:${String(relPath).replace(/\\/g, "/")}`], { env, timeoutMs });
+  return r.ok ? r.stdout : null;
+}
+
+// The remote a branch pushes to: its configured upstream remote, else "origin", else the first
+// remote; null when the repository has none.
+export async function remoteFor(root, branch, { env, timeoutMs, run = git } = {}) {
+  const opts = { env, timeoutMs };
+  const up = branch ? await run(root, ["config", "--get", `branch.${branch}.remote`], opts) : null;
+  if (up && up.ok && up.stdout.trim()) return up.stdout.trim();
+  const r = await run(root, ["remote"], opts);
+  if (!r.ok) return null;
+  const names = r.stdout.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+  return names.includes("origin") ? "origin" : names[0] || null;
+}
+
+// Commits on HEAD that no ref of the remote holds: 0 once everything is pushed. null when git
+// cannot tell.
+export async function unpushedCount(root, remote, { env, timeoutMs, run = git } = {}) {
+  const r = await run(root, ["rev-list", "--count", "HEAD", "--not", `--remotes=${remote}`], { env, timeoutMs });
+  const n = r.ok ? Number(r.stdout.trim()) : NaN;
+  return Number.isFinite(n) ? n : null;
+}
+
+function pushError(r) {
+  const text = String((r && r.stderr) || "").replace(/\s+/g, " ").trim();
+  return (text || "git push failed").slice(0, 400);
+}
+
+// Pushes the run branch (with -u, so it gets an upstream) and the given tags, retrying once
+// whatever failed. Never forces: a rejected push stays rejected and is reported. `run` replaces
+// git() in tests. Resolves, never rejects, to { ok, skipped, remote, branch, error, pushedTags,
+// unpushedTags, unpushedCommits, tries }; skipped is true when there is no remote to push to.
+export async function pushRun(root, { branch = null, tags = [], retries = 1, env, timeoutMs, run = git } = {}) {
+  const opts = { env, timeoutMs };
+  let b = branch;
+  if (!b) {
+    const r = await run(root, ["rev-parse", "--abbrev-ref", "HEAD"], opts);
+    b = r.ok ? r.stdout.trim() : null;
+  }
+  const wanted = [...new Set((tags || []).filter(Boolean))];
+  if (!b || b === "HEAD") return { ok: false, skipped: true, remote: null, branch: null, error: "not on a branch", pushedTags: [], unpushedTags: wanted, unpushedCommits: null, tries: 0 };
+  const remote = await remoteFor(root, b, { ...opts, run });
+  if (!remote) return { ok: false, skipped: true, remote: null, branch: b, error: "no git remote is configured", pushedTags: [], unpushedTags: wanted, unpushedCommits: null, tries: 0 };
+  let branchPushed = false;
+  let left = wanted;
+  const pushed = [];
+  let error = null;
+  let tries = 0;
+  while (tries <= retries && (!branchPushed || left.length)) {
+    tries++;
+    error = null;
+    if (!branchPushed) {
+      const r = await run(root, ["push", "-u", remote, b], opts);
+      if (r.ok) branchPushed = true;
+      else error = pushError(r);
+    }
+    // Tags only after the branch, so a tag never reaches the remote without its commits.
+    if (branchPushed) {
+      for (const t of left.slice()) {
+        const r = await run(root, ["push", remote, `refs/tags/${t}`], opts);
+        if (r.ok) { pushed.push(t); left = left.filter((x) => x !== t); } else if (!error) error = `tag ${t}: ${pushError(r)}`;
+      }
+    }
+  }
+  const ok = branchPushed && left.length === 0;
+  const unpushedCommits = await unpushedCount(root, remote, { ...opts, run });
+  return { ok, skipped: false, remote, branch: b, error: ok ? null : error, pushedTags: pushed, unpushedTags: left, unpushedCommits, tries };
 }
 
 // Newest first: [{ sha, subject }]. Empty when there is no commit yet.

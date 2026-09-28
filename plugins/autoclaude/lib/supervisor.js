@@ -5,7 +5,8 @@
 // builderSessionId) and every relaunch is `claude --resume <that id> ... "/autoclaude:resume"`,
 // so it resumes the builder's conversation and never a person's own session in the same folder;
 // all run state is in files, so nothing is lost. Two relaunches in a row without progress pause
-// the run as stuck and page the owner. Node built-ins only.
+// the run as stuck and page the owner. After a verified feature the gate sets state.freshSession
+// and the supervisor replaces the session with a new one under a new id (D49). Node built-ins only.
 //
 // While a session is alive the supervisor never prints to the console (it would corrupt the
 // session's screen); it logs to .autoclaude/logs/supervisor.log.
@@ -22,10 +23,11 @@ import { readUsage } from "./usage.js";
 import { claudeBinary } from "./headless.js";
 import { killTree, isPidAlive } from "./proc.js";
 import { notify } from "./notify.js";
-import { resumeRun } from "./resume.js";
+import { resumeRun, undoCutVerification } from "./resume.js";
 import { buildSummary } from "./summary.js";
 import { parsePlan } from "./plan.js";
 import { stopDevServer } from "./devserver.js";
+import { recordRunEnv } from "./checks.js";
 
 const MIN = 60 * 1000;
 
@@ -41,14 +43,39 @@ export function childEnv(env = process.env) {
   return out;
 }
 
+// The --settings JSON for the builder, or null. Planning writes, for what the plan allows outside
+// the project, Claude Code permission allow rules (they skip the auto-mode classifier, except for
+// protected paths) and plain-language trusted-infrastructure lines for auto mode. Claude Code reads
+// autoMode.environment only from user settings, managed settings or --settings, never from a
+// project's files, so it has to come in here; "$defaults" keeps the built-in list. --settings
+// merges with the settings files, so nothing the owner set is lost. Only non-empty parts go in.
+export function builderSettings(config) {
+  const perms = (config && config.permissions) || {};
+  const allow = Array.isArray(perms.allow) ? perms.allow.filter((r) => typeof r === "string" && r.trim()) : [];
+  const environment = Array.isArray(perms.environment) ? perms.environment.filter((r) => typeof r === "string" && r.trim()) : [];
+  if (!allow.length && !environment.length) return null;
+  const s = {};
+  if (allow.length) s.permissions = { allow };
+  if (environment.length) s.autoMode = { environment: ["$defaults", ...environment] };
+  return JSON.stringify(s);
+}
+
+// The per-launch options from the project's settings: model, effort and the settings JSON.
+export function launchOptions(config) {
+  const b = (config && config.builder) || {};
+  return { model: b.model || null, effort: b.effort || null, settings: builderSettings(config) };
+}
+
 // A start launch names its session (`--session-id`, a fresh UUID each time: Claude Code refuses
 // an id that is already in use). A relaunch resumes that session by id; `--continue` would pick
 // the most recent conversation in the folder, which can be a person's own session. Runs started
-// by a version without builderSessionId fall back to `--continue`.
+// by a version without builderSessionId fall back to `--continue`. A "fresh" launch is a new
+// session under a new id with the run's prompt (a new feature, D49, or a resume that failed).
 // The builder's model (builder.model, Opus by default, D44) is passed on every launch, so it never
-// depends on the owner's own Claude Code default.
-export function launchArgs(kind, prompt = null, sessionId = null, model = null) {
-  const m = model ? ["--model", model] : [];
+// depends on the owner's own Claude Code default. Effort is passed only when builder.effort is
+// set: unset, the owner's own default applies (D49). The settings JSON goes in as one argument.
+export function launchArgs(kind, prompt = null, sessionId = null, model = null, { effort = null, settings = null } = {}) {
+  const m = [...(model ? ["--model", model] : []), ...(effort ? ["--effort", effort] : []), ...(settings ? ["--settings", settings] : [])];
   if (kind === "start") return [...(sessionId ? ["--session-id", sessionId] : []), ...m, "--permission-mode", "auto", "/autoclaude:start"];
   if (kind === "fresh") return ["--session-id", sessionId, ...m, "--permission-mode", "auto", prompt || "/autoclaude:resume"];
   return [...(sessionId ? ["--resume", sessionId] : ["--continue"]), ...m, "--permission-mode", "auto", prompt || "/autoclaude:resume"];
@@ -58,13 +85,19 @@ const ts = (iso) => { const t = iso ? Date.parse(iso) : NaN; return Number.isFin
 const mins = (ms) => `${Math.round(ms / MIN)} min`;
 
 // Pure decision. Every input is a plain value; see supervise() for where each comes from.
-// Returns { action: "none" | "relaunch" | "nudge" | "continue" | "pause-stuck" | "pause-weekly" | "resume-weekly" | "halt" | "exit", reason }.
+// Returns { action: "none" | "fresh" | "relaunch" | "nudge" | "continue" | "pause-stuck" | "pause-weekly" | "resume-weekly" | "halt" | "exit", reason }.
 export function decide(i) {
   const { status, now, childAlive, cfg, sup } = i;
   const s = cfg.supervisor;
   if (status === STATUS.running) {
     let want = null;
     const last = i.lastActivityAt || 0;
+    // A verified feature asks for a fresh session for the next one (D49: one 18-hour context
+    // averaged 459K tokens per request). Not a recovery; it waits for a verification in progress.
+    if (i.freshSession) {
+      if (childAlive && i.gateAt && now - i.gateAt < (cfg.gate.timeoutSec + 300) * 1000) return { action: "none", reason: "the gate is verifying; the fresh session waits" };
+      return { action: "fresh", reason: "the feature is verified; a fresh builder session takes the next one" };
+    }
     if (!childAlive) want = "the session exited";
     // A verification in progress is never interrupted, not even by an owner nudge (seen live: a
     // nudge that landed during the gate's run killed it and wasted the builder's `ready`).
@@ -163,32 +196,63 @@ export async function supervise({
 
   fs.writeFileSync(p.supervisorPidFile, String(process.pid));
   updateState(root, (s) => { s.supervisorPid = process.pid; s.windowTitle = title; });
+  // The PATH this window runs with is the one the builder, its hooks and the gate get, so
+  // `autoclaude checks` from any shell uses it too (checks.js checksEnv). Recorded here as well as
+  // by `autoclaude run`, because the watchdog can bring a supervisor back from another shell.
+  try { recordRunEnv(root, env, { now: () => new Date(now()) }); } catch {}
   let sup = { recoveries: 0, countAtLastRecovery: -1, resumedAt: null, nudgedAt: null, lastMorningDate: null };
-  try { sup = { ...sup, ...(readJson(supFile, {}) || {}), resumedAt: null, nudgedAt: null }; } catch {}
-  const saveSup = () => { try { writeJsonAtomic(supFile, sup); } catch {} };
+  // supervisor.json is written only when it changes: the rehearsal's supervisor rewrote it every
+  // poll, and a builder whose tests walk the project tree saw a file change under them.
+  let savedSup = null;
+  try {
+    const stored = readJson(supFile, null);
+    if (stored) savedSup = JSON.stringify(stored);
+    sup = { ...sup, ...(stored || {}), resumedAt: null, nudgedAt: null };
+  } catch {}
+  const saveSup = () => {
+    const text = JSON.stringify(sup);
+    if (text === savedSup) return;
+    try { writeJsonAtomic(supFile, sup); savedSup = text; } catch {}
+  };
 
   const doSpawn = spawnChild || ((args, opts) => spawn(claudeBinary(env), args, { ...opts, stdio: "inherit" }));
   // A `--resume <id>` that dies within this long found no conversation to resume (for example a
   // start session that ended before it saved anything); the next relaunch then opens a fresh
   // session under a new id instead of failing the same way until the run pauses as stuck.
   const RESUME_FAIL_MS = 30 * 1000;
-  const builderModel = () => { try { return cfgNow().builder.model || null; } catch { return null; } };
+  // Model, effort and the permissions JSON, read at every launch so a changed setting applies to
+  // the next session.
+  const options = () => { try { return launchOptions(cfgNow()); } catch { return { model: null, effort: null, settings: null }; } };
   let resumeFailedFast = false;
+  // A session ended in the middle of a verification (a halt, a crash, a stall) takes its gate
+  // with it, and that gate's plan ticks and PROGRESS lines would stay behind. They come out as
+  // soon as the gate is gone, so the owner reviewing a pause sees the plan as it is.
+  const undoCut = () => {
+    try {
+      const r = undoCutVerification(root, cfgNow(), { unlessGateRunning: true });
+      if (r) log(`the verification of ${r.step || "the last step"} was cut off with the session; its plan ticks and PROGRESS lines were taken out again`);
+    } catch (e) {
+      appendLine(logFile, `${new Date(now()).toISOString()} could not undo a cut-off verification: ${e && e.message ? e.message : e}`);
+    }
+  };
   const launch = (kind, prompt = null) => {
+    undoCut();
     let sessionId = null;
     let args;
-    if (kind === "start") {
+    const o = options();
+    if (kind === "start" || kind === "fresh") {
+      // A new session: a new id, and any fresh-session request is now served.
       sessionId = newSessionId();
-      updateState(root, (s) => { s.builderSessionId = sessionId; });
-      args = launchArgs(kind, prompt, sessionId, builderModel());
+      updateState(root, (s) => { s.builderSessionId = sessionId; s.freshSession = false; });
+      args = launchArgs(kind, prompt, sessionId, o.model, o);
     } else if (resumeFailedFast) {
       sessionId = newSessionId();
       updateState(root, (s) => { s.builderSessionId = sessionId; });
       log("the builder session could not be resumed; opening a fresh one with the run context");
-      args = launchArgs("fresh", prompt, sessionId, builderModel());
+      args = launchArgs("fresh", prompt, sessionId, o.model, o);
     } else {
       sessionId = loadState(root).builderSessionId || null;
-      args = launchArgs(kind, prompt, sessionId, builderModel());
+      args = launchArgs(kind, prompt, sessionId, o.model, o);
     }
     resumeFailedFast = false;
     const resuming = args[0] === "--resume";
@@ -214,7 +278,7 @@ export async function supervise({
   if (state.status === STATUS.complete) { log("the plan is already complete; nothing to supervise"); return { exit: "complete" }; }
   // A halt request left by a supervisor that died has no session to end any more.
   if (state.haltSession) updateState(root, (s) => { s.haltSession = false; });
-  if (state.status === STATUS.running) launch("resume");
+  if (state.status === STATUS.running) launch(state.freshSession ? "fresh" : "resume");
   else if (state.status === STATUS.idle) launch("start");
   else log(`the run is paused (${state.pauseReason || "?"}); waiting for \`autoclaude resume\``);
 
@@ -260,7 +324,7 @@ export async function supervise({
       const lastActivityAt = Math.max(ts(beat.at) || 0, childStartedAt || 0, gateSeenAt);
       const stale = t - lastActivityAt > cfg.supervisor.stallMin * MIN;
       const input = {
-        status: state.status, pauseReason: state.pauseReason, haltSession: !!state.haltSession, now: t, childAlive, cfg, sup,
+        status: state.status, pauseReason: state.pauseReason, haltSession: !!state.haltSession, freshSession: !!state.freshSession, now: t, childAlive, cfg, sup,
         lastActivityAt, heartbeatCount: beat.count, idle, failure, gateAt: gate, usage, nudge,
         agentStatus: stale && childAlive && child ? agentStatus(child.pid, env) : null,
         weeklyResetsAt: ts(state.weeklyResetsAt) || (usage.sevenDay && usage.sevenDay.resetsAt) || null
@@ -268,7 +332,16 @@ export async function supervise({
       const d = decide(input);
       if (d.action !== "none") log(`${d.action}: ${d.reason}`);
 
-      if (d.action === "nudge") {
+      if (d.action === "fresh") {
+        // Planned, so not a recovery; a verified feature is progress, so the stuck count restarts.
+        await stopChild();
+        if (childAlive) log("the session was told to end but had not exited 10 s later; trying again on the next poll");
+        else {
+          sup.recoveries = 0; sup.countAtLastRecovery = -1; sup.resumedAt = null; sup.nudgedAt = null;
+          removeIfExists(p.idleFile);
+          launch("fresh");
+        }
+      } else if (d.action === "nudge") {
         // An owner request, not a recovery: it does not count towards the stuck limit.
         removeIfExists(nudgeFile);
         removeIfExists(p.idleFile);
@@ -307,6 +380,7 @@ export async function supervise({
         else {
           updateState(root, (s) => { s.haltSession = false; });
           log("ended the session; the run stays paused until `autoclaude resume`");
+          undoCut();
         }
       } else if (d.action === "exit") {
         log(`${d.reason}; the supervisor is done`);
@@ -316,6 +390,8 @@ export async function supervise({
         // Nothing left to end (the session had already exited), or the run was resumed before
         // this poll: clear the request so it cannot end a later session by surprise.
         updateState(root, (s) => { if (s.status !== STATUS.paused || !childAlive) s.haltSession = false; });
+        // A session that died in the middle of a verification left its gate's ticks behind.
+        if (!childAlive) undoCut();
       }
 
       // Optional morning summary (P6.5), once a day at notify.morningSummaryAt local time.

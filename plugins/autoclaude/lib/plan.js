@@ -3,8 +3,15 @@
 // Node built-ins only. Byte-for-byte safe: text is split on "\n" and each line keeps
 // its "\r" (if any), so writes change only the marker character.
 
-export const MARKERS = Object.freeze({ todo: " ", done: "x", failed: "!", blocked: "?" });
+// built "~": committed without checks, waiting for its feature's verification (gate.verifyAt
+// "phase", D49). The gate turns the whole phase to "x" when the feature passes.
+export const MARKERS = Object.freeze({ todo: " ", done: "x", built: "~", failed: "!", blocked: "?" });
 const VALID_MARKERS = new Set(Object.values(MARKERS));
+
+// Done or built: the run does not work on it again.
+export function isFinished(step) {
+  return !!step && (step.marker === MARKERS.done || step.marker === MARKERS.built);
+}
 
 // - [ ] **S1.2** Title   (any marker character is captured so lint can report bad ones)
 const STEP_RE = /^(?<indent>[ \t]*)- \[(?<marker>.)\] \*\*(?<id>[A-Za-z]+\d+(?:\.\d+)+)\*\*[ \t]*(?<title>.*?)[ \t]*\r?$/;
@@ -66,7 +73,7 @@ export function parsePlan(text) {
         tags: [],
         depends: []
       };
-      if (!VALID_MARKERS.has(marker)) problems.push({ line: i + 1, id, message: `unknown marker "[${marker}]" (use [ ], [x], [!] or [?])` });
+      if (!VALID_MARKERS.has(marker)) problems.push({ line: i + 1, id, message: `unknown marker "[${marker}]" (use [ ], [x], [~], [!] or [?])` });
       steps.push(step);
       if (phase) phase.steps.push(step);
       return;
@@ -193,7 +200,7 @@ export function nextStep(parsed) {
 }
 
 export function firstUnfinished(parsed) {
-  return parsed.steps.find((s) => s.marker !== MARKERS.done) || null;
+  return parsed.steps.find((s) => !isFinished(s)) || null;
 }
 
 export function isPhaseEnd(parsed, id) {
@@ -202,10 +209,42 @@ export function isPhaseEnd(parsed, id) {
   return s.phase.steps[s.phase.steps.length - 1] === s;
 }
 
+// The step that closes its feature when verifyAt is "phase": every other step of its phase is
+// done or built. Normally the phase's last step; after the owner unticks an earlier step of a
+// closed phase, that step, so the phase is verified again instead of being left at [~].
+export function isFeatureEnd(parsed, id) {
+  const s = stepById(parsed, id);
+  if (!s) return false;
+  if (!s.phase) return true;
+  return s.phase.steps.every((x) => x === s || isFinished(x));
+}
+
+// Built [~] steps that no verification would reach any more, put back to [ ] so that a ready
+// verifies them. verifyAt "phase": a phase whose steps are all done or built (the owner ticked
+// the step that would have closed it) gets its last built step back, and that step's ready
+// verifies the whole phase. verifyAt "step" (switched from "phase" between runs): every built
+// step, each then verified on its own ready. Returns { text, reopened: [ids] }.
+export function reopenUnverified(text, verifyAt = "phase") {
+  const parsed = parsePlan(text);
+  const ids = [];
+  if (verifyAt === "step") {
+    for (const s of parsed.steps) if (s.marker === MARKERS.built) ids.push(s.id);
+  } else {
+    for (const ph of parsed.phases) {
+      const built = ph.steps.filter((s) => s.marker === MARKERS.built);
+      if (built.length && ph.steps.every(isFinished)) ids.push(built[built.length - 1].id);
+    }
+  }
+  let out = text;
+  for (const id of ids) out = setMarker(out, id, MARKERS.todo);
+  return { text: out, reopened: ids };
+}
+
 export function progress(parsed) {
-  const counts = { total: parsed.steps.length, done: 0, todo: 0, failed: 0, blocked: 0 };
+  const counts = { total: parsed.steps.length, done: 0, built: 0, todo: 0, failed: 0, blocked: 0 };
   for (const s of parsed.steps) {
     if (s.marker === MARKERS.done) counts.done++;
+    else if (s.marker === MARKERS.built) counts.built++;
     else if (s.marker === MARKERS.failed) counts.failed++;
     else if (s.marker === MARKERS.blocked) counts.blocked++;
     else counts.todo++;

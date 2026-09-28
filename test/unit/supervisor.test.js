@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { EventEmitter } from "node:events";
-import { decide, childEnv, launchArgs, supervise } from "../../plugins/autoclaude/lib/supervisor.js";
+import { decide, childEnv, launchArgs, supervise, builderSettings, launchOptions } from "../../plugins/autoclaude/lib/supervisor.js";
 import { mergeConfig } from "../../plugins/autoclaude/lib/config.js";
 import { saveState, loadState, defaultState } from "../../plugins/autoclaude/lib/state.js";
 
@@ -272,6 +272,136 @@ test("supervise: a complete run exits at once without launching anything", async
   const r = await h.run(3);
   assert.equal(r.exit, "complete");
   assert.deepEqual(h.launches, []);
+});
+
+// ---------- Phase 8: effort, permissions, a fresh session per feature ----------
+
+test("launch arguments: effort only when set, and the permissions JSON as one argument", () => {
+  const settings = JSON.stringify({ permissions: { allow: ["Bash(ssh pve *)"] }, autoMode: { environment: ["$defaults", "pve (10.0.0.2) is our Proxmox host"] } });
+  const o = { effort: "high", settings };
+  assert.deepEqual(launchArgs("start", null, "s-1", "opus", o), ["--session-id", "s-1", "--model", "opus", "--effort", "high", "--settings", settings, "--permission-mode", "auto", "/autoclaude:start"]);
+  assert.deepEqual(launchArgs("resume", null, "s-1", "opus", o), ["--resume", "s-1", "--model", "opus", "--effort", "high", "--settings", settings, "--permission-mode", "auto", "/autoclaude:resume"]);
+  assert.deepEqual(launchArgs("fresh", null, "s-2", "opus", o), ["--session-id", "s-2", "--model", "opus", "--effort", "high", "--settings", settings, "--permission-mode", "auto", "/autoclaude:resume"]);
+  assert.deepEqual(launchArgs("resume", "/compact", "s-1", "opus", { effort: null, settings: null }), ["--resume", "s-1", "--model", "opus", "--permission-mode", "auto", "/compact"], "unset effort: the owner's own default");
+});
+
+test("builderSettings: nothing without entries; allow rules and $defaults plus the trusted-infrastructure lines", () => {
+  assert.equal(builderSettings(mergeConfig({})), null);
+  assert.equal(builderSettings({ permissions: { allow: [" "], environment: [] } }), null, "blank entries do not count");
+  assert.equal(builderSettings({}), null, "an older config without the key");
+  const both = mergeConfig({ permissions: { allow: ["Bash(ssh pve *)", "Bash(docker *)"], environment: ["The Proxmox host pve at 10.0.0.2 is ours"] } });
+  assert.deepEqual(JSON.parse(builderSettings(both)), { permissions: { allow: ["Bash(ssh pve *)", "Bash(docker *)"] }, autoMode: { environment: ["$defaults", "The Proxmox host pve at 10.0.0.2 is ours"] } });
+  assert.deepEqual(JSON.parse(builderSettings({ permissions: { allow: ["Bash(docker *)"] } })), { permissions: { allow: ["Bash(docker *)"] } }, "only the parts that have entries");
+  assert.deepEqual(JSON.parse(builderSettings({ permissions: { environment: ["x"] } })), { autoMode: { environment: ["$defaults", "x"] } });
+  assert.deepEqual(launchOptions(mergeConfig({ builder: { effort: "max" } })), { model: "opus", effort: "max", settings: null });
+  assert.deepEqual(launchOptions(mergeConfig({})), { model: "opus", effort: null, settings: null });
+});
+
+test("decide: a fresh-session request replaces the session, waits for a verification, and never counts as a relaunch", () => {
+  const f = decide(base({ freshSession: true }));
+  assert.deepEqual([f.action, f.reason], ["fresh", "the feature is verified; a fresh builder session takes the next one"]);
+  assert.equal(decide(base({ freshSession: true, childAlive: false })).action, "fresh", "an exited session is replaced by a fresh one, not resumed");
+  assert.equal(decide(base({ freshSession: true, childAlive: false, sup: { recoveries: 2, countAtLastRecovery: 10, resumedAt: null } })).action, "fresh", "never paused as stuck");
+  const wait = decide(base({ freshSession: true, gateAt: T - MIN }));
+  assert.deepEqual([wait.action, wait.reason], ["none", "the gate is verifying; the fresh session waits"]);
+  assert.equal(decide(base({ freshSession: true, status: "paused", pauseReason: "review" })).action, "none", "a paused run waits for the resume");
+});
+
+test("supervise: a fresh-session request ends the builder and opens a new session under a new id, with effort and permissions", async () => {
+  const root = fakeProject("running", { builderSessionId: "b-1" });
+  const settings = { permissions: { allow: ["Bash(docker *)"], environment: ["the local Docker engine is ours"] } };
+  fs.writeFileSync(path.join(root, "autoclaude.config.json"), JSON.stringify({ version: 1, builder: { effort: "xhigh" }, ...settings, supervisor: { pollSec: 60, idleRelaunchMin: 15, stallMin: 45, resumeGraceMin: 2, rateLimitGraceMin: 10, maxRecoveries: 2 } }));
+  const h = harness(root);
+  const p = h.run(3);
+  for (let i = 0; i < 200 && h.launches.length < 1; i++) await tick();
+  // The gate verified a feature and asks for a fresh session.
+  saveState(root, { ...loadState(root), freshSession: true });
+  await p;
+  const json = JSON.stringify({ permissions: { allow: ["Bash(docker *)"] }, autoMode: { environment: ["$defaults", "the local Docker engine is ours"] } });
+  assert.deepEqual(h.launches, [
+    `--resume b-1 --model opus --effort xhigh --settings ${json} --permission-mode auto /autoclaude:resume`,
+    `--session-id sess-1 --model opus --effort xhigh --settings ${json} --permission-mode auto /autoclaude:resume`
+  ]);
+  assert.deepEqual(h.kills, [h.children[0].pid], "the old session was ended first");
+  const s = loadState(root);
+  assert.deepEqual([s.builderSessionId, s.freshSession], ["sess-1", false]);
+  const sup = JSON.parse(fs.readFileSync(path.join(root, ".autoclaude", "supervisor.json"), "utf8"));
+  assert.equal(sup.recoveries, 0, "not a recovery");
+  assert.match(fs.readFileSync(path.join(root, ".autoclaude", "logs", "supervisor.log"), "utf8"), /fresh: the feature is verified/);
+});
+
+test("supervise: a supervisor that starts on a pending fresh-session request opens the fresh session at once", async () => {
+  const root = fakeProject("running", { builderSessionId: "b-9", freshSession: true });
+  const h = harness(root);
+  await h.run(1);
+  assert.deepEqual(h.launches, ["--session-id sess-1 --model opus --permission-mode auto /autoclaude:resume"]);
+  assert.deepEqual([loadState(root).builderSessionId, loadState(root).freshSession], ["sess-1", false]);
+});
+
+// The state a gate leaves when its session is ended in the middle of a verification: the plan
+// ticked, the PROGRESS line written, and the snapshot that names both.
+function cutVerification(root) {
+  const planFile = path.join(root, "PLAN.md");
+  const plan = fs.readFileSync(planFile, "utf8");
+  const line = "- 2026-09-28 S1.1 One (attempt 1)\n";
+  fs.writeFileSync(planFile, plan.replace("- [ ] **S1.1**", "- [x] **S1.1**"));
+  fs.writeFileSync(path.join(root, "PROGRESS.md"), "# Progress\n" + line);
+  fs.mkdirSync(path.join(root, ".autoclaude"), { recursive: true });
+  fs.writeFileSync(path.join(root, ".autoclaude", "verify-pending.json"), JSON.stringify({ step: "S1.1", plan, progress: "# Progress\n", ticked: ["S1.1"], added: line }));
+  return plan;
+}
+
+test("supervise: ending a session in the middle of a verification takes that gate's ticks and PROGRESS lines out at once, but never under a live gate", async () => {
+  let root = fakeProject("running", { builderSessionId: "b-6" });
+  const plan = cutVerification(root);
+  let h = harness(root);
+  const p = h.run(3);
+  for (let i = 0; i < 200 && h.launches.length < 1; i++) await tick();
+  // The launch itself found the leftovers of a gate that died with an earlier session.
+  assert.equal(fs.readFileSync(path.join(root, "PLAN.md"), "utf8"), plan);
+  assert.equal(fs.readFileSync(path.join(root, "PROGRESS.md"), "utf8"), "# Progress\n");
+  // `pause --now` while the new session's gate verifies: the supervisor ends the session.
+  cutVerification(root);
+  saveState(root, { ...loadState(root), status: "paused", pauseReason: "review", haltSession: true });
+  await p;
+  assert.deepEqual(h.kills, [h.children[0].pid]);
+  assert.equal(fs.readFileSync(path.join(root, "PLAN.md"), "utf8"), plan, "the owner reviews the plan as it is");
+  assert.equal(fs.readFileSync(path.join(root, "PROGRESS.md"), "utf8"), "# Progress\n");
+  assert.equal(fs.existsSync(path.join(root, ".autoclaude", "verify-pending.json")), false);
+  assert.match(fs.readFileSync(path.join(root, ".autoclaude", "logs", "supervisor.log"), "utf8"), /verification of S1\.1 was cut off with the session/);
+
+  // A gate that is still alive (it holds gate.json) finishes, or undoes, its own verification.
+  root = fakeProject("running", { builderSessionId: "b-8" });
+  cutVerification(root);
+  fs.writeFileSync(path.join(root, ".autoclaude", "gate.json"), JSON.stringify({ pid: process.pid, at: new Date(T).toISOString() }));
+  h = harness(root);
+  await h.run(1);
+  assert.match(fs.readFileSync(path.join(root, "PLAN.md"), "utf8"), /- \[x\] \*\*S1\.1\*\*/);
+  assert.ok(fs.existsSync(path.join(root, ".autoclaude", "verify-pending.json")));
+});
+
+test("supervise: supervisor.json is written only when it changes, and the window's PATH is recorded for the checks", async () => {
+  const root = fakeProject("running", { builderSessionId: "b-4" });
+  const rt = path.join(root, ".autoclaude");
+  const supFile = path.join(rt, "supervisor.json");
+  let clock = T;
+  let polls = 0;
+  const spawnChild = (args) => { const c = new EventEmitter(); c.pid = 3000; return c; };
+  // After the first poll wrote the file, a probe key is added behind the supervisor's back: a
+  // rewrite would drop it. Nothing changes for the next polls, so it must survive them.
+  const sleep = async (ms) => {
+    clock += ms;
+    if (++polls === 2) {
+      const j = fs.existsSync(supFile) ? JSON.parse(fs.readFileSync(supFile, "utf8")) : {};
+      fs.writeFileSync(supFile, JSON.stringify({ ...j, probe: 1 }));
+    }
+    await new Promise((r) => setImmediate(r));
+  };
+  const env = { PATH: "C:\\run\\path", CLAUDE_CONFIG_DIR: fs.mkdtempSync(path.join(os.tmpdir(), "autoclaude-sup-cfg-")) };
+  await supervise({ root, env, spawnChild, agentStatus: () => "busy", say: async () => {}, now: () => clock, sleep, maxLoops: 5, console: { log() {} } });
+  assert.equal(JSON.parse(fs.readFileSync(supFile, "utf8")).probe, 1, "no rewrite while nothing changed");
+  const runEnv = JSON.parse(fs.readFileSync(path.join(rt, "run-env.json"), "utf8"));
+  assert.equal(runEnv.PATH, "C:\\run\\path");
 });
 
 test("supervise: the optional morning summary goes out once a day, at low priority", async () => {

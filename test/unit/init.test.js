@@ -99,6 +99,8 @@ test("initProject in an empty folder: config, template files with placeholders, 
     assert.deepEqual(cfg.checks, []);
     assert.equal(cfg.devServer.command, null);
     assert.match(fs.readFileSync(path.join(root, ".gitignore"), "utf8"), /\.autoclaude\//);
+    // The fake template's .gitignore had no secrets/; init adds it (a run generates secrets there).
+    assert.match(fs.readFileSync(path.join(root, ".gitignore"), "utf8"), /^secrets\/$/m);
     assert.deepEqual(JSON.parse(fs.readFileSync(path.join(root, ".autoclaude", "mcp.playwright.json"), "utf8")), playwrightMcpConfig());
     const reg = JSON.parse(fs.readFileSync(path.join(cfgDir, "autoclaude", "registry.json"), "utf8"));
     assert.equal(reg.projects.length, 1);
@@ -128,7 +130,7 @@ test("initProject on an existing project keeps its files, appends to .gitignore,
     assert.equal(r.existingProject, true);
     assert.ok(r.skipped.includes("PLAN.md"));
     assert.equal(fs.readFileSync(path.join(root, "PLAN.md"), "utf8"), "# Their own plan\n");
-    assert.match(fs.readFileSync(path.join(root, ".gitignore"), "utf8"), /^node_modules\/\n\n# AutoClaude runtime state\n\.autoclaude\/\n$/);
+    assert.match(fs.readFileSync(path.join(root, ".gitignore"), "utf8"), /^node_modules\/\n\n# AutoClaude runtime state\n\.autoclaude\/\n# Secrets an AutoClaude run generates\. Never committed\.\nsecrets\/\n$/);
     const cfg = JSON.parse(fs.readFileSync(path.join(root, "autoclaude.config.json"), "utf8"));
     assert.equal(cfg.devServer.command, "npm run dev");
     assert.equal(cfg.devServer.url, "http://127.0.0.1:3005");

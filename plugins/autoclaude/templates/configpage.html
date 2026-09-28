@@ -1,0 +1,589 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>AutoClaude settings</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #f6f6f3; --panel: #ffffff; --text: #1c1c1a; --muted: #5d5d57; --line: #d9d9d2;
+    --accent: #a8481a; --accent-text: #ffffff; --ok: #1d7137; --warn: #8d5400; --bad: #b0271f;
+    --chip: #ecebe5; --changed: #fff3d1; --input: #ffffff; --focus: #2f6fd6;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #151514; --panel: #1f1f1d; --text: #ebebe7; --muted: #a4a49c; --line: #3a3a36;
+      --accent: #e38a52; --accent-text: #151514; --ok: #72c68f; --warn: #e2b35d; --bad: #f08a82;
+      --chip: #2c2c29; --changed: #3b321d; --input: #262624; --focus: #7aa7f0;
+    }
+  }
+  * { box-sizing: border-box; }
+  html { scroll-padding-top: 96px; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  header.top { position: sticky; top: 0; z-index: 5; background: var(--panel); border-bottom: 1px solid var(--line); padding: 10px 16px; }
+  header.top h1 { font-size: 18px; margin: 0; }
+  header.top .where { color: var(--muted); font-size: 13px; overflow-wrap: anywhere; }
+  nav { display: flex; flex-wrap: wrap; gap: 4px 14px; margin-top: 6px; font-size: 14px; }
+  nav a { color: var(--accent); text-decoration: none; }
+  nav a:hover { text-decoration: underline; }
+  main { max-width: 900px; margin: 0 auto; padding: 16px 16px 120px; }
+  section { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px; margin: 0 0 18px; }
+  section > h2 { margin: 0 0 4px; font-size: 18px; }
+  h3 { font-size: 15px; margin: 18px 0 6px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+  .intro { color: var(--muted); margin: 0 0 10px; font-size: 14px; }
+  .banner { border-radius: 8px; padding: 10px 12px; margin: 0 0 16px; border: 1px solid var(--line); background: var(--panel); }
+  .banner.running { border-color: var(--warn); }
+  .banner.bad { border-color: var(--bad); }
+  .banner ul { margin: 6px 0 0; padding-left: 20px; }
+  .field { border-top: 1px solid var(--line); padding: 10px 0; }
+  .field:first-of-type { border-top: 0; }
+  .field.changed { background: var(--changed); margin: 0 -8px; padding: 10px 8px; border-radius: 6px; }
+  .fhead { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 10px; }
+  .fhead label { font-weight: 600; }
+  .src { font-size: 12px; padding: 1px 7px; border-radius: 99px; background: var(--chip); color: var(--muted); }
+  .src.project { color: var(--accent); }
+  .src.computer { color: var(--ok); }
+  .lock { font-size: 12px; padding: 1px 7px; border-radius: 99px; border: 1px solid var(--warn); color: var(--warn); }
+  .fctl { margin: 6px 0 4px; }
+  .help { margin: 2px 0; color: var(--muted); font-size: 14px; }
+  .meta { margin: 2px 0; font-size: 13px; color: var(--muted); display: flex; flex-wrap: wrap; gap: 4px 12px; align-items: center; }
+  .lockwhy { margin: 4px 0 0; font-size: 13px; color: var(--warn); }
+  .err { margin: 4px 0 0; font-size: 13px; color: var(--bad); font-weight: 600; }
+  code { font: 13px ui-monospace, SFMono-Regular, Consolas, monospace; background: var(--chip); padding: 1px 5px; border-radius: 4px; overflow-wrap: anywhere; }
+  input[type=text], input[type=number], input[type=password], input[type=time], select, textarea {
+    font: inherit; color: var(--text); background: var(--input); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; max-width: 100%;
+  }
+  input[type=text], input[type=password], textarea { width: 100%; }
+  textarea { min-height: 70px; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 13px; }
+  input:focus-visible, select:focus-visible, textarea:focus-visible, button:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
+  input:disabled, select:disabled, textarea:disabled { opacity: .6; }
+  button { font: inherit; border-radius: 6px; border: 1px solid var(--line); background: var(--chip); color: var(--text); padding: 5px 12px; cursor: pointer; }
+  button:disabled { opacity: .5; cursor: default; }
+  button.primary { background: var(--accent); color: var(--accent-text); border-color: var(--accent); font-weight: 600; }
+  button.link { background: none; border: 0; padding: 0; color: var(--accent); text-decoration: underline; font-size: 13px; }
+  button.link:disabled { color: var(--muted); text-decoration: none; }
+  .checks label { display: inline-flex; gap: 6px; align-items: center; margin-right: 16px; }
+  .rows { display: grid; gap: 8px; }
+  /* auto-fit cannot share the template with an auto track, so the Remove button is just another cell. */
+  .row { display: grid; gap: 6px; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); align-items: end; border: 1px solid var(--line); border-radius: 8px; padding: 8px; }
+  .row > button { justify-self: start; }
+  .row label.col { display: grid; gap: 2px; font-size: 12px; color: var(--muted); }
+  .row label.col input[type=checkbox] { justify-self: start; margin: 8px 0; }
+  .secret { display: flex; gap: 6px; align-items: center; }
+  .secret input { flex: 1; min-width: 0; }
+  .card { border: 1px solid var(--line); border-radius: 8px; padding: 12px; margin: 10px 0; }
+  .card h4 { margin: 0 0 4px; font-size: 15px; }
+  .status { font-size: 14px; margin: 4px 0 8px; }
+  .status.ok { color: var(--ok); }
+  .status.bad { color: var(--bad); }
+  .actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 8px; }
+  ul.critical { margin: 4px 0; padding-left: 20px; color: var(--muted); font-size: 14px; }
+  details > summary { cursor: pointer; font-weight: 600; margin: 10px 0 4px; color: var(--muted); }
+  footer.bar { position: fixed; left: 0; right: 0; bottom: 0; z-index: 5; background: var(--panel); border-top: 1px solid var(--line); padding: 10px 16px; display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; justify-content: flex-end; }
+  footer.bar #pending { margin-right: auto; color: var(--muted); font-size: 14px; }
+  footer.bar #msg { font-size: 14px; }
+  footer.bar #msg.bad { color: var(--bad); }
+  footer.bar #msg.ok { color: var(--ok); }
+  .closed { max-width: 600px; margin: 80px auto; text-align: center; padding: 0 16px; }
+</style>
+</head>
+<body>
+<header class="top">
+  <h1>AutoClaude settings</h1>
+  <div class="where" id="where">Loading...</div>
+  <nav>
+    <a href="#run">This project's run</a>
+    <a href="#alerts">Alerts</a>
+    <a href="#project">Checks and permissions</a>
+    <a href="#computer">This computer's defaults</a>
+    <a href="#tasks">Computer tasks</a>
+  </nav>
+</header>
+<main id="main"><p>Loading...</p></main>
+<footer class="bar">
+  <span id="pending">No unsaved changes</span>
+  <span id="msg" role="status" aria-live="polite"></span>
+  <button type="button" id="save" class="primary" disabled>Save changes</button>
+  <button type="button" id="done">Done</button>
+</footer>
+<script nonce="__NONCE__">
+(() => {
+  "use strict";
+  const TOKEN = new URLSearchParams(location.search).get("token") || "";
+  const $ = (sel) => document.querySelector(sel);
+
+  // h("div", { class: "x", text: "y", onclick: fn }, ...children)
+  function h(tag, attrs, ...kids) {
+    const e = document.createElement(tag);
+    for (const [k, v] of Object.entries(attrs || {})) {
+      if (v === null || v === undefined || v === false) continue;
+      if (k === "class") e.className = v;
+      else if (k === "text") e.textContent = v;
+      else if (k.startsWith("on") && typeof v === "function") e.addEventListener(k.slice(2), v);
+      else if (v === true) e.setAttribute(k, "");
+      else e.setAttribute(k, String(v));
+    }
+    for (const kid of kids.flat(Infinity)) {
+      if (kid === null || kid === undefined || kid === false) continue;
+      e.append(kid instanceof Node ? kid : String(kid));
+    }
+    return e;
+  }
+
+  async function api(method, url, body) {
+    const headers = { "X-AutoClaude-Token": TOKEN };
+    if (body !== undefined) headers["Content-Type"] = "application/json";
+    const res = await fetch(url, { method, headers, body: body === undefined ? undefined : JSON.stringify(body), cache: "no-store" });
+    let data = null;
+    try { data = await res.json(); } catch { data = null; }
+    if (!res.ok) {
+      const text = data && (data.error || (data.errors && data.errors.map((x) => (x.setting || x.path ? `${x.setting || x.path}: ` : "") + x.message).join("; ")));
+      const e = new Error(text || `HTTP ${res.status}`);
+      e.data = data;
+      throw e;
+    }
+    return data;
+  }
+
+  let S = null;
+  const pending = { project: { set: {}, reset: new Set() }, computer: { set: {}, reset: new Set() } };
+  let notifyPending = {};
+  let fieldErrors = {};
+  let closed = false;
+
+  const getPath = (obj, p) => {
+    let o = obj;
+    for (const k of p.split(".")) {
+      if (o === null || typeof o !== "object" || Array.isArray(o) || !Object.prototype.hasOwnProperty.call(o, k)) return undefined;
+      o = o[k];
+    }
+    return o;
+  };
+  const layerRaw = (layer) => (layer === "project" ? S.project : S.computer);
+  const fmt = (v) => {
+    if (v === null || v === undefined) return "not set";
+    if (typeof v === "boolean") return v ? "on" : "off";
+    if (Array.isArray(v)) return v.length ? v.map((x) => (x && typeof x === "object" ? JSON.stringify(x) : String(x))).join(", ") : "none";
+    if (typeof v === "object") return JSON.stringify(v);
+    return String(v);
+  };
+  // What a layer falls back to without its own value: what Reset gives.
+  const fallback = (layer, p) => (layer === "project" ? getPath(S.computerMerged, p) : getPath(S.builtin, p));
+  const isPending = (layer, p) => Object.prototype.hasOwnProperty.call(pending[layer].set, p) || pending[layer].reset.has(p);
+  function current(layer, p) {
+    const pd = pending[layer];
+    if (Object.prototype.hasOwnProperty.call(pd.set, p)) return pd.set[p];
+    if (pd.reset.has(p)) return fallback(layer, p);
+    return getPath(layer === "project" ? S.merged : S.computerMerged, p);
+  }
+  function ownSet(layer, p) {
+    const pd = pending[layer];
+    if (Object.prototype.hasOwnProperty.call(pd.set, p)) return true;
+    if (pd.reset.has(p)) return false;
+    return getPath(layerRaw(layer), p) !== undefined;
+  }
+  function sourceOf(layer, p) {
+    const pd = pending[layer];
+    if (Object.prototype.hasOwnProperty.call(pd.set, p)) return [layer, `${layer} (unsaved)`];
+    if (pd.reset.has(p)) return ["", "back to default (unsaved)"];
+    const s = S.sources[layer][p] || "built-in";
+    return [s === "built-in" ? "" : s, s];
+  }
+
+  const pendingCount = () => Object.keys(pending.project.set).length + pending.project.reset.size + Object.keys(pending.computer.set).length + pending.computer.reset.size + Object.keys(notifyPending).length;
+  function updateBar() {
+    const n = pendingCount();
+    $("#pending").textContent = n ? `${n} unsaved change${n === 1 ? "" : "s"}` : "No unsaved changes";
+    $("#save").disabled = n === 0;
+  }
+  function say(text, kind) {
+    const m = $("#msg");
+    m.textContent = text || "";
+    m.className = kind || "";
+  }
+
+  function change(layer, p, v) {
+    pending[layer].reset.delete(p);
+    pending[layer].set[p] = v;
+    delete fieldErrors[`${layer}:${p}`];
+    refreshMarks(layer, p);
+    updateBar();
+  }
+  function reset(layer, p) {
+    delete pending[layer].set[p];
+    if (getPath(layerRaw(layer), p) !== undefined) pending[layer].reset.add(p);
+    delete fieldErrors[`${layer}:${p}`];
+    redrawRow(layer, p);
+    updateBar();
+  }
+
+  const idFor = (layer, p) => `f-${layer}-${p.replace(/[^A-Za-z0-9]/g, "_")}`;
+  const asNumber = (v) => (String(v).trim() !== "" && Number.isFinite(Number(v)) ? Number(v) : String(v));
+
+  function control(f, layer, value, disabled) {
+    const id = idFor(layer, f.path);
+    const on = (v) => change(layer, f.path, v);
+    switch (f.type) {
+      case "bool": {
+        const c = h("input", { type: "checkbox", id, disabled });
+        c.checked = value === true;
+        c.addEventListener("change", () => on(c.checked));
+        return h("label", { class: "checks" }, c, " On");
+      }
+      case "enum":
+      case "enum-null": {
+        const opts = (f.type === "enum-null" ? [["", f.nullLabel || "Not set"]] : []).concat(f.options.map((o) => [o, o]));
+        const s = h("select", { id, disabled }, opts.map(([v, t]) => h("option", { value: v, text: t })));
+        s.value = value === null || value === undefined ? "" : String(value);
+        s.addEventListener("change", () => on(f.type === "enum-null" && s.value === "" ? null : s.value));
+        return s;
+      }
+      case "int": {
+        const i = h("input", { type: "number", id, min: "1", step: "1", disabled, inputmode: "numeric" });
+        i.value = value === null || value === undefined ? "" : String(value);
+        i.addEventListener("input", () => on(asNumber(i.value)));
+        return i;
+      }
+      case "model": {
+        const listId = `${id}-models`;
+        const i = h("input", { type: "text", id, list: listId, disabled, spellcheck: "false", autocomplete: "off" });
+        i.value = value === null || value === undefined ? "" : String(value);
+        i.addEventListener("input", () => on(i.value.trim()));
+        return h("span", {}, i, h("datalist", { id: listId }, ["opus", "sonnet", "opus[1m]", "sonnet[1m]"].map((m) => h("option", { value: m }))));
+      }
+      case "time-null": {
+        const i = h("input", { type: "time", id, disabled });
+        i.value = value || "";
+        i.addEventListener("input", () => on(i.value === "" ? null : i.value));
+        return i;
+      }
+      case "string":
+      case "path":
+      case "string-null": {
+        const i = h("input", { type: "text", id, disabled, spellcheck: "false", autocomplete: "off" });
+        i.value = value === null || value === undefined ? "" : String(value);
+        i.addEventListener("input", () => on(f.type === "string-null" && i.value.trim() === "" ? null : i.value));
+        return i;
+      }
+      case "strings": {
+        const t = h("textarea", { id, disabled, spellcheck: "false", rows: "3" });
+        t.value = Array.isArray(value) ? value.join("\n") : "";
+        t.addEventListener("input", () => on(t.value.split(/\r?\n/).map((s) => s.trim()).filter(Boolean)));
+        return t;
+      }
+      case "multi": {
+        const chosen = new Set(Array.isArray(value) ? value : []);
+        const boxes = f.options.map((o) => {
+          const c = h("input", { type: "checkbox", disabled });
+          c.checked = chosen.has(o);
+          c.dataset.value = o;
+          return c;
+        });
+        const emit = () => on(boxes.filter((b) => b.checked).map((b) => b.dataset.value));
+        boxes.forEach((b) => b.addEventListener("change", emit));
+        return h("div", { class: "checks", id }, boxes.map((b) => h("label", {}, b, b.dataset.value)));
+      }
+      case "rows": return rowsControl(f, layer, value, disabled, on);
+      default: return h("span", { text: fmt(value) });
+    }
+  }
+
+  function rowsControl(f, layer, value, disabled, on) {
+    const list = (Array.isArray(value) ? value : []).map((r) => (r && typeof r === "object" ? { ...r } : {}));
+    const wrap = h("div", { class: "rows", id: idFor(layer, f.path) });
+    // Keeps keys the page does not know; drops empty optional ones.
+    const clean = (r) => {
+      const o = { ...r };
+      for (const c of f.columns) {
+        const v = o[c.key];
+        if (c.type === "bool") { if (v === true) o[c.key] = true; else delete o[c.key]; continue; }
+        if (v === undefined || v === null || String(v).trim() === "") { if (c.required) o[c.key] = ""; else delete o[c.key]; continue; }
+        o[c.key] = c.type === "int" ? asNumber(v) : String(v);
+      }
+      return o;
+    };
+    const emit = () => on(list.map(clean));
+    const draw = () => {
+      wrap.replaceChildren();
+      list.forEach((r, idx) => {
+        const cells = f.columns.map((c) => {
+          let input;
+          if (c.type === "bool") {
+            input = h("input", { type: "checkbox", disabled });
+            input.checked = r[c.key] === true;
+            input.addEventListener("change", () => { r[c.key] = input.checked; emit(); });
+          } else {
+            input = h("input", { type: c.type === "int" ? "number" : "text", disabled, spellcheck: "false", autocomplete: "off" });
+            input.value = r[c.key] === undefined || r[c.key] === null ? "" : String(r[c.key]);
+            input.addEventListener("input", () => { r[c.key] = input.value; emit(); });
+          }
+          return h("label", { class: "col" }, `${c.label}${c.required ? "" : " (optional)"}`, input);
+        });
+        const del = h("button", { type: "button", disabled, text: "Remove", onclick: () => { list.splice(idx, 1); emit(); draw(); } });
+        wrap.append(h("div", { class: "row" }, cells, del));
+      });
+      wrap.append(h("div", {}, h("button", { type: "button", disabled, text: "Add", onclick: () => { list.push({}); draw(); } })));
+    };
+    draw();
+    return wrap;
+  }
+
+  function row(f, layer) {
+    const p = f.path;
+    const lock = S.locked[layer] && S.locked[layer][p];
+    const [srcClass, srcText] = sourceOf(layer, p);
+    const err = fieldErrors[`${layer}:${p}`];
+    const builtin = getPath(S.builtin, p);
+    const computerOwn = layer === "project" ? getPath(S.computer, p) : undefined;
+    const el = h("div", { class: `field${isPending(layer, p) ? " changed" : ""}`, "data-key": `${layer}:${p}` },
+      h("div", { class: "fhead" },
+        h("label", { for: idFor(layer, p), text: f.label }),
+        h("span", { class: `src ${srcClass}`, title: "Where the value in use comes from", text: srcText }),
+        lock ? h("span", { class: "lock", text: "Locked" }) : null),
+      h("div", { class: "fctl" }, control(f, layer, current(layer, p), !!lock)),
+      h("p", { class: "help", text: f.help }),
+      h("p", { class: "meta" },
+        h("span", {}, "Built-in default: ", h("code", { text: fmt(builtin) })),
+        computerOwn !== undefined ? h("span", {}, "This computer: ", h("code", { text: fmt(computerOwn) })) : null,
+        h("button", {
+          type: "button", class: "link reset", disabled: !!lock || !ownSet(layer, p),
+          text: layer === "project" ? (computerOwn !== undefined ? "Reset to this computer's default" : "Reset to the default") : "Reset to the built-in default",
+          onclick: () => reset(layer, p)
+        })),
+      lock ? h("p", { class: "lockwhy", text: `Locked while the run is going: ${lock}.` }) : null,
+      err ? h("p", { class: "err", text: err }) : null);
+    return el;
+  }
+
+  function findRow(layer, p) {
+    return [...document.querySelectorAll(".field")].find((e) => e.dataset.key === `${layer}:${p}`) || null;
+  }
+  function redrawRow(layer, p) {
+    const old = findRow(layer, p);
+    const f = S.fields.find((x) => x.path === p);
+    if (old && f) old.replaceWith(row(f, layer));
+  }
+  // After typing: mark the row without rebuilding it (rebuilding would take the focus away).
+  function refreshMarks(layer, p) {
+    const el = findRow(layer, p);
+    if (!el) return;
+    el.classList.toggle("changed", isPending(layer, p));
+    const [cls, text] = sourceOf(layer, p);
+    const src = el.querySelector(".src");
+    src.className = `src ${cls}`;
+    src.textContent = text;
+    const r = el.querySelector("button.reset");
+    if (r) r.disabled = !!(S.locked[layer] && S.locked[layer][p]) || !ownSet(layer, p);
+    const e = el.querySelector(".err");
+    if (e) e.remove();
+  }
+
+  function fieldsBlock(section, layer) {
+    const list = S.fields.filter((f) => f.section === section);
+    const plain = list.filter((f) => !f.group);
+    const groups = [...new Set(list.filter((f) => f.group).map((f) => f.group))];
+    return [
+      plain.map((f) => row(f, layer)),
+      groups.map((g) => h("details", {}, h("summary", { text: g }), list.filter((f) => f.group === g).map((f) => row(f, layer))))
+    ];
+  }
+
+  const CHANNEL_TEXT = { auto: "Automatic (ntfy if its URL is set, else Discord, else the log only)", ntfy: "ntfy", discord: "Discord", stdout: "Only the log on this computer" };
+  const SECRETS = [
+    { key: "discord_webhook", label: "Discord webhook URL", help: "A channel webhook, from the channel's settings, Integrations, Webhooks.", placeholder: "https://discord.com/api/webhooks/..." },
+    { key: "ntfy_url", label: "ntfy topic URL", help: "The full topic URL, for example https://ntfy.sh/ with a hard-to-guess topic name.", placeholder: "https://ntfy.sh/your-topic" },
+    { key: "ntfy_token", label: "ntfy access token", help: "Only for a protected topic.", placeholder: "tk_..." }
+  ];
+
+  function secretRow(s) {
+    const info = S.alerts.secrets[s.key];
+    const input = h("input", { type: "password", id: `sec-${s.key}`, autocomplete: "off", spellcheck: "false", placeholder: info.set ? `${info.masked} (saved; type to replace)` : s.placeholder });
+    if (Object.prototype.hasOwnProperty.call(notifyPending, s.key)) input.value = notifyPending[s.key] || "";
+    input.addEventListener("input", () => {
+      if (input.value === "") delete notifyPending[s.key];
+      else notifyPending[s.key] = input.value;
+      updateBar();
+    });
+    const show = h("button", { type: "button", text: "Show", disabled: !info.set });
+    show.addEventListener("click", async () => {
+      if (input.type === "text") { input.type = "password"; show.textContent = "Show"; return; }
+      try {
+        if (!input.value) input.value = (await api("GET", `/api/secret?name=${encodeURIComponent(s.key)}`)).value;
+        input.type = "text";
+        show.textContent = "Hide";
+      } catch (e) { say(e.message, "bad"); }
+    });
+    const clear = h("button", { type: "button", text: "Clear", disabled: !info.set, onclick: () => {
+      notifyPending[s.key] = null;
+      input.value = "";
+      input.placeholder = "(cleared when you save)";
+      updateBar();
+    } });
+    const err = fieldErrors[`alerts:${s.key}`];
+    return h("div", { class: "field" },
+      h("div", { class: "fhead" }, h("label", { for: `sec-${s.key}`, text: s.label }), h("span", { class: `src ${info.set ? "computer" : ""}`, text: info.set ? "set on this computer" : "not set" })),
+      h("div", { class: "fctl secret" }, input, show, clear),
+      h("p", { class: "help", text: s.help }),
+      err ? h("p", { class: "err", text: err }) : null);
+  }
+
+  async function testAlert(out) {
+    if (Object.keys(notifyPending).length) { out.textContent = "Save first: the test uses the saved channel."; return; }
+    out.textContent = "Sending...";
+    try {
+      const r = await api("POST", "/api/test-alert", {});
+      if (r.channel === "stdout") out.textContent = "No channel is set up, so it only went to the log on this computer.";
+      else out.textContent = r.ok ? `Sent through ${r.channel}. Check your phone.` : `Not delivered through ${r.channel}: ${r.error || "unknown error"}.`;
+    } catch (e) { out.textContent = e.message; }
+  }
+
+  function alertsSection() {
+    const a = S.alerts;
+    const sel = h("select", { id: "channel" }, Object.entries(CHANNEL_TEXT).map(([v, t]) => h("option", { value: v, text: t })));
+    sel.value = Object.prototype.hasOwnProperty.call(notifyPending, "channel") ? notifyPending.channel : a.channel;
+    sel.addEventListener("change", () => {
+      if (sel.value === a.channel) delete notifyPending.channel; else notifyPending.channel = sel.value;
+      updateBar();
+    });
+    const testOut = h("span", { class: "help" });
+    const channel = h("div", { class: "card" },
+      h("h4", { text: "Where alerts go (this computer)" }),
+      h("p", { class: "intro" }, "Saved to ", h("code", { text: a.notifyFile }), ", never in a project. Hook processes read the plugin's own settings first, so a channel set there when the plugin was installed wins over this one."),
+      h("div", { class: "field" },
+        h("div", { class: "fhead" }, h("label", { for: "channel", text: "Channel" }), h("span", { class: "src", text: `sending through: ${a.resolvedChannel}` })),
+        h("div", { class: "fctl" }, sel),
+        h("p", { class: "help", text: "Where alerts go from this computer." })),
+      SECRETS.map(secretRow),
+      h("div", { class: "actions" }, h("button", { type: "button", text: "Send a test alert", onclick: () => testAlert(testOut) }), testOut));
+    const which = S.root && S.projectExists
+      ? h("div", { class: "card" }, h("h4", { text: "Which alerts (this project)" }), fieldsBlock("alerts", "project"))
+      : h("div", { class: "card" }, h("h4", { text: "Which alerts" }), h("p", { class: "intro", text: "Set them per project on this page when it is opened inside a project, or as this computer's defaults below." }));
+    const critical = h("div", { class: "card" },
+      h("h4", { text: "Always sent (critical)" }),
+      h("p", { class: "intro", text: "These cannot be switched off:" }),
+      h("ul", { class: "critical" }, a.critical.map((c) => h("li", { text: c }))));
+    return h("section", { id: "alerts" }, h("h2", { text: "Alerts" }), channel, which, critical);
+  }
+
+  function noProject(id, title) {
+    return h("section", { id }, h("h2", { text: title }), h("p", { class: "intro", text: S.root ? `${S.root} has no autoclaude.config.json yet. Run autoclaude init there first.` : "Open this page from inside a project (autoclaude config in its folder) to change the project's settings." }));
+  }
+
+  async function tasksSection() {
+    const body = h("div", {}, h("p", { class: "intro", text: "Checking..." }));
+    const sec = h("section", { id: "tasks" }, h("h2", { text: "Computer tasks" }), h("p", { class: "intro", text: "Things AutoClaude installs on this computer, for every project." }), body);
+    const load = async () => {
+      let t;
+      try { t = await api("GET", "/api/tasks"); } catch (e) { body.replaceChildren(h("p", { class: "err", text: e.message })); return; }
+      const card = (task, title, help, st, detail) => {
+        const out = h("span", { class: "help" });
+        const act = (action) => async () => {
+          out.textContent = "Working...";
+          try {
+            const r = await api("POST", "/api/task", { task, action });
+            out.textContent = r.message || (r.ok ? "done" : "failed");
+            if (r.ok) setTimeout(load, 400);
+          } catch (e) { out.textContent = e.message; }
+        };
+        return h("div", { class: "card" },
+          h("h4", { text: title }),
+          h("p", { class: "help", text: help }),
+          h("p", { class: `status ${st.installed ? "ok" : st.error ? "bad" : ""}`, text: st.error ? `Could not tell: ${st.error}` : st.installed ? `Installed${detail ? `: ${detail}` : ""}` : "Not installed" }),
+          h("div", { class: "actions" },
+            h("button", { type: "button", text: st.installed ? "Reinstall" : "Install", onclick: act("install") }),
+            h("button", { type: "button", text: "Remove", disabled: !st.installed, onclick: act("uninstall") }),
+            out));
+      };
+      const w = t.watchdog || {};
+      body.replaceChildren(
+        card("watchdog", "Watchdog", "A scheduled task that looks every 5 minutes for a run whose window was closed and brings it back, while you are logged on.", w,
+          [w.status, w.lastRun ? `last run ${w.lastRun}` : null, w.nextRun ? `next run ${w.nextRun}` : null].filter(Boolean).join(", ")),
+        card("statusline", "Status line bridge", "Passes your Claude usage to AutoClaude through Claude Code's status line (for the weekly-limit pause), and keeps any status line you already had.", t.statusline || {}, ""));
+    };
+    load();
+    return sec;
+  }
+
+  async function render() {
+    const main = $("#main");
+    const parts = [];
+    $("#where").textContent = S.root ? `Project: ${S.root}` : "No project here: this computer's settings only";
+    if (S.running) parts.push(h("div", { class: "banner running" }, h("strong", { text: "A run is going. " }), "Settings marked Locked change how steps are built or checked, so they wait until you pause the run. The rest take effect at once."));
+    else if (S.runStatus === "paused") parts.push(h("div", { class: "banner" }, "The run is paused: every setting can be changed, and the changes apply when it resumes."));
+    if (S.errors && S.errors.length) {
+      parts.push(h("div", { class: "banner bad" }, h("strong", { text: "Problems in the saved settings:" }),
+        h("ul", {}, S.errors.map((e) => h("li", { text: `${e.layer === "computer" ? "this computer's defaults" : "the project"}: ${e.path ? `${e.path}: ` : ""}${e.message}` })))));
+    }
+    const haveProject = S.root && S.projectExists;
+    parts.push(haveProject
+      ? h("section", { id: "run" }, h("h2", { text: "This project's run" }),
+          h("p", { class: "intro" }, "Saved to ", h("code", { text: S.projectFile }), ". A setting left alone follows this computer's default, then the built-in one."),
+          fieldsBlock("run", "project"))
+      : noProject("run", "This project's run"));
+    parts.push(alertsSection());
+    parts.push(haveProject
+      ? h("section", { id: "project" }, h("h2", { text: "This project's checks, dev server, deny rules and permissions" }),
+          h("p", { class: "intro", text: "These belong to the project only; planning (/autoclaude:plan) usually writes them." }),
+          fieldsBlock("project", "project"))
+      : noProject("project", "This project's checks, dev server, deny rules and permissions"));
+    parts.push(h("section", { id: "computer" }, h("h2", { text: "This computer's defaults" }),
+      h("p", { class: "intro" }, "Saved to ", h("code", { text: S.machineFile }), ". Every project on this computer uses these unless it sets its own value."),
+      h("h3", { text: "Runs" }), fieldsBlock("run", "computer"),
+      h("h3", { text: "Alerts" }), fieldsBlock("alerts", "computer")));
+    parts.push(await tasksSection());
+    main.replaceChildren(...parts);
+    updateBar();
+  }
+
+  async function load() {
+    S = await api("GET", "/api/state");
+    await render();
+  }
+
+  async function save() {
+    const body = {};
+    for (const layer of ["project", "computer"]) {
+      const pd = pending[layer];
+      if (Object.keys(pd.set).length || pd.reset.size) body[layer] = { set: pd.set, reset: [...pd.reset] };
+    }
+    say("Saving...");
+    fieldErrors = {};
+    try {
+      if (body.project || body.computer) {
+        await api("POST", "/api/save", body);
+        for (const layer of ["project", "computer"]) { pending[layer].set = {}; pending[layer].reset = new Set(); }
+      }
+      if (Object.keys(notifyPending).length) {
+        await api("POST", "/api/notify", notifyPending);
+        notifyPending = {};
+      }
+      await load();
+      say("Saved.", "ok");
+    } catch (e) {
+      const errs = (e.data && e.data.errors) || [];
+      for (const x of errs) fieldErrors[`${x.layer}:${x.setting || x.path}`] = x.message;
+      await render();
+      say(`Not saved: ${e.message}`, "bad");
+    }
+  }
+
+  $("#save").addEventListener("click", save);
+  $("#done").addEventListener("click", async () => {
+    if (pendingCount() && !confirm("You have unsaved changes. Close without saving them?")) return;
+    try { await api("POST", "/api/done", {}); } catch { /* already closed */ }
+    closed = true;
+    document.body.replaceChildren(h("div", { class: "closed" }, h("h1", { text: "Settings closed" }), h("p", { text: "You can close this tab. Run autoclaude config again to come back." })));
+  });
+  window.addEventListener("beforeunload", (e) => {
+    if (!closed && pendingCount()) { e.preventDefault(); e.returnValue = ""; }
+  });
+
+  load().catch((e) => {
+    $("#main").replaceChildren(h("section", {}, h("h2", { text: "Could not load the settings" }), h("p", { class: "err", text: e.message }), h("p", { class: "help", text: "The page may have closed (Done, or 30 minutes without use). Run autoclaude config again for a new link." })));
+  });
+})();
+</script>
+</body>
+</html>

@@ -1,8 +1,9 @@
 # CONTINUE_HERE.md - resume point for {{PROJECT_NAME}}
 
 Where things are right now. Rewritten, not appended, at the end of every prompt and before every
-`autoclaude ready`. Read this first, then `CLAUDE.md`, then the current phase of `PLAN.md`.
-History lives in `docs/SESSION_LOG.md` and `PROGRESS.md`, not here.
+`autoclaude ready`: a fresh session starts each feature of a run and picks up from this file.
+Read this first, then `CLAUDE.md`, then the current phase of `PLAN.md`. History lives in
+`docs/SESSION_LOG.md` and `PROGRESS.md`, not here.
 
 ## Last updated
 
@@ -22,9 +23,10 @@ History lives in `docs/SESSION_LOG.md` and `PROGRESS.md`, not here.
 
 ## The exact next step
 
-1. Run `/autoclaude:plan` in a Claude Code session opened in this folder. With the owner it
-   settles the decisions, fills the TODO lines in `CLAUDE.md`, sets and runs the checks, the dev
-   server and the guard rules, writes the plan, commits everything and rewrites this file.
+1. Run `/autoclaude:plan` in a Claude Code session opened in this folder. It asks the owner
+   every open decision in rounds of questions, the run's scope included, fills the TODO lines in
+   `CLAUDE.md`, sets and runs the checks, the dev server, the guard and permission rules, writes
+   the plan, commits everything and rewrites this file.
 2. Do what the plan's "Before the run" section lists.
 3. Start the run with `autoclaude run` from a new terminal opened in this folder. Never
    `autoclaude start`: the run window calls that itself.
@@ -35,4 +37,4 @@ History lives in `docs/SESSION_LOG.md` and `PROGRESS.md`, not here.
   was not rewritten after a prompt. Fix that first: it is a rule, not a nicety.
 - A run never guesses at a placeholder; `/autoclaude:plan` fills them in with the owner.
 - Add `.env.example` with placeholders before the first step that needs configuration. Real
-  values stay in `.env`, which is gitignored.
+  values stay in `.env` or `secrets/`, both gitignored.

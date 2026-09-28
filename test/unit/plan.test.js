@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { parsePlan, lintPlan, nextStep, firstUnfinished, isPhaseEnd, setMarker, stepText, progress, planSlug, stepById, formatLint } from "../../plugins/autoclaude/lib/plan.js";
+import { parsePlan, lintPlan, nextStep, firstUnfinished, isPhaseEnd, isFeatureEnd, isFinished, setMarker, stepText, progress, planSlug, stepById, formatLint, MARKERS } from "../../plugins/autoclaude/lib/plan.js";
 
 const EXAMPLE = `# Shop plan
 
@@ -50,7 +50,7 @@ test("parses phases, steps, fields and markers from the section 4.8.1 shape", ()
   assert.equal(stepById(p, "S2.1").marker, "x");
   assert.equal(stepById(p, "S2.2").marker, "!");
   assert.deepEqual(lintPlan(p), []);
-  assert.deepEqual(progress(p), { total: 4, done: 1, todo: 2, failed: 1, blocked: 0 });
+  assert.deepEqual(progress(p), { total: 4, done: 1, built: 0, todo: 2, failed: 1, blocked: 0 });
   assert.equal(planSlug(p), "shop");
 });
 
@@ -67,6 +67,29 @@ test("nextStep, firstUnfinished, isPhaseEnd and stepText", () => {
   assert.match(text, /a nested bullet under the accept line/);
   assert.match(text, /Tags: no-ui/);
   assert.doesNotMatch(text, /S2\.2/);
+});
+
+test("the built marker [~]: parsed, linted clean, skipped as finished, counted, and closes a phase only when the rest is finished", () => {
+  const text = "# B plan\n\n## Phase 1: A\n- [~] **S1.1** One\n  - Accept: a\n- [~] **S1.2** Two\n  - Accept: b\n- [ ] **S1.3** Three\n  - Accept: c\n\n## Phase 2: B\n- [ ] **S2.1** Four\n  - Accept: d\n";
+  const p = parsePlan(text);
+  assert.deepEqual(lintPlan(p), []);
+  assert.equal(MARKERS.built, "~");
+  assert.equal(stepById(p, "S1.1").marker, "~");
+  assert.equal(isFinished(stepById(p, "S1.1")), true);
+  assert.equal(isFinished(stepById(p, "S1.3")), false);
+  assert.equal(firstUnfinished(p).id, "S1.3", "built steps are not redone");
+  assert.equal(nextStep(p).id, "S1.3");
+  assert.deepEqual(progress(p), { total: 4, done: 0, built: 2, todo: 2, failed: 0, blocked: 0 });
+  assert.equal(isFeatureEnd(p, "S1.3"), true, "every other step of the phase is built");
+  assert.equal(isFeatureEnd(p, "S1.1"), false, "S1.3 is still to do");
+  assert.equal(isFeatureEnd(p, "S2.1"), true, "a one-step phase closes at once");
+  // The owner unticks S1.1 of a closed phase: S1.1 closes the phase again, not the last step.
+  const reopened = parsePlan("## Phase 1: A\n- [ ] **S1.1** One\n  - Accept: a\n- [x] **S1.2** Two\n  - Accept: b\n");
+  assert.equal(isFeatureEnd(reopened, "S1.1"), true);
+  assert.equal(isFeatureEnd(reopened, "nope"), false);
+  const out = setMarker(text, "S1.3", MARKERS.built);
+  assert.equal(out, text.replace("- [ ] **S1.3**", "- [~] **S1.3**"));
+  assert.match(formatLint(lintPlan(parsePlan("## Phase 1: A\n- [*] **S1.1** One\n  - Accept: a\n"))), /unknown marker "\[\*\]" \(use \[ \], \[x\], \[~\], \[!\] or \[\?\]\)/);
 });
 
 test("setMarker changes exactly one byte and keeps CRLF line endings and a BOM", () => {
@@ -210,4 +233,17 @@ test("the tool's own plan parses and lints clean", async () => {
   assert.ok(p.steps.length > 40);
   assert.equal(p.phases[0].num, 0);
   assert.equal(stepById(p, "P0.2").marker, "x");
+});
+
+test("reopenUnverified: a phase left all done or built gets its last built step back; step mode reopens every built step", async () => {
+  const { reopenUnverified } = await import("../../plugins/autoclaude/lib/plan.js");
+  const text = "# T plan\n\n## Phase 1: A\n- [~] **S1.1** One\n  - Accept: a\n- [~] **S1.2** Two\n  - Accept: b\n- [x] **S1.3** Three\n  - Accept: c\n\n## Phase 2: B\n- [~] **S2.1** Four\n  - Accept: d\n- [ ] **S2.2** Five\n  - Accept: e\n\n## Phase 3: C\n- [x] **S3.1** Six\n  - Accept: f\n";
+  const phase = reopenUnverified(text);
+  assert.deepEqual(phase.reopened, ["S1.2"], "Phase 2 still has a step to close it; Phase 3 has nothing built");
+  assert.deepEqual(parsePlan(phase.text).steps.map((s) => s.marker).join(""), "~ x~ x");
+  assert.equal(phase.text.replace("- [ ] **S1.2**", "- [~] **S1.2**"), text, "only that marker changed");
+  const step = reopenUnverified(text, "step");
+  assert.deepEqual(step.reopened, ["S1.1", "S1.2", "S2.1"]);
+  assert.deepEqual(parsePlan(step.text).steps.map((s) => s.marker).join(""), "  x  x");
+  assert.deepEqual(reopenUnverified("# T plan\n\n## Phase 1: A\n- [x] **S1.1** One\n  - Accept: a\n").reopened, []);
 });

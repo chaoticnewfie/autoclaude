@@ -4,9 +4,22 @@
 import fs from "node:fs";
 import path from "node:path";
 import { appendLine, readJson, writeJsonAtomic, ensureDir } from "./fsatomic.js";
-import { machinePaths } from "./paths.js";
+import { machinePaths, projectPaths } from "./paths.js";
 
 export const PRIORITY = Object.freeze({ high: "high", default: "default", low: "low" });
+
+// Informational alerts the owner can switch in notify.events (P8.6, D49). Every other alert
+// (blocked, failed, stuck, paused by the gate, plan complete, push failed...) is critical and
+// always sent. Defaults live in config.js DEFAULTS.notify.events.
+export const SWITCHABLE_EVENTS = Object.freeze(["featureVerified", "stepVerified", "runStarted", "runResumed", "pausedByOwner"]);
+const EVENT_DEFAULTS = Object.freeze({ featureVerified: true, stepVerified: false, runStarted: false, runResumed: false, pausedByOwner: false });
+const EVENT_TITLES = Object.freeze({
+  featureVerified: "AutoClaude: feature verified",
+  stepVerified: "AutoClaude: step verified",
+  runStarted: "AutoClaude: run started",
+  runResumed: "AutoClaude: run resumed",
+  pausedByOwner: "AutoClaude: paused"
+});
 const NTFY_PRIORITY = { high: "5", default: "3", low: "2" };
 const FETCH_TIMEOUT_MS = 10000;
 
@@ -112,5 +125,39 @@ export async function notify({ title, message, priority = PRIORITY.default, tags
     toStdout(`(delivery through ${channel} failed: ${error})`);
     logLine(logFile, priority, channel, head, text, `FAILED: ${error}`);
     return { channel, ok: false, status: null, error, fallback: true };
+  }
+}
+
+// True for every critical event (anything not in SWITCHABLE_EVENTS); for a switchable one, the
+// project's notify.events value, or the built-in default when the config does not say.
+export function eventEnabled(config, event) {
+  if (!SWITCHABLE_EVENTS.includes(event)) return true;
+  const v = config && config.notify && config.notify.events ? config.notify.events[event] : undefined;
+  return typeof v === "boolean" ? v : EVENT_DEFAULTS[event];
+}
+
+// Sends one alert for a named event when the owner wants it, and otherwise only logs that it was
+// skipped. message is a string (the event's own title is used) or { title, message, priority,
+// tags }. opts go to notify(); opts.notify replaces the sender (tests, the gate's own notifier).
+// Logs to <root>/.autoclaude/logs/notify.log unless opts.logFile says otherwise. Never throws.
+// Returns notify()'s result plus { event, sent, skipped }.
+export async function notifyEvent(root, config, event, message, opts = {}) {
+  const { notify: sender, ...rest } = opts || {};
+  const logFile = rest.logFile || (root ? path.join(projectPaths(root).logsDir, "notify.log") : path.join(machinePaths().logsDir, "notify.log"));
+  const msg = typeof message === "string" || message === undefined || message === null
+    ? { title: EVENT_TITLES[event] || "AutoClaude", message: String(message ?? "") }
+    : { title: EVENT_TITLES[event] || "AutoClaude", ...message };
+  if (!eventEnabled(config, event)) {
+    try { appendLine(logFile, `${new Date().toISOString()} [${msg.priority || PRIORITY.default}] skipped: event ${event} is off (${msg.title})`); } catch {}
+    return { event, sent: false, skipped: true, channel: null, ok: true, status: null, error: null, fallback: false };
+  }
+  try {
+    const r = await (typeof sender === "function" ? sender : notify)(msg, { ...rest, logFile });
+    return { event, sent: true, skipped: false, ...(r && typeof r === "object" ? r : {}) };
+  } catch (e) {
+    // An injected sender may throw; an alert must never break the gate or the CLI.
+    const error = String(e && e.message ? e.message : e);
+    try { appendLine(logFile, `${new Date().toISOString()} [${msg.priority || PRIORITY.default}] event ${event} FAILED: ${error}`); } catch {}
+    return { event, sent: false, skipped: false, channel: null, ok: false, status: null, error, fallback: false };
   }
 }

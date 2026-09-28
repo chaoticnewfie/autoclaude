@@ -1,6 +1,7 @@
 // The security reviewer (PLAN.md 4.4, D13, P5.4). A separate headless `claude -p`
-// (lib/headless.js) with read-only file tools and no MCP server reads the diff since the last
-// phase tag (or the run's start commit) and returns a JSON verdict with findings. Findings at or
+// (lib/headless.js) with read-only file tools and no MCP server reads the diff since the
+// feature's first commit (or the last phase tag, or the run's start commit) and returns a JSON
+// verdict with findings. Findings at or
 // above `security.blockOn` fail the step (an attempt); the rest go back to the gate to file in
 // docs/SECURITY-FINDINGS.md. An unusable answer is an infrastructure failure, retried once, the
 // same rule as the browser checks (D35). Node built-ins only.
@@ -55,9 +56,12 @@ export function securityWanted(config, step, parsed) {
   return false;
 }
 
-// The diff base: the newest `ac-phase-*` tag reachable from HEAD, else the commit the run
-// started from, else null (the caller then reviews the uncommitted changes against HEAD).
+// The diff base: the commit the current feature started from (state.phaseBaseCommit, set while
+// a feature is built step by step, D49), so the review covers the whole feature; else the newest
+// `ac-phase-*` tag reachable from HEAD, else the commit the run started from, else null (the
+// caller then reviews the uncommitted changes against HEAD).
 export async function securityBase(root, state, env = process.env) {
+  if (state && state.phaseBaseCommit) return state.phaseBaseCommit;
   const r = await git.git(root, ["describe", "--tags", "--match", "ac-phase-*", "--abbrev=0", "HEAD"], { env });
   const tag = r.ok ? r.stdout.trim() : "";
   if (tag) return tag;
@@ -172,12 +176,25 @@ export function constraintsSection(planText, maxChars = CONSTRAINTS_MAX_CHARS) {
   return text.slice(0, cut > 0 ? cut : budget).replace(/\s+$/, "") + CONSTRAINTS_CUT;
 }
 
-export function buildSecurityPrompt({ template, step, parsed, base, diff, root, planText = null, planFile = "PLAN.md" }) {
+// The steps whose changes the diff holds: the given list, or, when the diff runs from the
+// feature's start (phaseBaseCommit), the phase's steps up to this one; else just this step.
+export function reviewedSteps(step, state = null, steps = null) {
+  if (Array.isArray(steps) && steps.length) return steps;
+  if (state && state.phaseBaseCommit && step.phase) {
+    const i = step.phase.steps.indexOf(step);
+    if (i >= 0) return step.phase.steps.slice(0, i + 1);
+  }
+  return [step];
+}
+
+export function buildSecurityPrompt({ template, step, steps = null, parsed, base, diff, root, planText = null, planFile = "PLAN.md" }) {
   const text = planText !== null ? planText : parsed && Array.isArray(parsed.lines) ? parsed.lines.join("\n") : "";
   const constraints = constraintsSection(text);
+  const list = Array.isArray(steps) && steps.length ? steps : [step];
+  const scope = list.length > 1 && step.phase ? `Phase ${step.phase.num}: ${step.phase.title} (steps ${list.map((s) => s.id).join(", ")})` : list.map((s) => s.id).join(", ");
   return fill(template, {
-    STEP_ID: step.id,
-    STEP_TEXT: stepText(parsed, step),
+    STEP_ID: scope,
+    STEP_TEXT: list.map((s) => stepText(parsed, s)).join("\n\n"),
     BASE: base || "HEAD",
     DIFF: diff,
     PROJECT_ROOT: String(root).replace(/\\/g, "/"),
@@ -201,7 +218,9 @@ const rel = (root, f) => path.relative(root, f).replace(/\\/g, "/");
 // | "infra", failed, sections, findings (the non-blocking ones, for the gate to file),
 // verdictFile, strays }. `run` is injectable for tests. Retries once on an infrastructure
 // failure when the gate's deadline leaves room for it.
-export async function runSecurityReview({ root, config, step, parsed, state = null, env = process.env, attempt = 1, deadlineMs = Infinity, run = runHeadless, now = () => Date.now() }) {
+export async function runSecurityReview({ root, config, step = null, steps = null, parsed, state = null, env = process.env, attempt = 1, deadlineMs = Infinity, run = runHeadless, now = () => Date.now() }) {
+  if (!step && !(Array.isArray(steps) && steps.length)) throw new Error("runSecurityReview needs a step or steps");
+  step = step || steps[steps.length - 1];
   const p = projectPaths(root);
   const s = config.security;
   const tag = `${step.id}-${attempt}-security`.replace(/[^A-Za-z0-9._-]/g, "_");
@@ -210,7 +229,8 @@ export async function runSecurityReview({ root, config, step, parsed, state = nu
   const base = await securityBase(root, state, env);
   const diff = await reviewDiff(root, base, env);
   const template = readText(path.join(pluginRoot(), "prompts", "security.md"), "");
-  const prompt = buildSecurityPrompt({ template, step, parsed, base, diff, root, planFile: config.plan });
+  const reviewed = reviewedSteps(step, state, steps);
+  const prompt = buildSecurityPrompt({ template, step, steps: reviewed, parsed, base, diff, root, planFile: config.plan });
   // The reviewer works inside its report folder; --add-dir keeps the project readable.
   const args = buildArgs({ model: s.model, maxTurns: MAX_TURNS, schema: SECURITY_SCHEMA, mcpConfig: null, allowedTools: SECURITY_TOOLS, extraArgs: ["--add-dir", root] });
   const before = await untrackedSet(root, env);
@@ -227,7 +247,7 @@ export async function runSecurityReview({ root, config, step, parsed, state = nu
     if (tries > 0 && remaining < s.timeoutSec * 1000 * 0.5) { errors.push("no time left for a retry before the gate's own timeout"); break; }
     tries++;
     const timeoutMs = Math.max(30000, Math.min(s.timeoutSec * 1000, remaining));
-    result = await runWithWrapUp(run, { prompt, args, cwd: reportDir, env, role: "security", timeoutMs });
+    result = await runWithWrapUp(run, { prompt, args, cwd: reportDir, env, role: "security", timeoutMs, deadlineMs });
     totalMs += result.durationMs || 0;
     if (typeof result.costUsd === "number") cost += result.costUsd;
     if (result.ok) {
@@ -248,7 +268,7 @@ export async function runSecurityReview({ root, config, step, parsed, state = nu
   const strays = await sweepStrays(root, before, reportDir, env);
   const verdictFile = path.join(p.reportsDir, `${tag}.json`);
   writeJsonAtomic(verdictFile, {
-    kind: "security", step: step.id, attempt, tries, ok: !!evaluation, errors, strays, base, blockOn: s.blockOn,
+    kind: "security", step: step.id, steps: reviewed.map((x) => x.id), attempt, tries, ok: !!evaluation, errors, strays, base, blockOn: s.blockOn,
     verdict: result && result.structured ? result.structured : null,
     model: s.model, numTurns: result ? result.numTurns : null, costUsd: cost || null, durationMs: totalMs
   });

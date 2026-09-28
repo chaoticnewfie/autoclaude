@@ -52,6 +52,17 @@ export function buildContext({ root, state, config, planText, progressText, prom
   } else {
     parts.push("## Current step\n\nNo unfinished step is left in the plan. Run `autoclaude ready` with no id to let the gate close the run.");
   }
+  // The feature the step belongs to, so a fresh session per feature (D49) sees the whole of it:
+  // with verifyAt "phase" every Accept line below is checked when the last step is ready.
+  if (step && step.phase && step.phase.steps.length > 1) {
+    const perFeature = !(config.gate && config.gate.verifyAt === "step");
+    const rows = step.phase.steps.map((s) => `- [${s.marker}] ${s.id} ${s.title}${s === step ? "  <- current" : ""}`);
+    parts.push(`## Current feature: Phase ${step.phase.num} ${step.phase.title}\n\n${rows.join("\n")}\n\n${perFeature ? `[~] is built and waiting for the feature's verification, which runs over every Accept line of these steps when ${step.phase.steps[step.phase.steps.length - 1].id} is ready.` : "Each step is verified on its own ready (gate.verifyAt is \"step\")."}`);
+  }
+  if (state.fixup && Array.isArray(state.fixup.findings) && state.fixup.findings.length) {
+    const list = state.fixup.findings.map((f, i) => `${i + 1}. [${f.source || "?"}, ${f.severity || "?"}] ${f.text || ""}${f.doc ? ` (${f.doc})` : ""}`).join("\n");
+    parts.push(`## Fix-up pass in progress: Phase ${state.fixup.phase ?? "?"}\n\nThe feature passed its verification with these non-blocking findings. Fix each one or leave it for the owner with the reason, as the Fix-up pass rules above say, then run \`${cli} ready ${state.fixup.stepId}\`.\n\n${list}`);
+  }
   const progressLines = (progressText || "").split(/\r?\n/).filter((l) => l.trim()).slice(-10);
   if (progressLines.length) parts.push(`## Recent progress (last ${progressLines.length} lines of ${config.docs.progress})\n\n${progressLines.join("\n")}`);
   if (state.ownerAnswer && state.ownerAnswer.answer) {

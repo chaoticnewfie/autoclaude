@@ -14,7 +14,7 @@ import { readText, readJson, appendLine, ageMs, ensureDir, writeFileAtomic, writ
 import { isPidAlive, findOnPath } from "./proc.js";
 import { initProject, formatInitReport } from "./init.js";
 import { writeReady, writeBlocked, readReady } from "./protocol.js";
-import { firstUnfinished, planSlug, setMarker, MARKERS } from "./plan.js";
+import { firstUnfinished, planSlug, setMarker, isFinished, MARKERS } from "./plan.js";
 import * as git from "./git.js";
 import { resumeRun, commitPending } from "./resume.js";
 import { preflight, formatPreflight } from "./preflight.js";
@@ -22,14 +22,17 @@ import { supervise } from "./supervisor.js";
 import { openConsoleWindow, isPidAlive as pidAlive } from "./proc.js";
 import { registerProject } from "./registry.js";
 import { installLauncher } from "./launcher.js";
-import { runChecks } from "./checks.js";
+import { runChecks, checksEnv, describeChecksEnv, recordRunEnv } from "./checks.js";
 import { restartDevServer, stopDevServer, devServerInfo } from "./devserver.js";
+import { runDecider, runHeadless } from "./headless.js";
+import { stepText } from "./plan.js";
 
 const VERSION = JSON.parse(fs.readFileSync(path.join(pluginRoot(), ".claude-plugin", "plugin.json"), "utf8")).version;
 
 const HELP = `autoclaude ${VERSION}
 
 Usage: autoclaude <command> [options]
+       autoclaude <command> --help   (one command's usage)
 
 Project commands (run inside a project):
   init [<folder>] [--playwright] [--no-statusline] [--dev-url <url>] [--dir <folder>]
@@ -37,11 +40,16 @@ Project commands (run inside a project):
                         set, .gitignore, browser-tester config, machine registry, statusline
                         bridge. Never overwrites existing files.
   run [--check]         Preflight, then open the ac-<project> window where the supervisor runs the
-                        build. A finished plan with new steps added starts a fresh run.
+                        build. A finished plan with new steps added starts a fresh run. Records
+                        this terminal's PATH, which the gate and \`autoclaude checks\` then use.
                         --check: only run and print the preflight; opens no window
   status [--all]        State, current step, attempts, usage, last progress (--all: every registered project)
-  checks                Run the configured checks the way the gate does (starting the dev server
-                        first when a check needs it) and print one line per check
+  config                Open the settings page in your browser, served from this computer only:
+                        this project's settings, this computer's defaults, the alert channel,
+                        the watchdog and the status line
+  checks                Run the configured checks the way the gate does (with the PATH the run
+                        recorded, starting the dev server first when a check needs it) and print
+                        one line per check
   guard-test "<command>"
                         Show whether the run's tool guard would allow this command in the Bash
                         tool and in the PowerShell tool, and why not
@@ -50,8 +58,12 @@ Project commands (run inside a project):
   nudge "<prompt>"      Restart the running session now with this prompt (for example "/compact")
   ready [<step>]        Builder: tell the gate the current step is done (verified on the next stop)
   blocked <step> "<q>"  Builder: stop the run with a question only the owner can answer
+  decide "<question>"   Builder: settle an open question now with the decider, a read-only Claude
+                        session that reads the plan and the decisions log, and wait for it.
+                        Prints JSON: classification, recommendation, reasoning,
+                        question_for_owner, owner_review. Exit 1 only if the decider could not run
   answer "<text>"       Owner: answer the blocked question; recorded as a decision, the run resumes
-  pause [--now]         Pause after the next verified commit. --now pauses at once: the supervisor
+  pause [--now]         Pause after the next committed step. --now pauses at once: the supervisor
                         ends the builder session and the dev server is stopped
   note "<text>"         Leave a review note for Claude; it is read on the next resume or session start
   resume                Clear a pause and set the run going again (refuses if PLAN.md fails lint)
@@ -90,9 +102,39 @@ class Io {
   err(s = "") { this.stderrStream.write(s + "\n"); }
 }
 
+// Every command runCli knows, for `<command> --help`.
+export const COMMANDS = ["help", "version", "init", "status", "config", "run", "checks", "guard-test", "supervise", "nudge", "watchdog", "uninstall", "start", "ready", "blocked", "decide", "answer", "pause", "note", "resume", "lint-plan", "usage", "install-cli", "notify-setup", "notify-test"];
+// Commands whose arguments are free text: only a first argument of --help or -h asks for help,
+// so a note or a question that mentions -h is left alone.
+const TEXT_COMMANDS = ["nudge", "blocked", "decide", "answer", "note", "guard-test", "notify-test"];
+
+// One command's entry in HELP: its line and the more deeply indented lines under it.
+export function commandHelp(cmd) {
+  const lines = HELP.split("\n");
+  const start = lines.findIndex((l) => {
+    const m = l.match(/^ {2}(\S+)/);
+    return !!m && m[1] === cmd;
+  });
+  if (start < 0) return null;
+  const out = [lines[start]];
+  for (let i = start + 1; i < lines.length && /^ {3,}\S/.test(lines[i]); i++) out.push(lines[i]);
+  return out.join("\n");
+}
+
+function wantsHelp(cmd, rest) {
+  if (!COMMANDS.includes(cmd) || cmd === "help") return false;
+  const isHelp = (a) => a === "--help" || a === "-h";
+  return TEXT_COMMANDS.includes(cmd) ? isHelp(rest[0]) : rest.some(isHelp);
+}
+
 export async function runCli(argv, rawIo = {}) {
   const io = new Io(rawIo);
   const [cmd = "help", ...rest] = argv;
+  if (wantsHelp(cmd, rest)) {
+    const entry = commandHelp(cmd);
+    io.out(entry ? `Usage: autoclaude ${cmd} ...\n\n${entry}` : HELP.trimEnd());
+    return 0;
+  }
   try {
     switch (cmd) {
       case "help": case "--help": case "-h": io.out(HELP.trimEnd()); return 0;
@@ -101,6 +143,7 @@ export async function runCli(argv, rawIo = {}) {
       // below with a message instead of escaping as a rejected promise.
       case "init": return cmdInit(rest, io);
       case "status": return cmdStatus(rest, io);
+      case "config": return await cmdConfig(rest, io);
       case "run": return await cmdRun(rest, io);
       case "checks": return await cmdChecks(rest, io);
       case "guard-test": return await cmdGuardTest(rest, io);
@@ -111,8 +154,9 @@ export async function runCli(argv, rawIo = {}) {
       case "start": return await cmdStart(rest, io);
       case "ready": return cmdReady(rest, io);
       case "blocked": return cmdBlocked(rest, io);
+      case "decide": return await cmdDecide(rest, io);
       case "answer": return cmdAnswer(rest, io);
-      case "pause": return cmdPause(rest, io);
+      case "pause": return await cmdPause(rest, io);
       case "note": return cmdNote(rest, io);
       case "resume": return await cmdResume(rest, io);
       case "lint-plan": return cmdLintPlan(rest, io);
@@ -150,6 +194,10 @@ function requireProject(io, { needConfig = true } = {}) {
     io.out(formatConfigErrors(cfg.errors));
     return null;
   }
+  // Problems in this computer's defaults file are ignored, not fatal: say so once, on stderr so
+  // a command whose stdout is data (decide prints JSON) stays parseable.
+  const warnings = cfg.warnings || [];
+  if (warnings.length) io.err(`autoclaude: note: ${warnings.length} setting(s) in this computer's defaults were ignored (${warnings.map((w) => w.path || "file").join(", ")}); \`autoclaude config\` shows why`);
   return { root, config: cfg.config, paths: projectPaths(root) };
 }
 
@@ -159,6 +207,28 @@ function loadPlan(project) {
   if (text === null) return { file, parsed: null, problems: [{ line: 0, id: null, message: `plan file not found: ${file}` }] };
   const parsed = parsePlan(text);
   return { file, parsed, problems: lintPlan(parsed) };
+}
+
+// A function from another module, imported only when a command needs it, so a module that is
+// missing or broken never stops the command. io.deps[name] replaces it in tests. Null when absent.
+async function optional(io, file, name) {
+  if (typeof io.deps[name] === "function") return io.deps[name];
+  try {
+    const m = await import(file);
+    return typeof m[name] === "function" ? m[name] : null;
+  } catch {
+    return null;
+  }
+}
+
+const SILENT = { write() { return true; } };
+
+// An informational alert (notify.events, P8.6): sent only when the owner switched that event on,
+// otherwise just logged. Never fails the command that sends it.
+async function sendEvent(io, project, event, message) {
+  const send = await optional(io, "./notify.js", "notifyEvent");
+  if (!send) return;
+  try { await send(project.root, project.config, event, message, { env: io.env, stdout: SILENT }); } catch {}
 }
 
 function fmtAge(ms) {
@@ -205,7 +275,7 @@ function cmdStatus(args, io) {
   io.out(`autoclaude: ${describeState(state)}  (${root})`);
   if (plan.parsed) {
     const p = progress(plan.parsed);
-    io.out(`  plan: ${config.plan}, ${p.done}/${p.total} steps verified${p.failed ? `, ${p.failed} failed` : ""}${p.blocked ? `, ${p.blocked} blocked` : ""}${plan.problems.length ? `, ${plan.problems.length} lint problem(s)` : ""}`);
+    io.out(`  plan: ${config.plan}, ${p.done}/${p.total} steps verified${p.built ? `, ${p.built} built and waiting for their feature's verification` : ""}${p.failed ? `, ${p.failed} failed` : ""}${p.blocked ? `, ${p.blocked} blocked` : ""}${plan.problems.length ? `, ${plan.problems.length} lint problem(s)` : ""}`);
     const current = state.currentStep ? stepById(plan.parsed, state.currentStep) : nextStep(plan.parsed);
     if (current) {
       const attempts = state.attempts[current.id] || 0;
@@ -239,6 +309,34 @@ function statusAll(io) {
     io.out(`${root}: ${describeState(state)}${state.currentStep ? `, step ${state.currentStep}` : ""}`);
   }
   return 0;
+}
+
+// ---------- config ----------
+
+// The settings page (P8.7), served by lib/configpage.js until the owner clicks Done. Outside a
+// project it shows this computer's defaults only, so no project is required.
+async function cmdConfig(args, io) {
+  if (args.length) throw new Error(`unknown option ${args[0]}`);
+  let mod = null;
+  try {
+    mod = typeof io.deps.openConfigPage === "function" ? { openConfigPage: io.deps.openConfigPage } : await import(io.deps.configPageFile || "./configpage.js");
+  } catch (e) {
+    const missing = e && (e.code === "ERR_MODULE_NOT_FOUND" || /Cannot find module/.test(String(e.message)));
+    io.err(missing
+      ? "autoclaude: the config page is not in this install (lib/configpage.js is missing); edit autoclaude.config.json by hand"
+      : `autoclaude: the config page could not load: ${e && e.message ? e.message : e}`);
+    return 1;
+  }
+  if (typeof mod.openConfigPage !== "function") {
+    io.err("autoclaude: the config page is not in this install (lib/configpage.js has no openConfigPage)");
+    return 1;
+  }
+  // A folder AutoClaude was never set up in (a plain git repository) gets the computer's page only.
+  const found = findProjectRoot(io.cwd);
+  const root = found && fs.existsSync(projectPaths(found).configFile) ? found : null;
+  const r = await mod.openConfigPage({ root, io });
+  if (typeof r === "number") return r;
+  return r && r.ok === false ? 1 : 0;
 }
 
 // ---------- run / supervise ----------
@@ -286,7 +384,9 @@ async function cmdRun(args, io) {
   // mid-step the working tree is legitimately dirty.
   const fresh = state.status === STATUS.idle || continuing;
   const skip = fresh ? [] : ["plan", "git", "checks", "playwright", "dev server", "usage"];
-  const pf = await preflight(project, { env: io.env, devServer: fresh, skip });
+  // The checks are judged with this terminal's own PATH: the window, the builder and the gate
+  // inherit it, and it is what gets recorded for `autoclaude checks` below.
+  const pf = await preflight(project, { env: io.env, checksEnv: io.env, devServer: fresh, skip });
   io.out(`autoclaude: preflight${fresh ? "" : ` (a run is under way, ${describeState(state)}, so only the tools and the folder's trust are checked)`}`);
   io.out(formatPreflight(pf));
   const what = continuing ? "continue the finished plan with its new steps" : fresh ? "start the run" : `bring back the ${state.status} run`;
@@ -303,6 +403,7 @@ async function cmdRun(args, io) {
     });
   }
   registerProject(root);
+  recordRunEnv(root, io.env, { now: io.now });
   const title = `ac-${path.basename(root).toLowerCase().replace(/[^a-z0-9]+/g, "-")}`;
   const open = io.deps.openConsoleWindow || openConsoleWindow;
   const r = open({
@@ -372,14 +473,17 @@ async function cmdChecks(args, io) {
   }
   const restart = io.deps.restartDevServer || restartDevServer;
   const stop = io.deps.stopDevServer || stopDevServer;
+  // The gate's environment, so a pass here means a pass there (P8.4).
+  const ce = checksEnv(root, io.env);
   io.out(`autoclaude: running ${config.checks.length} check(s) in ${root}`);
+  io.out(`  PATH: ${describeChecksEnv(ce)}`);
   const needsServer = config.checks.some((c) => c.needsDevServer);
   let devServerReady = false;
   let stopAfter = false;
   if (needsServer && config.devServer.command && config.devServer.url) {
     // Like the preflight: a server that was already recorded (a run's) is left running after.
     stopAfter = !devServerInfo({ root });
-    const ds = await restart(config.devServer, { root, env: io.env });
+    const ds = await restart(config.devServer, { root, env: ce.env });
     devServerReady = !!ds.ok;
     io.out(ds.ok ? `  dev server: ${ds.reused ? "already answering" : "started"} at ${config.devServer.url}` : `  dev server: FAILED to start: ${ds.error}`);
   } else if (needsServer) {
@@ -393,7 +497,7 @@ async function cmdChecks(args, io) {
   };
   let result;
   try {
-    result = await runChecks(config.checks, { cwd: root, env: io.env, devServerReady, onProgress: (r) => io.out(line(r)) });
+    result = await runChecks(config.checks, { cwd: root, env: ce.env, devServerReady, onProgress: (r) => io.out(line(r)) });
   } finally {
     if (stopAfter) stop({ root });
   }
@@ -580,7 +684,7 @@ async function cmdStart(args, io) {
     } else {
       const there = await git.git(root, ["show", `${branch}:${config.plan.replace(/\\/g, "/")}`], { env: gitEnv });
       const theirs = there.ok ? stepById(parsePlan(there.stdout), first.id) : null;
-      if (!theirs || theirs.marker === MARKERS.done) {
+      if (!theirs || isFinished(theirs)) {
         io.out(`autoclaude: not starting; the run branch ${branch} is left from an earlier run, and its ${config.plan} does not have ${first.id} to do. Merge ${onBranch || "this branch"} into ${branch}, or rename the old one (git branch -m ${branch} ${branch}-old), then run again.`);
         return 1;
       }
@@ -588,7 +692,9 @@ async function cmdStart(args, io) {
   }
   const co = await git.checkoutBranch(root, branch, { create: true, env: gitEnv });
   if (!co.ok) { io.out(`autoclaude: could not check out ${branch}: ${co.stderr}`); return 1; }
-  const ticked = plan.parsed.steps.filter((s) => s.marker === MARKERS.done).map((s) => s.id);
+  // Built [~] steps count as ticked too: the gate recorded them, and the integrity check would
+  // otherwise revert them.
+  const ticked = plan.parsed.steps.filter((s) => isFinished(s)).map((s) => s.id);
   const now = io.now().toISOString();
   const baseCommit = await git.head(root, { env: gitEnv });
   const usage = readUsage({ staleAfterMin: config.usage.staleAfterMin, now: io.now().getTime() });
@@ -597,6 +703,8 @@ async function cmdStart(args, io) {
     s.attempts = {}; s.infraFailures = {}; s.noProgress = 0; s.recoveries = 0; s.tickedByGate = ticked; s.startedAt = now; s.stepStartedAt = now;
     s.headAtLastGate = null; s.toolCallsAtLastGate = 0; s.baseCommit = baseCommit; s.ownerAnswer = null; s.lastBlockedQuestion = null;
     s.usageAtStart = usage.sevenDay && !usage.stale ? usage.sevenDay.pct : null; s.weeklyResetsAt = null;
+    // Nothing of an earlier run's feature carries over (D49).
+    s.fixup = null; s.freshSession = false; s.phaseBaseCommit = null; s.phaseStartedAt = null; s.pushState = null;
   });
   io.out(`autoclaude: running on branch ${branch}${co.created ? " (created)" : ""}. First step: ${first.id} ${first.title}.`);
   io.out(`  the builder session works the plan; the gate verifies on every stop. Watch with \`autoclaude status\`.`);
@@ -612,6 +720,15 @@ async function cmdStart(args, io) {
   } catch (e) {
     io.out(`  (could not print the run rules: ${e.message}; they arrive with the gate's first message)`);
   }
+  // The machine's Docker state before the run touches it, so the end of the run can remove what
+  // the run created and nothing else (P8.5). Last, so a slow Docker engine never holds back the
+  // run rules above; the builder acts only after this command returns.
+  const recordFootprint = await optional(io, "./footprint.js", "recordFootprintStart");
+  if (recordFootprint) {
+    try { await recordFootprint(root, {}); } catch (e) { io.out(`  (could not record the machine footprint: ${e && e.message ? e.message : e})`); }
+  }
+  const todo = plan.parsed.steps.filter((s) => !isFinished(s)).length;
+  await sendEvent(io, project, "runStarted", { title: `AutoClaude started: ${path.basename(root)}`, message: `Running on branch ${branch}, ${todo} step(s) to do. First: ${first.id} ${first.title}.`, priority: "low" });
   return 0;
 }
 
@@ -644,12 +761,51 @@ function cmdBlocked(args, io) {
   return 0;
 }
 
+// The decider, synchronously (P8.4): the builder waits for the answer instead of starting the
+// decider agent and carrying on. Prints the decision as JSON; exit 1 only when the decider itself
+// could not run. Every call is logged to .autoclaude/logs/decide.log for the review.
+async function cmdDecide(args, io) {
+  const question = args.join(" ").trim();
+  if (!question) { io.err('autoclaude: usage: autoclaude decide "<question, with the options you see>"'); return 2; }
+  const project = requireProject(io);
+  if (!project) return 1;
+  const { root, config, paths } = project;
+  const state = loadState(root);
+  const plan = loadPlan(project);
+  const step = plan.parsed && state.currentStep ? stepById(plan.parsed, state.currentStep) : null;
+  const run = io.deps.runHeadless || runHeadless;
+  const r = await runDecider({
+    root,
+    question,
+    planFile: path.join(root, config.plan),
+    decisionsFile: path.join(root, config.docs.decisions),
+    model: (config.builder && config.builder.model) || "opus",
+    template: readText(path.join(pluginRoot(), "agents", "decider.md"), ""),
+    step,
+    stepText: step ? stepText(plan.parsed, step) : null,
+    env: io.env,
+    run
+  });
+  try {
+    ensureDir(paths.logsDir);
+    appendLine(path.join(paths.logsDir, "decide.log"), JSON.stringify({ at: io.now().toISOString(), step: state.currentStep || null, question, ok: r.ok, decision: r.decision, error: r.error, durationMs: r.durationMs, costUsd: r.costUsd }));
+  } catch {}
+  if (!r.ok) {
+    io.err(`autoclaude: the decider could not answer: ${r.error}`);
+    io.err("  Ask the autoclaude:decider agent with the Agent tool instead, in the foreground, and wait for its answer.");
+    return 1;
+  }
+  io.out(JSON.stringify(r.decision, null, 2));
+  return 0;
+}
+
 // ---------- pause / note / resume ----------
 
-function cmdPause(args, io) {
+async function cmdPause(args, io) {
   const project = requireProject(io);
   if (!project) return 1;
   const now = args.includes("--now");
+  const name = path.basename(project.root);
   const state = loadState(project.root);
   if (state.status !== STATUS.running) {
     io.out(`autoclaude: nothing to pause, the run is ${describeState(state)}`);
@@ -668,14 +824,16 @@ function cmdPause(args, io) {
     else io.out("  No supervisor is running for this project, so nothing ends the builder session: if a Claude session is still working on the run, stop it by hand (Esc, then /exit).");
     io.out(`  Work in progress stays in the working tree. On \`autoclaude resume\`, ${step} starts again with fresh attempts.`);
     io.out("  Leave notes first with `autoclaude note \"...\"` if you want Claude to change course.");
+    await sendEvent(io, project, "pausedByOwner", { title: `AutoClaude paused: ${name}`, message: `Paused now for review, on ${step}. \`autoclaude resume\` carries on.`, priority: "low" });
     return 0;
   }
   if (state.pauseRequested) {
-    io.out("autoclaude: a pause is already requested; the gate will pause after the next verified commit");
+    io.out("autoclaude: a pause is already requested; the gate will pause after the next committed step");
     return 0;
   }
   updateState(project.root, (s) => { s.pauseRequested = true; });
   io.out(`autoclaude: pause requested. The gate finishes ${state.currentStep || "the current step"}, commits it, then pauses for review. Use --now to stop immediately.`);
+  await sendEvent(io, project, "pausedByOwner", { title: `AutoClaude pause requested: ${name}`, message: `The run pauses for review once ${state.currentStep || "the current step"} is committed.`, priority: "low" });
   return 0;
 }
 
@@ -737,6 +895,7 @@ async function cmdResume(args, io) {
   const notes = next.pendingNotes.length;
   io.out(`autoclaude: resumed on ${next.currentStep || "?"}${notes ? ` with ${notes} review note(s) waiting for Claude` : ""}. The supervisor nudges the session on its next pass.`);
   for (const c of changes) io.out(`  ${c}`);
+  await sendEvent(io, project, "runResumed", { title: `AutoClaude resumed: ${path.basename(project.root)}`, message: `Resumed on ${next.currentStep || "?"}${notes ? `, with ${notes} review note(s) for Claude` : ""}.`, priority: "low" });
   return 0;
 }
 
@@ -802,7 +961,7 @@ function cmdAnswer(args, io) {
   ensureDir(path.dirname(file));
   writeFileAtomic(file, appendDecisionEntry(existing, {
     id, date: at.slice(0, 10), step, title: "Owner answer to a blocked question",
-    fields: [["Question", question], ["Answer", text], ["Decided by", "the owner, with `autoclaude answer`"]]
+    fields: [["Question", question], ["Answer", text], ["By", "owner, with `autoclaude answer`"]]
   }));
   const changes = resumeRun(project, state, { ownerAnswer: { step, question, answer: text, at, decisionId: id }, lastBlockedQuestion: null });
   io.out(`autoclaude: answer recorded in ${project.config.docs.decisions} as ${id}; the run is going again on ${loadState(project.root).currentStep || "?"}.`);

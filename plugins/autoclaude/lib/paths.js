@@ -34,6 +34,8 @@ export function machinePaths() {
     usageFile: path.join(dir, "usage.json"),
     registryFile: path.join(dir, "registry.json"),
     notifyFile: path.join(dir, "notify.json"),
+    // This computer's settings defaults (D49): between the built-in defaults and each project.
+    defaultsFile: path.join(dir, "defaults.json"),
     statuslineScript: path.join(dir, "statusline.js"),
     logsDir: path.join(dir, "logs")
   };

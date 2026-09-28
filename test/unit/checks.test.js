@@ -1,8 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { runChecks, tailLines, TAIL_LINES, DEFAULT_CHECK_TIMEOUT_SEC } from "../../plugins/autoclaude/lib/checks.js";
+import { runChecks, tailLines, TAIL_LINES, DEFAULT_CHECK_TIMEOUT_SEC, isGitBashOnlyDir, withoutGitBashDirs, checksEnv, recordRunEnv, readRunEnv, runEnvFile, describeChecksEnv } from "../../plugins/autoclaude/lib/checks.js";
 
 const node = JSON.stringify(process.execPath);
 const passing = (name = "pass") => ({ name, command: `${node} -e "console.log('ok from ${name}')"`, timeoutSec: 60 });
@@ -124,3 +125,80 @@ test("a check without timeoutSec runs under the 900 s default instead of no limi
   assert.equal(r.ok, true);
   assert.equal(r.results[0].ran, true);
 });
+
+// ---------- the checks' environment (P8.4) ----------
+
+// The PATH a native program sees when started from Git Bash on Windows (seen on the dev VM).
+const GIT_BASH_PATH = [
+  "C:\\Users\\me\\bin",
+  "C:\\Program Files\\Git\\mingw64\\bin",
+  "C:\\Program Files\\Git\\usr\\local\\bin",
+  "C:\\Program Files\\Git\\usr\\bin",
+  "C:\\Windows\\system32",
+  "C:\\Program Files\\Git\\cmd",
+  "C:\\Program Files\\nodejs",
+  "/usr/bin",
+  "C:\\Program Files\\Git\\usr\\bin\\vendor_perl",
+  "C:\\tools\\clangarm64\\bin"
+].join(";");
+const STRIPPED = "C:\\Users\\me\\bin;C:\\Windows\\system32;C:\\Program Files\\Git\\cmd;C:\\Program Files\\nodejs";
+
+test("Git Bash's own folders are recognised; Git's cmd folder and everything else stay", () => {
+  assert.equal(isGitBashOnlyDir("C:\\Program Files\\Git\\usr\\bin"), true);
+  assert.equal(isGitBashOnlyDir("C:\\Program Files\\Git\\mingw64\\bin"), true);
+  assert.equal(isGitBashOnlyDir("C:\\Program Files\\Git\\usr\\bin\\core_perl"), true);
+  assert.equal(isGitBashOnlyDir("/usr/bin"), true, "a POSIX-form entry");
+  assert.equal(isGitBashOnlyDir("/mingw64/bin"), true);
+  assert.equal(isGitBashOnlyDir("C:\\Program Files\\Git\\cmd"), false);
+  assert.equal(isGitBashOnlyDir("C:\\Program Files\\nodejs"), false);
+  assert.equal(isGitBashOnlyDir("C:\\Users\\me\\AppData\\Local\\Programs\\busybin"), false);
+  assert.equal(isGitBashOnlyDir("\\\\server\\share\\bin"), false, "a UNC path is not POSIX");
+  assert.equal(isGitBashOnlyDir(""), false);
+  assert.equal(withoutGitBashDirs(GIT_BASH_PATH, ";"), STRIPPED);
+  assert.equal(withoutGitBashDirs("", ";"), "");
+});
+
+test("checksEnv: the run's recorded PATH first, else Git Bash's stripped, else the shell's own", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "autoclaude-cenv-"));
+  const shell = { PATH: GIT_BASH_PATH, MSYSTEM: "MINGW64", HOME: "h" };
+
+  // Git Bash, nothing recorded: Git Bash's own folders go, the rest of the env is kept.
+  let ce = checksEnv(root, shell, { delimiter: ";" });
+  assert.equal(ce.source, "git-bash");
+  assert.equal(ce.env.PATH, STRIPPED);
+  assert.equal(ce.env.HOME, "h");
+  assert.equal(shell.PATH, GIT_BASH_PATH, "the caller's env is not changed");
+  assert.match(describeChecksEnv(ce), /without Git Bash's own folders/);
+
+  // cmd or PowerShell, nothing recorded: the env as it is.
+  const cmdEnv = { Path: "C:\\Windows\\system32;C:\\Program Files\\Git\\usr\\bin" };
+  ce = checksEnv(root, cmdEnv);
+  assert.deepEqual([ce.source, ce.env], ["shell", cmdEnv], "only Git Bash is stripped; a system PATH that has Git's usr\\bin keeps it");
+
+  // Recorded by the run: that PATH, under every spelling the shell had, so a child cannot pick
+  // up a stale "Path" next to the new "PATH".
+  const recorded = { PATH: "C:\\run\\bin;C:\\Windows\\system32" };
+  assert.deepEqual(recordRunEnv(root, recorded, { now: () => new Date("2026-09-28T10:00:00Z") }), { file: runEnvFile(root), changed: true });
+  ce = checksEnv(root, { ...shell, Path: "stale" });
+  assert.equal(ce.source, "run");
+  assert.deepEqual([ce.env.PATH, ce.env.Path, ce.env.MSYSTEM], [recorded.PATH, recorded.PATH, "MINGW64"]);
+  assert.match(describeChecksEnv(ce), /the PATH the run recorded at 2026-09-28T10:00:00\.000Z \(the gate's\)/);
+  ce = checksEnv(root, { HOME: "h" });
+  assert.deepEqual(Object.keys(ce.env).sort(), ["HOME", "PATH"], "no PATH at all: one PATH key");
+  assert.equal(checksEnv(null, shell, { delimiter: ";" }).source, "git-bash", "outside a project nothing is recorded");
+});
+
+test("recordRunEnv writes only when the PATH changed; readRunEnv takes PATH, then Path", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "autoclaude-runenv-"));
+  assert.equal(readRunEnv(root), null, "no file");
+  const at = (s) => ({ now: () => new Date(s) });
+  assert.equal(recordRunEnv(root, { Path: "C:\\a" }, at("2026-09-28T01:00:00Z")).changed, true);
+  assert.deepEqual(readRunEnv(root), { PATH: null, Path: "C:\\a", value: "C:\\a", at: "2026-09-28T01:00:00.000Z" });
+  assert.equal(recordRunEnv(root, { Path: "C:\\a" }, at("2026-09-28T02:00:00Z")).changed, false, "same PATH: the file is left alone");
+  assert.equal(readRunEnv(root).at, "2026-09-28T01:00:00.000Z");
+  assert.equal(recordRunEnv(root, { PATH: "C:\\b", Path: "C:\\a" }, at("2026-09-28T03:00:00Z")).changed, true);
+  assert.equal(readRunEnv(root).value, "C:\\b");
+  fs.writeFileSync(runEnvFile(root), "{ not json");
+  assert.equal(readRunEnv(root), null, "a broken file counts as none");
+});
+

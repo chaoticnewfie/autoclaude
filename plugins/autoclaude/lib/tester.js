@@ -1,13 +1,16 @@
 // The browser tester and the phase-end bug bash (PLAN.md 4.4, P4.1 to P4.4). A separate
 // headless `claude -p` (lib/headless.js) with Playwright MCP opens the running app, checks the
-// step's Accept lines (tester) or tries to break every feature of the phase (bug bash), and
-// returns a JSON verdict. The gate turns that into pass, fail (counts as an attempt) or infra
-// (the checker itself could not run; never counts as an attempt). Node built-ins only.
+// Accept lines (tester) or tries to break every feature of the phase (bug bash), and returns a
+// JSON verdict. The gate turns that into pass, fail (counts as an attempt) or infra (the checker
+// itself could not run; never counts as an attempt). With verification once per feature (D49)
+// the gate passes the whole phase as `steps`: one criterion per Accept line of every step, and a
+// turn budget that grows with the number of lines. Node built-ins only.
 import fs from "node:fs";
 import path from "node:path";
 import { projectPaths, pluginRoot } from "./paths.js";
 import { readText, readJson, writeJsonAtomic, ensureDir } from "./fsatomic.js";
 import { stepText, MARKERS } from "./plan.js";
+import { loadState } from "./state.js";
 import { runHeadless, buildArgs, runWithWrapUp } from "./headless.js";
 import { playwrightMcpConfig } from "./init.js";
 import * as git from "./git.js";
@@ -56,46 +59,95 @@ export const KINDS = {
 const TEST_FILE_RE = /(^|\/)(tests?|__tests__|e2e|specs?)\/|\.(test|spec)\.[cm]?[jt]sx?$/i;
 const IMAGE_RE = /\.(png|jpe?g|webp)$/i;
 
-// Substitutes {{KEY}} placeholders with function replacers, so "$" in plan text stays literal.
+// Single pass with a function replacer: "$" in plan text stays literal, and a placeholder that
+// appears inside plan text or a diff is never expanded.
 function fill(template, values) {
-  let out = template;
-  for (const [k, v] of Object.entries(values)) out = out.replace(new RegExp(`\\{\\{${k}\\}\\}`, "g"), () => String(v));
-  return out;
+  return template.replace(/\{\{([A-Z_]+)\}\}/g, (m, k) => (Object.prototype.hasOwnProperty.call(values, k) ? String(values[k]) : m));
 }
 
-export function buildPrompt(kind, { template, url, step, parsed, testChanges = "", screenshotDir, turns = 40 }) {
-  const phaseSteps = step.phase ? step.phase.steps : [step];
-  const verified = phaseSteps.filter((s) => s !== step && s.marker === MARKERS.done);
-  const neighbours = verified.slice(-6).map((s) => stepText(parsed, s)).join("\n\n") || "(none yet)";
-  const features = phaseSteps.filter((s) => s === step || s.marker === MARKERS.done).map((s) => stepText(parsed, s)).join("\n\n");
+const BUILT = MARKERS.built || "~";
+const isNoUi = (s) => Array.isArray(s.tags) && s.tags.includes("no-ui");
+
+export function acceptCount(steps) {
+  return steps.reduce((n, s) => n + (Array.isArray(s.accept) ? s.accept.length : 0), 0);
+}
+
+// The tester's budget: tester.maxTurns for every 5 Accept lines, never less than 1x, at most 4x.
+export function turnScale(lines) {
+  return Math.min(4, Math.max(1, Math.ceil(lines / 5)));
+}
+
+// steps: the whole feature (phase mode); otherwise the single step, with the features verified
+// earlier in its phase to smoke-check.
+export function buildPrompt(kind, { template, url, step = null, steps = null, parsed, testChanges = "", screenshotDir, turns = 40 }) {
+  const phaseMode = Array.isArray(steps) && steps.length > 0;
+  const list = phaseMode ? steps : [step];
+  const anchor = step || list[list.length - 1];
+  const phase = anchor.phase || null;
+  const phaseName = phase ? `Phase ${phase.num}: ${phase.title}` : "the plan";
+  const text = (s) => stepText(parsed, s);
+  let neighbours;
+  let features;
+  if (phaseMode) {
+    neighbours = "(none: every step of this feature is under test above)";
+    features = list.map(text).join("\n\n");
+  } else {
+    const phaseSteps = phase ? phase.steps : [anchor];
+    const verified = phaseSteps.filter((s) => s !== anchor && s.marker === MARKERS.done);
+    neighbours = verified.slice(-6).map(text).join("\n\n") || "(none yet)";
+    // Built steps ([~]) belong to the feature too, before its verification ticks them.
+    features = phaseSteps.filter((s) => s === anchor || s.marker === MARKERS.done || s.marker === BUILT).map(text).join("\n\n");
+  }
+  const ids = list.map((s) => s.id);
   return fill(template, {
     URL: url,
-    STEP_ID: step.id,
-    STEP_TEXT: stepText(parsed, step),
+    STEP_ID: phaseMode ? ids.join(", ") : anchor.id,
+    EXAMPLE_ID: list[0].id,
+    UNIT: phaseMode ? "feature" : "step",
+    SCOPE: phaseMode ? `The feature under test: ${phaseName} (${ids.length === 1 ? `step ${ids[0]}` : `steps ${ids.join(", ")}`})` : `The step under test: ${anchor.id}`,
+    STEP_TEXT: list.map(text).join("\n\n"),
+    ACCEPT_COUNT: String(acceptCount(list)),
+    SMOKE: phaseMode
+      ? "Every step of this feature is listed above, so there is nothing else to smoke-check. If one step's work breaks another's, that is a failing criterion of the step that no longer works."
+      : "Smoke-check the features that were already verified earlier in this phase (listed below) with one quick action each. If one of them no longer works, that is a bug with severity high.",
+    VERIFIED_SECTION: phaseMode ? "" : `## Features already verified in this phase\n\n${neighbours}`,
     NEIGHBOURS: neighbours,
     FEATURES: features,
-    PHASE: step.phase ? `Phase ${step.phase.num}: ${step.phase.title}` : "the plan",
+    PHASE: phaseName,
     TEST_CHANGES: testChanges || "(no test files changed)",
     SCREENSHOT_DIR: screenshotDir,
     TURNS: String(turns)
   });
 }
 
-// Test files the builder changed since the last verified commit, with the diff of the tracked
-// ones, so the tester can spot a weakened assertion. Bounded in size.
-export async function testChanges(root, env = process.env, maxChars = 6000) {
+// Test files the builder changed, with the diff of the tracked ones, so the tester can spot a
+// weakened assertion. Without a base: the uncommitted changes since the last commit (a step
+// verified on its own). With one: everything since that commit, committed or not, which in
+// phase mode is the whole feature (its steps are committed as they are built). Bounded in size.
+export async function testChanges(root, env = process.env, maxChars = 6000, base = null) {
   const st = await git.status(root, { env });
   if (!st.ok) return "(could not read git status)";
-  const files = st.entries.filter((e) => TEST_FILE_RE.test(String(e.path).replace(/\\/g, "/")));
+  let entries = st.entries;
+  if (base) {
+    const d = await git.git(root, ["diff", "--name-status", "--no-renames", base], { env });
+    if (d.ok) {
+      const tracked = d.stdout.split(/\r?\n/).filter(Boolean).map((l) => { const [code, ...rest] = l.split("\t"); return { code: code.trim().padEnd(2), path: rest.join("\t") }; });
+      entries = [...tracked, ...st.entries.filter((e) => String(e.code).includes("?"))];
+    } else {
+      base = null; // an unknown base: fall back to the uncommitted changes
+    }
+  }
+  const files = entries.filter((e) => TEST_FILE_RE.test(String(e.path).replace(/\\/g, "/")));
   if (files.length === 0) return "(no test files changed)";
   const listed = files.map((e) => `${e.code} ${e.path}`).join("\n");
   const tracked = files.filter((e) => !String(e.code).includes("?")).map((e) => e.path);
   let diff = "";
   if (tracked.length) {
-    const d = await git.git(root, ["diff", "HEAD", "--", ...tracked], { env });
+    const d = await git.git(root, ["diff", base || "HEAD", "--", ...tracked], { env });
     diff = d.ok ? d.stdout : "";
   }
-  let text = `Changed test files:\n${listed}\n\nDiff of the tracked ones against the last verified commit:\n${diff.trim() || "(none; the changed files are new)"}`;
+  const against = base ? `the commit this feature started from (${String(base).slice(0, 7)})` : "the last verified commit";
+  let text = `Changed test files:\n${listed}\n\nDiff of the tracked ones against ${against}:\n${diff.trim() || "(none; the changed files are new)"}`;
   if (text.length > maxChars) text = text.slice(0, maxChars) + "\n[... diff truncated ...]";
   return text;
 }
@@ -195,6 +247,11 @@ export function verdictSection(kind, verdict, evaluation, meta = {}) {
   const concerns = Array.isArray(verdict.testConcerns) ? verdict.testConcerns : [];
   if (concerns.length) lines.push("", "Test concerns:", ...concerns.map((e) => `- ${e}`));
   if (verdict.notes) lines.push("", `Notes: ${verdict.notes}`);
+  // A short list usually means lines were merged or skipped; the owner should know, but it does
+  // not fail the feature by itself (a merged pair would burn an attempt for nothing).
+  if (kind === "tester" && meta.expectedCriteria && evaluation.criteria.length < meta.expectedCriteria) {
+    lines.push("", `Coverage: ${evaluation.criteria.length} criteria reported for ${meta.expectedCriteria} Accept lines; compare them with the plan.`);
+  }
   if (meta.screenshots && meta.screenshots.length) lines.push("", "Screenshots:", ...meta.screenshots.map((s) => `- ${s}`));
   const bits = [meta.model && `model ${meta.model}`, meta.numTurns !== null && meta.numTurns !== undefined && `${meta.numTurns} turns`, meta.durationMs && `${Math.round(meta.durationMs / 1000)} s`, meta.tries > 1 && `${meta.tries} tries`, meta.wrappedUp && "answer given after reaching the turn limit", meta.verdictFile && `verdict ${meta.verdictFile}`].filter(Boolean);
   if (bits.length) lines.push("", `Run: ${bits.join(", ")}`);
@@ -204,24 +261,43 @@ export function verdictSection(kind, verdict, evaluation, meta = {}) {
 // Runs the tester (kind "tester") or the bug bash (kind "bugbash") for one verification.
 // Resolves to { status: "passed" | "failed" | "infra", failed, sections, followUps, verdictFile,
 // screenshots }. `run` is injectable for tests. Retries once on an infrastructure failure when
-// the gate's deadline leaves room for it.
-export async function runBrowserCheck({ kind = "tester", root, config, step, parsed, env = process.env, attempt = 1, deadlineMs = Infinity, run = runHeadless, now = () => Date.now() }) {
+// the gate's deadline leaves room for it. Takes `steps` (the whole feature, phase mode) or
+// `step`; in phase mode the tester leaves out steps tagged no-ui (their tests verify them), and
+// its test changes run from state.phaseBaseCommit (read from the run state when not passed).
+export async function runBrowserCheck({ kind = "tester", root, config, step = null, steps = null, parsed, state = null, env = process.env, attempt = 1, deadlineMs = Infinity, run = runHeadless, now = () => Date.now() }) {
   const k = KINDS[kind];
   if (!k) throw new Error(`unknown browser check ${kind}`);
+  const phaseMode = Array.isArray(steps) && steps.length > 0;
+  if (!phaseMode && !step) throw new Error("runBrowserCheck needs a step or steps");
+  const anchor = step || steps[steps.length - 1];
+  const list = !phaseMode ? [anchor] : kind === "tester" ? steps.filter((s) => !isNoUi(s)) : steps;
+  if (list.length === 0) {
+    return { status: "passed", failed: null, sections: [{ title: `${k.label}: skipped`, body: "Every step of this feature is tagged no-ui; its tests verify it." }], followUps: [], verdictFile: null, screenshots: [] };
+  }
   const p = projectPaths(root);
-  const tag = `${step.id}-${attempt}-${kind}`.replace(/[^A-Za-z0-9._-]/g, "_");
+  const tag = `${anchor.id}-${attempt}-${kind}`.replace(/[^A-Za-z0-9._-]/g, "_");
   const shotsDir = path.join(p.reportsDir, tag);
   ensureDir(shotsDir);
   const template = readText(path.join(pluginRoot(), "prompts", k.prompt), "");
   const t = config.tester;
-  const maxTurns = Math.round(t.maxTurns * k.turnsFactor);
+  const lines = acceptCount(list);
+  // The bug bash keeps its own budget; the tester's grows with the Accept lines it must check.
+  const scale = kind === "tester" ? turnScale(lines) : 1;
+  const maxTurns = Math.round(t.maxTurns * k.turnsFactor * scale);
+  const timeoutSec = t.timeoutSec * scale;
+  let base = null;
+  if (phaseMode && kind === "tester") {
+    const s = state || (() => { try { return loadState(root); } catch { return null; } })();
+    base = s && s.phaseBaseCommit ? s.phaseBaseCommit : null;
+  }
   const prompt = buildPrompt(kind, {
     template,
     turns: maxTurns,
     url: config.devServer.url,
-    step,
+    step: anchor,
+    steps: phaseMode ? list : null,
     parsed,
-    testChanges: kind === "tester" ? await testChanges(root, env) : "",
+    testChanges: kind === "tester" ? await testChanges(root, env, 6000, base) : "",
     screenshotDir: shotsDir.replace(/\\/g, "/")
   });
   const mcpFile = mcpConfigFor(root, shotsDir.replace(/\\/g, "/"));
@@ -238,10 +314,10 @@ export async function runBrowserCheck({ kind = "tester", root, config, step, par
   let cost = 0;
   while (tries < 2) {
     const remaining = deadlineMs - now();
-    if (tries > 0 && remaining < t.timeoutSec * 1000 * 0.5) { errors.push("no time left for a retry before the gate's own timeout"); break; }
+    if (tries > 0 && remaining < timeoutSec * 1000 * 0.5) { errors.push("no time left for a retry before the gate's own timeout"); break; }
     tries++;
-    const timeoutMs = Math.max(30000, Math.min(t.timeoutSec * 1000, remaining));
-    result = await runWithWrapUp(run, { prompt, args, cwd: shotsDir, env, role: kind, timeoutMs });
+    const timeoutMs = Math.max(30000, Math.min(timeoutSec * 1000, remaining));
+    result = await runWithWrapUp(run, { prompt, args, cwd: shotsDir, env, role: kind, timeoutMs, deadlineMs });
     totalMs += result.durationMs || 0;
     if (typeof result.costUsd === "number") cost += result.costUsd;
     if (result.ok) {
@@ -259,7 +335,7 @@ export async function runBrowserCheck({ kind = "tester", root, config, step, par
   const screenshots = listImages(shotsDir).map((f) => rel(root, f));
   const verdictFile = path.join(p.reportsDir, `${tag}.json`);
   writeJsonAtomic(verdictFile, {
-    kind, step: step.id, attempt, tries, ok: !!evaluation, errors, strays,
+    kind, step: anchor.id, steps: list.map((s) => s.id), acceptLines: lines, maxTurns, attempt, tries, ok: !!evaluation, errors, strays,
     verdict: result && result.structured ? result.structured : null,
     model: t.model, numTurns: result ? result.numTurns : null, costUsd: cost || null, durationMs: totalMs, screenshots,
     wrappedUp: !!(result && result.wrappedUp)
@@ -278,7 +354,7 @@ export async function runBrowserCheck({ kind = "tester", root, config, step, par
   }
 
   const verdict = result.structured;
-  const section = verdictSection(kind, verdict, evaluation, { model: t.model, numTurns: result.numTurns, durationMs: totalMs, tries, verdictFile: verdictRel, screenshots, wrappedUp: !!result.wrappedUp });
+  const section = verdictSection(kind, verdict, evaluation, { model: t.model, numTurns: result.numTurns, durationMs: totalMs, tries, verdictFile: verdictRel, screenshots, wrappedUp: !!result.wrappedUp, expectedCriteria: kind === "tester" ? lines : null });
   const concerns = Array.isArray(verdict.testConcerns) ? verdict.testConcerns : [];
   const followUps = [
     ...evaluation.other.map((b) => ({ ...b, foundBy: kind })),

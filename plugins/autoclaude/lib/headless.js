@@ -1,5 +1,6 @@
 // Headless `claude -p` runs for the gate's independent checkers: the browser tester, the bug
-// bash (Phase 4) and the security reviewer (Phase 5). Each run is a separate process with a
+// bash (Phase 4), the security reviewer (Phase 5), and the decider the builder asks through
+// `autoclaude decide` (Phase 8). Each run is a separate process with a
 // fresh context, hooks disabled, no permission prompts, a narrow tool list and a JSON-schema
 // verdict. Flags verified on Windows in Phase 0 (VERIFY.md P0.4 and P0.5): the prompt goes in on
 // stdin, `--settings '{"disableAllHooks":true}'` (never `--bare`, which breaks subscription
@@ -117,13 +118,98 @@ export function wrapUpArgs(args, sessionId, turns = WRAP_UP_TURNS) {
   return [...out, "--max-turns", String(turns), "--resume", sessionId];
 }
 
+// ---------- the decider (`autoclaude decide`, P8.4) ----------
+// The builder asks the decider and waits for the answer, instead of starting the decider agent
+// and carrying on without it (D49: decide, log, keep going). A read-only headless session in the
+// project folder: Read, Glob and Grep only, the project's model, a JSON-schema answer.
+
+export const DECIDER_SCHEMA = Object.freeze({
+  type: "object",
+  properties: {
+    classification: { type: "string", enum: ["routine", "critical"] },
+    recommendation: { type: "string" },
+    reasoning: { type: "string" },
+    question_for_owner: { type: "string" },
+    owner_review: { type: "boolean" }
+  },
+  required: ["classification", "recommendation", "reasoning", "question_for_owner", "owner_review"]
+});
+export const DECIDER_TOOLS = Object.freeze(["Read", "Glob", "Grep"]);
+export const DECIDER_MAX_TURNS = 30;
+// The builder waits in one Bash tool call, whose ceiling is 10 minutes.
+export const DECIDER_TIMEOUT_MS = 9 * 60 * 1000;
+
+// An agent file's body: everything after its YAML front matter.
+export function agentBody(text) {
+  const t = String(text || "").replace(/^﻿/, "");
+  const m = t.match(/^---\r?\n[\s\S]*?\r?\n---[ \t]*(?:\r?\n|$)/);
+  return (m ? t.slice(m[0].length) : t).trim();
+}
+
+// The decider's prompt: the agent's instructions (agents/decider.md), then this question with the
+// files to read. Paths are absolute, because the Read tool wants them so.
+export function buildDeciderPrompt({ template = "", question, root, planFile, decisionsFile, step = null, stepText = null }) {
+  const body = agentBody(template);
+  const lines = [];
+  if (body) lines.push(body, "");
+  lines.push("## This question", "");
+  lines.push(`- Project folder (your working directory): ${root}`);
+  lines.push(`- The plan: ${planFile}`);
+  lines.push(`- The decisions log: ${decisionsFile}`);
+  if (step) lines.push(`- The step being worked on: ${step.id} ${step.title}`);
+  if (stepText) lines.push("", "The step as the plan has it:", "", stepText);
+  lines.push("", "The builder asks:", "", String(question).trim(), "");
+  lines.push("## How to answer here", "");
+  lines.push("Give your answer as this run's structured output, with these fields: `classification` (\"routine\" or \"critical\"), `recommendation`, `reasoning` (end it with how to undo the choice if the owner disagrees), `question_for_owner` (an empty string unless the answer is critical), and `owner_review`: true when the recommendation accepts a security or privacy risk (a secret stored in plain text, a check turned off, a port opened, weaker authentication), so the owner reviews it after the run, false otherwise. The run goes on with your recommendation either way unless it is critical.");
+  return lines.join("\n");
+}
+
+// A decider answer that has every field in its expected type, or null.
+export function validDecision(v) {
+  if (!v || typeof v !== "object") return null;
+  if (v.classification !== "routine" && v.classification !== "critical") return null;
+  for (const k of ["recommendation", "reasoning"]) if (typeof v[k] !== "string" || !v[k].trim()) return null;
+  return {
+    classification: v.classification,
+    recommendation: v.recommendation,
+    reasoning: v.reasoning,
+    question_for_owner: typeof v.question_for_owner === "string" ? v.question_for_owner : "",
+    owner_review: v.owner_review === true
+  };
+}
+
+// Runs the decider once (plus a wrap-up at the turn limit). Resolves to { ok, decision, error,
+// durationMs, costUsd, numTurns }; never rejects. `run` is runHeadless or a test fake.
+export async function runDecider({ root, question, planFile, decisionsFile, model = "opus", template = "", step = null, stepText = null, env = process.env, run = runHeadless, timeoutMs = DECIDER_TIMEOUT_MS }) {
+  const prompt = buildDeciderPrompt({ template, question, root, planFile, decisionsFile, step, stepText });
+  const args = buildArgs({ model, maxTurns: DECIDER_MAX_TURNS, schema: DECIDER_SCHEMA, allowedTools: [...DECIDER_TOOLS] });
+  // Not the builder: the child's hooks (disabled anyway) must never take it for one.
+  const childEnv = { ...env };
+  delete childEnv.AUTOCLAUDE_BUILDER;
+  let r;
+  try {
+    // Half a minute past the first run's timeout for a wrap-up, still inside the Bash call.
+    r = await runWithWrapUp(run, { prompt, args, cwd: root, env: childEnv, role: "decider", timeoutMs, deadlineMs: Date.now() + timeoutMs + 30000 });
+  } catch (e) {
+    r = { ok: false, error: e && e.message ? e.message : String(e) };
+  }
+  const meta = { durationMs: r.durationMs || 0, costUsd: typeof r.costUsd === "number" ? r.costUsd : null, numTurns: r.numTurns ?? null };
+  if (!r.ok) return { ok: false, decision: null, error: r.error || "the decider did not answer", ...meta };
+  const decision = validDecision(r.structured);
+  if (!decision) return { ok: false, decision: null, error: `the decider's answer is incomplete: ${JSON.stringify(r.structured).slice(0, 300)}`, ...meta };
+  return { ok: true, decision, error: null, ...meta };
+}
+
 // run(opts), and if that ends at the turn limit, one short resumed run for the answer. The result
 // carries the summed time, cost and turns, and wrappedUp: true when the answer came from the
 // wrap-up. `run` is runHeadless or a test fake.
+// opts.deadlineMs (an epoch time), when given, also caps the wrap-up: the gate's hook timeout and
+// the builder's 10-minute Bash call for `decide` end the whole thing, wrap-up included.
 export async function runWithWrapUp(run, opts) {
   const first = await run(opts);
   if (!hitTurnLimit(first)) return first;
-  const second = await run({ ...opts, prompt: WRAP_UP_PROMPT, args: wrapUpArgs(opts.args, first.sessionId), timeoutMs: Math.min(opts.timeoutMs || 300000, 300000) });
+  const left = Number.isFinite(opts.deadlineMs) ? Math.max(20000, opts.deadlineMs - Date.now()) : Infinity;
+  const second = await run({ ...opts, prompt: WRAP_UP_PROMPT, args: wrapUpArgs(opts.args, first.sessionId), timeoutMs: Math.min(opts.timeoutMs || 300000, 300000, left) });
   const add = (a, b) => (typeof a === "number" || typeof b === "number" ? (a || 0) + (b || 0) : null);
   const totals = { durationMs: (first.durationMs || 0) + (second.durationMs || 0), costUsd: add(first.costUsd, second.costUsd), numTurns: add(first.numTurns, second.numTurns) };
   if (second.ok) return { ...second, ...totals, wrappedUp: true };

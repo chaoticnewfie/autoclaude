@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
-import { runCli, nextDecisionId, outsideFences, maskNtfyUrl } from "../../plugins/autoclaude/lib/cli.js";
+import { runCli, nextDecisionId, outsideFences, maskNtfyUrl, COMMANDS, commandHelp } from "../../plugins/autoclaude/lib/cli.js";
 import { loadState, saveState, defaultState } from "../../plugins/autoclaude/lib/state.js";
 import { trustKeyFor } from "../../plugins/autoclaude/lib/paths.js";
 
@@ -123,7 +123,7 @@ test("answer: records the owner's answer as the next D-###, resets [?], resumes,
   assert.equal(r.code, 0, r.out + r.err);
   assert.match(r.out, /recorded in docs\/DECISIONS\.md as D-008/);
   const decisions = fs.readFileSync(path.join(root, "docs", "DECISIONS.md"), "utf8");
-  assert.match(decisions, /\n\n## D-008 \(2026-09-27, S1\.1\) Owner answer to a blocked question\n- Question: Cookies or localStorage\?\n- Answer: Use cookies, httpOnly\n- Decided by: the owner, with `autoclaude answer`\n$/);
+  assert.match(decisions, /\n\n## D-008 \(2026-09-27, S1\.1\) Owner answer to a blocked question\n- Question: Cookies or localStorage\?\n- Answer: Use cookies, httpOnly\n- By: owner, with `autoclaude answer`\n$/);
   const s = loadState(root);
   assert.deepEqual([s.status, s.pauseReason, s.currentStep, s.attempts["S1.1"], s.lastBlockedQuestion], ["running", null, "S1.1", 0, null]);
   assert.deepEqual({ ...s.ownerAnswer }, { step: "S1.1", question: "Cookies or localStorage?", answer: "Use cookies, httpOnly", at: "2026-09-27T04:00:00.000Z", decisionId: "D-008" });
@@ -371,7 +371,7 @@ test("answer: the first real answer in the template's DECISIONS.md is D-001, in 
   assert.equal(r.code, 0, r.out + r.err);
   assert.match(r.out, /as D-001;/);
   const text = fs.readFileSync(file, "utf8");
-  assert.ok(text.endsWith("## Entries\n\n## D-001 (2026-09-27, S1.1) Owner answer to a blocked question\n- Question: Postgres or SQLite?\n- Answer: SQLite\n- Decided by: the owner, with `autoclaude answer`\n"), text);
+  assert.ok(text.endsWith("## Entries\n\n## D-001 (2026-09-27, S1.1) Owner answer to a blocked question\n- Question: Postgres or SQLite?\n- Answer: SQLite\n- By: owner, with `autoclaude answer`\n"), text);
   assert.doesNotMatch(text, /\(none yet\)/);
   assert.ok(text.includes("```markdown\n## D-001 (YYYY-MM-DD, S1.2) Short title of the choice\n"), "the example is left alone");
   assert.equal(loadState(root).ownerAnswer.decisionId, "D-001");
@@ -403,7 +403,8 @@ test("init takes the folder as a positional argument; an unknown option mentions
 
 test("guard-test prints the Bash and PowerShell decisions without a run, and always exits 0", async () => {
   const root = project({ config: { version: 1, guard: { deny: [{ pattern: "ssh\\s+prod", reason: "no production access" }] } } });
-  let r = await run(["guard-test", "git push origin main"], root);
+  // A plain push is allowed while git.push is on (D49); a force push never is.
+  let r = await run(["guard-test", "git push --force origin main"], root);
   assert.equal(r.code, 0, r.out + r.err);
   assert.match(r.out, /\n  Bash: denied: \S.*\n/);
   assert.match(r.out, /\n  PowerShell: (allowed|denied: .+)\n/);
@@ -544,10 +545,13 @@ test("run continues a finished plan that has new steps: --check only prints, the
   assert.match(r.out, /preflight passed; `autoclaude run` would continue the finished plan with its new steps/);
   assert.deepEqual(opened, [], "--check opens no window");
   assert.equal(loadState(root).status, "complete", "--check changes nothing");
+  const runEnvFile = path.join(root, ".autoclaude", "run-env.json");
+  assert.equal(fs.existsSync(runEnvFile), false, "--check records nothing");
 
-  r = await run(["run"], root, { configDir, deps, env: runEnv() });
+  r = await run(["run"], root, { configDir, deps, env: { ...runEnv(), PATH: `${runEnv().PATH || runEnv().Path}${path.delimiter}marker-dir` } });
   assert.equal(r.code, 0, r.out + r.err);
   assert.equal(opened.length, 1);
+  assert.match(JSON.parse(fs.readFileSync(runEnvFile, "utf8")).PATH, /marker-dir$/, "the terminal's PATH is recorded for the checks");
   assert.deepEqual(opened[0].args.slice(-1), ["supervise"]);
   assert.match(r.out, /continuing the finished plan with its new steps in a new window, ac-/);
   const s = loadState(root);
@@ -592,18 +596,169 @@ test("start on a continued plan: an old run branch already merged here moves for
   fs.writeFileSync(path.join(root, "PLAN.md"), PLAN.replace("- [ ] **S1.1**", "- [x] **S1.1**"));
   g(root, "commit", "-q", "-am", "plan: add S1.2");
   const tip = g(root, "rev-parse", "HEAD");
-  let r = await run(["start", "--no-preflight"], root, { configDir, env: runEnv() });
+  // The footprint and the alert are fakes: a test never asks the real Docker engine anything.
+  const seen = [];
+  const deps = {
+    recordFootprintStart: async (at, o) => { seen.push(["footprint", at === root, JSON.stringify(o)]); return {}; },
+    notifyEvent: async (at, config, event, message) => { seen.push([event, at === root, message.title, message.message]); return { sent: false }; }
+  };
+  let r = await run(["start", "--no-preflight"], root, { configDir, env: runEnv(), deps });
   assert.equal(r.code, 0, r.out + r.err);
   assert.match(r.out, /running on branch autoclaude\/demo\. First step: S1\.2 Second/);
   assert.deepEqual([g(root, "rev-parse", "--abbrev-ref", "HEAD"), g(root, "rev-parse", "HEAD")], ["autoclaude/demo", tip]);
+  assert.deepEqual(seen, [
+    ["footprint", true, "{}"],
+    ["runStarted", true, `AutoClaude started: ${path.basename(root)}`, "Running on branch autoclaude/demo, 1 step(s) to do. First: S1.2 Second."]
+  ], "the Docker state is recorded before the run touches it, then the run-started alert");
 
   // Not merged, and the new step went onto the base branch only: refuse, and stay put.
   ({ root, base } = setUp());
   fs.writeFileSync(path.join(root, "PLAN.md"), PLAN.replace("- [ ] **S1.1**", "- [x] **S1.1**"));
   g(root, "commit", "-q", "-am", "plan: add S1.2");
-  r = await run(["start", "--no-preflight"], root, { configDir, env: runEnv() });
+  r = await run(["start", "--no-preflight"], root, { configDir, env: runEnv(), deps });
   assert.equal(r.code, 1);
   assert.match(r.out, new RegExp(`the run branch autoclaude/demo is left from an earlier run, and its PLAN\\.md does not have S1\\.2 to do\\. Merge ${base} into autoclaude/demo`));
   assert.equal(g(root, "rev-parse", "--abbrev-ref", "HEAD"), base);
   assert.equal(loadState(root).status, "idle");
+});
+
+// ---------- Phase 8: --help everywhere, config, decide, the checks' PATH, owner alerts ----------
+
+test("--help and -h on every command print that command's usage and do nothing else", async () => {
+  const root = project();
+  saveState(root, { ...defaultState(), status: "running", currentStep: "S1.1" });
+  for (const cmd of COMMANDS.filter((c) => c !== "help")) {
+    for (const flag of ["--help", "-h"]) {
+      const r = await run([cmd, flag], root);
+      assert.equal(r.code, 0, `${cmd} ${flag}: ${r.out}${r.err}`);
+      assert.match(r.out, new RegExp(`^Usage: autoclaude ${cmd} \\.\\.\\.\\n\\n  ${cmd}\\b`), `${cmd} ${flag}`);
+      assert.doesNotMatch(r.out, /Machine commands:/, `${cmd}: only its own entry`);
+    }
+  }
+  assert.equal(commandHelp("bogus"), null);
+  assert.match(commandHelp("notify-setup"), /\[--discord <webhook url>\] \[--show\] \[--clear\]\n/, "an entry's wrapped option line comes along");
+  assert.match(commandHelp("decide"), /owner_review/);
+  // Nothing ran: the state is as it was, no note was taken, no window opened.
+  const s = loadState(root);
+  assert.deepEqual([s.status, s.pauseRequested, s.pendingNotes.length], ["running", false, 0]);
+  let r = await run(["run", "--check", "--help"], root);
+  assert.match(r.out, /^Usage: autoclaude run/);
+  // Free-text commands: only a first argument asks for help, so a note may mention -h.
+  r = await run(["note", "the", "-h", "flag", "is", "fine"], root);
+  assert.equal(r.code, 0);
+  assert.deepEqual(loadState(root).pendingNotes.map((n) => n.text), ["the -h flag is fine"]);
+  r = await run(["help", "--help"], root);
+  assert.match(r.out, /Machine commands:/, "help --help is the whole help");
+});
+
+test("config opens the settings page for this project, or for the computer outside one", async () => {
+  const root = project();
+  const calls = [];
+  const openConfigPage = async (o) => { calls.push(o); return { url: "http://127.0.0.1:1/?token=x", reason: "done", saves: 1 }; };
+  let r = await run(["config"], root, { deps: { openConfigPage } });
+  assert.equal(r.code, 0, r.out + r.err);
+  assert.equal(calls[0].root, root);
+  assert.equal(typeof calls[0].io.out, "function", "the page writes through the CLI's output");
+  const bare = fs.mkdtempSync(path.join(os.tmpdir(), "autoclaude-cli-bare-"));
+  fs.mkdirSync(path.join(bare, ".git"));
+  r = await run(["config"], bare, { deps: { openConfigPage } });
+  assert.equal(r.code, 0);
+  assert.equal(calls[1].root, null, "a git repository AutoClaude was never set up in gets the computer's page");
+  r = await run(["config"], root, { deps: { openConfigPage: async () => 3 } });
+  assert.equal(r.code, 3);
+  r = await run(["config"], root, { deps: { openConfigPage: async () => ({ ok: false }) } });
+  assert.equal(r.code, 1);
+  r = await run(["config"], root, { deps: { configPageFile: "./definitely-missing-configpage.js" } });
+  assert.equal(r.code, 1);
+  assert.match(r.err, /the config page is not in this install/);
+  r = await run(["config", "--port", "1"], root, { deps: { openConfigPage } });
+  assert.equal(r.code, 1);
+  assert.match(r.err, /unknown option --port/);
+});
+
+test("decide runs the decider synchronously and prints its JSON; exit 1 only when it could not run", async () => {
+  const root = project({ config: { version: 1, builder: { model: "sonnet" } } });
+  saveState(root, { ...defaultState(), status: "running", currentStep: "S1.2" });
+  const calls = [];
+  const answer = { classification: "routine", recommendation: "Use port 8080", reasoning: "The plan's Stack names 8080.", question_for_owner: "", owner_review: true };
+  const runHeadless = async (o) => { calls.push(o); return { ok: true, structured: answer, durationMs: 30000, costUsd: 0.2 }; };
+  let r = await run(["decide", "Which", "port? Options: 8080 or 3000"], root, { deps: { runHeadless }, env: { PATH: "", AUTOCLAUDE_BUILDER: "1" }, now: () => new Date("2026-09-28T12:00:00Z") });
+  assert.equal(r.code, 0, r.out + r.err);
+  assert.deepEqual(JSON.parse(r.out), answer);
+  const o = calls[0];
+  const at = (flag) => o.args[o.args.indexOf(flag) + 1];
+  assert.deepEqual([o.cwd, o.role, at("--model"), at("--allowedTools")], [root, "decider", "sonnet", "Read,Glob,Grep"]);
+  assert.equal(o.env.AUTOCLAUDE_BUILDER, undefined);
+  assert.match(o.prompt, /^You are the decider/);
+  assert.ok(o.prompt.includes(`- The plan: ${path.join(root, "PLAN.md")}`), o.prompt);
+  assert.ok(o.prompt.includes(`- The decisions log: ${path.join(root, "docs", "DECISIONS.md")}`));
+  assert.match(o.prompt, /- The step being worked on: S1\.2 Second\n/);
+  assert.match(o.prompt, /The builder asks:\n\nWhich port\? Options: 8080 or 3000\n/);
+  const log = fs.readFileSync(path.join(root, ".autoclaude", "logs", "decide.log"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
+  assert.deepEqual([log[0].at, log[0].step, log[0].ok, log[0].decision.owner_review], ["2026-09-28T12:00:00.000Z", "S1.2", true, true]);
+
+  r = await run(["decide", "Which port?"], root, { deps: { runHeadless: async () => ({ ok: false, error: "timed out after 540 s" }) } });
+  assert.equal(r.code, 1);
+  assert.equal(r.out, "", "no JSON when there is no answer");
+  assert.match(r.err, /the decider could not answer: timed out after 540 s/);
+  assert.match(r.err, /autoclaude:decider agent with the Agent tool/);
+  r = await run(["decide"], root);
+  assert.equal(r.code, 2);
+  assert.match(r.err, /usage: autoclaude decide/);
+});
+
+test("checks runs with the PATH the run recorded, else a Git Bash PATH without Git Bash's own folders", async () => {
+  const node = JSON.stringify(process.execPath);
+  const marker = path.join(os.tmpdir(), "autoclaude-marker-bin");
+  const fakeGit = path.join(os.tmpdir(), "FakeGitRoot", "usr", "bin");
+  // Each check exits 0 only when the PATH it was given is the one expected.
+  const checks = [{ name: "path", command: `${node} -e "process.exit(process.env.PATH.includes('autoclaude-marker-bin') ? 0 : 5)"`, timeoutSec: 60 }];
+  const root = project({ config: { version: 1, checks } });
+  const shellEnv = { ...process.env };
+  for (const k of Object.keys(shellEnv)) if (k.toUpperCase() === "PATH") delete shellEnv[k];
+  delete shellEnv.MSYSTEM;
+  const basePath = process.env.PATH || process.env.Path || "";
+  let r = await run(["checks"], root, { env: { ...shellEnv, PATH: basePath } });
+  assert.equal(r.code, 1, "the marker is only in the run's PATH");
+  fs.mkdirSync(path.join(root, ".autoclaude"), { recursive: true });
+  fs.writeFileSync(path.join(root, ".autoclaude", "run-env.json"), JSON.stringify({ PATH: `${marker}${path.delimiter}${basePath}`, Path: null, at: "2026-09-28T09:00:00.000Z" }));
+  r = await run(["checks"], root, { env: { ...shellEnv, PATH: basePath } });
+  assert.equal(r.code, 0, r.out + r.err);
+  assert.match(r.out, /\n  PATH: the PATH the run recorded at 2026-09-28T09:00:00\.000Z \(the gate's\)\n/);
+
+  // No run yet, in Git Bash: Git Bash's own folders are dropped before the checks run.
+  fs.rmSync(path.join(root, ".autoclaude", "run-env.json"));
+  fs.writeFileSync(path.join(root, "autoclaude.config.json"), JSON.stringify({ version: 1, checks: [{ name: "no-git-bash", command: `${node} -e "process.exit(process.env.PATH.includes('FakeGitRoot') ? 6 : 0)"`, timeoutSec: 60 }] }));
+  r = await run(["checks"], root, { env: { ...shellEnv, MSYSTEM: "MINGW64", PATH: `${fakeGit}${path.delimiter}${basePath}` } });
+  assert.equal(r.code, 0, r.out + r.err);
+  assert.match(r.out, /PATH: this shell's PATH without Git Bash's own folders/);
+  r = await run(["checks"], root, { env: { ...shellEnv, PATH: `${fakeGit}${path.delimiter}${basePath}` } });
+  assert.equal(r.code, 1, "outside Git Bash the PATH is used as it is");
+});
+
+test("pause, pause --now and resume send the owner's switchable alerts; off by default, they are only logged", async () => {
+  const root = project();
+  saveState(root, { ...defaultState(), status: "running", currentStep: "S1.1" });
+  const events = [];
+  const deps = { notifyEvent: async (at, config, event, message, opts) => { events.push([event, message.title, typeof opts.env]); } };
+  let r = await run(["pause"], root, { deps });
+  assert.equal(r.code, 0, r.out);
+  r = await run(["resume"], root, { deps });
+  assert.match(r.out, /withdrawn/);
+  r = await run(["pause", "--now"], root, { deps });
+  assert.equal(r.code, 0, r.out);
+  r = await run(["resume"], root, { deps });
+  assert.equal(r.code, 0, r.out);
+  const name = path.basename(root);
+  assert.deepEqual(events, [
+    ["pausedByOwner", `AutoClaude pause requested: ${name}`, "object"],
+    ["pausedByOwner", `AutoClaude paused: ${name}`, "object"],
+    ["runResumed", `AutoClaude resumed: ${name}`, "object"]
+  ], "withdrawing a pause request is not a resume");
+
+  // With the real notifier and the events off by default: nothing is sent, the log says so.
+  r = await run(["pause", "--now"], root);
+  assert.equal(r.code, 0, r.out);
+  assert.doesNotMatch(r.out, /AutoClaude paused/, "never printed as an alert");
+  assert.match(fs.readFileSync(path.join(root, ".autoclaude", "logs", "notify.log"), "utf8"), /pausedByOwner/);
 });

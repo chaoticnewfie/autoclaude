@@ -5,7 +5,8 @@ import { decide, writesTo } from "../../plugins/autoclaude/scripts/tool-guard.js
 import { mergeConfig } from "../../plugins/autoclaude/lib/config.js";
 
 const root = process.platform === "win32" ? "C:\\proj" : "/proj";
-const ctx = { root, config: mergeConfig({}) };
+// git.push defaults to true since 0.10.0 (D49); these tests check the push-off rules, so they say so.
+const ctx = { root, config: mergeConfig({ git: { push: false } }) };
 const d = (tool_name, tool_input) => decide({ tool_name, tool_input }, ctx);
 
 test("AskUserQuestion is denied with the decide-it-yourself guidance", () => {
@@ -72,8 +73,9 @@ test("push is allowed when the config says so", () => {
 
 // The shell rules below read paths with Windows rules for a C:\ root and POSIX rules for a /
 // root on every OS, so both sets run everywhere.
-const win = { root: "C:\\proj", config: mergeConfig({}) };
-const nix = { root: "/proj", config: mergeConfig({}) };
+// The temp folder is fixed here so the results do not depend on the machine running the tests.
+const win = { root: "C:\\proj", config: mergeConfig({ git: { push: false } }), tempDirs: ["C:\\Users\\someone\\AppData\\Local\\Temp"] };
+const nix = { root: "/proj", config: mergeConfig({ git: { push: false } }), tempDirs: ["/tmp"] };
 const pushOn = (ctx) => ({ ...ctx, config: mergeConfig({ git: { push: true } }) });
 const sh = (ctx, command, extra = {}) => decide({ tool_name: "Bash", tool_input: { command }, ...extra }, ctx);
 const ps = (ctx, command, extra = {}) => decide({ tool_name: "PowerShell", tool_input: { command }, ...extra }, ctx);
@@ -124,7 +126,8 @@ test("PowerShell: recursive deletes outside the project are denied, inside are f
   assert.match(ps(win, "Remove-Item ..\\other -Recurse"), RECURSIVE);
   assert.match(ps(win, "rm -r -fo ..\\other"), RECURSIVE);
   assert.match(ps(win, "Remove-Item -LiteralPath 'D:\\data' -Recurse:$true"), RECURSIVE);
-  assert.match(ps(win, "Remove-Item -Rec $env:TEMP\\x"), RECURSIVE, "a path from a variable cannot be checked, so it counts as outside");
+  assert.match(ps(win, "Remove-Item -Rec $env:APPDATA\\x"), RECURSIVE, "a path from a variable cannot be checked, so it counts as outside");
+  assert.equal(ps(win, "Remove-Item -Rec $env:TEMP\\x"), null, "inside the temp folder (P8.4)");
   assert.match(ps(win, "powershell -NoProfile -Command \"Remove-Item -Recurse C:\\Windows\\Temp\\x\""), RECURSIVE);
   assert.equal(ps(win, "Remove-Item -Recurse -Force node_modules"), null);
   assert.equal(ps(win, "Remove-Item dist -Recurse -Force"), null);
@@ -183,7 +186,7 @@ test("recursive deletes: the target is resolved against the project root, in eve
   for (const c of ["rm -rf /c/proj/dist", "rm -rf C:\\proj\\dist", "rm -rf C:/proj/dist", "rm -rf c:\\PROJ\\dist", "rm -rf /c/proj/node_modules/.cache", "rm -rf \"$(pwd)/dist\"", "rm -rf $PWD/dist", "rm -rf ${PWD}/dist"]) {
     assert.equal(sh(win, c), null, c);
   }
-  for (const c of ["rm -rf /c/other", "rm -rf /c", "rm -rf /", "rm -rf C:\\Users", "rm -rf C:\\project2", "rm -rf D:\\proj\\dist", "rm -rf /tmp/build", "rm -rf ~", "rm -rf ~/stuff", "rm -rf $HOME/x", "rm -rf \"$DIR\"", "rm -rf ../*", "rm -rf \\\\server\\share\\x"]) {
+  for (const c of ["rm -rf /c/other", "rm -rf /c", "rm -rf /", "rm -rf C:\\Users", "rm -rf C:\\project2", "rm -rf D:\\proj\\dist", "rm -rf /c/tmp/build", "rm -rf ~", "rm -rf ~/stuff", "rm -rf $HOME/x", "rm -rf \"$DIR\"", "rm -rf ../*", "rm -rf \\\\server\\share\\x"]) {
     assert.match(sh(win, c), RECURSIVE, c);
   }
   // POSIX root.
@@ -196,7 +199,8 @@ test("recursive deletes: the target is resolved against the project root, in eve
     // cd earlier on the line moves where relative paths point.
     assert.equal(sh(ctx, "cd .. && rm -rf proj/dist"), null);
     assert.match(sh(ctx, "cd .. && rm -rf other"), RECURSIVE);
-    assert.match(sh(ctx, "cd /tmp; rm -rf build"), RECURSIVE);
+    assert.match(sh(ctx, "cd /opt; rm -rf build"), RECURSIVE);
+    assert.equal(sh(ctx, "cd /tmp; rm -rf build"), null, "inside the temp folder (P8.4)");
     assert.equal(sh(ctx, "cd src && rm -rf ../dist"), null);
     // find -delete and find -exec rm.
     assert.match(sh(ctx, "find .. -name '*.tmp' -delete"), RECURSIVE);

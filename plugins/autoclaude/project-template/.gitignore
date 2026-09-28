@@ -1,6 +1,9 @@
 # AutoClaude runtime state. Never committed.
 .autoclaude/
 
+# Secrets an AutoClaude run generates, one file each. Never committed.
+secrets/
+
 # Dependencies and build output
 node_modules/
 dist/

@@ -68,12 +68,13 @@ const guideText = fs.existsSync(guide) ? fs.readFileSync(guide, "utf8") : "";
 check("init puts the instructions into the project as AUTOCLAUDE.md, stamped with the version", guideText.includes(`Copied into this project by AutoClaude ${entry.version}`), guideText.split("\n").slice(0, 3).join(" | "));
 
 // A running state, then the installed tool guard, spawned by its installed path (which has a
-// space and a tilde in it), must deny a push from both shell tools.
+// space and a tilde in it), must deny a force push from both shell tools. A plain push is
+// allowed since 0.10.0 (git.push defaults to true); a force push never is.
 const { saveState, defaultState } = await import(pathToFileURL(path.join(installPath, "lib", "state.js")).href);
 saveState(proj, { ...defaultState(), status: "running", currentStep: "S1.1" });
 for (const tool of ["Bash", "PowerShell"]) {
-  r = run(process.execPath, [path.join(installPath, "scripts", "tool-guard.js")], { cwd: proj, input: JSON.stringify({ hook_event_name: "PreToolUse", cwd: proj, tool_name: tool, tool_input: { command: "git push origin main" } }) });
-  check(`installed tool guard denies a push from the ${tool} tool`, /"permissionDecision":\s*"deny"/.test(r.stdout || ""), (r.stdout || r.stderr || "no output").slice(0, 160));
+  r = run(process.execPath, [path.join(installPath, "scripts", "tool-guard.js")], { cwd: proj, input: JSON.stringify({ hook_event_name: "PreToolUse", cwd: proj, tool_name: tool, tool_input: { command: "git push --force origin main" } }) });
+  check(`installed tool guard denies a force push from the ${tool} tool`, /"permissionDecision":\s*"deny"/.test(r.stdout || ""), (r.stdout || r.stderr || "no output").slice(0, 160));
 }
 saveState(proj, { ...defaultState(), status: "idle" });
 
