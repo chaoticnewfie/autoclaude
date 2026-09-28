@@ -146,6 +146,13 @@ package at run time, so the version can change between steps and the run needs n
 ## 18. Faster runs
 
 **What.** Cut the time per step without cutting the verification. Candidates, cheapest first:
+0. **Verify per feature, not per step** (Scott's own picture, 2026-09-27). A `gate.verifyAt`
+   setting, `step` (today) or `phase`: with `phase`, `ready` on a mid-phase step only records it
+   (the builder keeps running its own quick tests), and the last step of the phase triggers the
+   full verification over every Accept line of the phase: all checks, the browser tester, the
+   bug bash and the security review. Attempts and the failure report are per phase, naming the
+   failing Accept lines and so their steps. The plan skill then sizes a phase as one feature. A
+   middle setting runs fast checks per step and the slow ones at phase ends (option 4).
 1. **Builder effort.** AutoClaude never sets it, so the builder inherits the owner's default
    (xhigh in the rehearsal). A `builder.effort` setting passed as `--effort` (for example
    `high`), next to `builder.model`.

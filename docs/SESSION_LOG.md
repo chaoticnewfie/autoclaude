@@ -293,3 +293,6 @@ One entry per working session: what was done, what was committed. Append only.
   minutes running the checks the gate then runs again, and the builder on his default xhigh
   effort because AutoClaude never sets one. Speed options recorded as DEFERRED 18, to be measured
   and decided at CHECKPOINT 7. Docs only; no plugin change during the run.
+- Scott pictured checks running once per feature (a phase), not after every step, which is how
+  the gate works today (full checks and the browser tester per step, bug bash and security at
+  phase ends). Recorded as the first option of DEFERRED 18 for CHECKPOINT 7.

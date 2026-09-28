@@ -62,6 +62,7 @@ Everything Scott has asked for after 2026-09-24, with where it landed. Nothing i
 | 2026-09-27 | "We don't ever need to use haiku, sonnet is okay if something is very basic but id set whatever the newest sonnet is as the floor for models usage. and whatever the newest Opus is as the celing and the main model used" | D44: builder, decider, tester, bug bash and security default to opus; config refuses Haiku | Done |
 | 2026-09-27 | Keep AutoClaude a one-time install per device and pull the instructions into each project: "lets do it. I like having it as a one time setup per device" | D46: `init` copies INSTRUCTIONS.md into every project as AUTOCLAUDE.md, stamped with the version | Done |
 | 2026-09-27 | "it's so so so so so much slower than just using claude code extension in vs code... Will it be possible to make it work at a more normal speed once I'm able to work on this again? I don't want to just burn tokens for no reason" | DEFERRED 18 (faster runs), measured and decided at CHECKPOINT 7 | Planned |
+| 2026-09-27 | "I kinda pictured the checks to run after a full feature has been built. Like if we adding an admin page, build the page, and all the features within the page, and before moving to another page or other major feature or whatever, then run the checks. I want it to build a decent amount and run the checks to make sure everything is working before going to another major piece." | DEFERRED 18 option 0: verify per phase (a phase is a feature); decided at CHECKPOINT 7 | Planned |
 
 ### How each requirement is met
 
