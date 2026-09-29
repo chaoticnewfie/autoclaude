@@ -188,6 +188,22 @@ test("runBrowserCheck: no retry when the gate deadline is too close", async () =
   assert.match(r.failed, /no time left for a retry/);
 });
 
+test("runBrowserCheck: stopped by the gate's deadline is out of time, not infra; its own timeout is still infra; a quick crash gets its retry inside a short share", async () => {
+  const timedOut = { ok: false, infra: true, error: "timed out after 300 s", timedOut: true, durationMs: 300000 };
+  const T = 1_000_000;
+  // The gate gave it 5 minutes of its 15.
+  let { r, calls } = await check([timedOut], { deadlineMs: T + 300000, now: () => T });
+  assert.deepEqual([r.status, calls.length, calls[0].timeoutMs], ["out-of-time", 1, 300000]);
+  assert.match(r.failed, /^Browser tester ran out of the gate's time \(1 try\): stopped at the gate's deadline after 300 s \(its own limit is 900 s\)/);
+  assert.equal(r.sections[0].title, "Browser tester: out of time");
+  // Its own timeout ended it, with the gate's time to spare: the checker itself could not finish.
+  ({ r } = await check([{ ...timedOut, error: "timed out after 900 s" }], { deadlineMs: T + 2000000, now: () => T }));
+  assert.equal(r.status, "infra");
+  // A crash after a few seconds is retried within the share, as long as half of it is left.
+  ({ r, calls } = await check([infra("claude ended with error_during_execution"), ok(good)], { deadlineMs: T + 400000, now: () => T + 5000 }));
+  assert.deepEqual([r.status, calls.length], ["passed", 2]);
+});
+
 // ---------- verification once per feature (D49) ----------
 
 const PHASE_PLAN = `# Shop plan

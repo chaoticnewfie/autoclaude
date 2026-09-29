@@ -97,15 +97,23 @@ function messageFile(kind, text) {
   return file;
 }
 
-// The folder a run generates secrets into (D49). commitAll never stages it, so a project that
-// forgot to ignore it still never commits or pushes a secret.
-export const SECRETS_PATHSPEC = ":(exclude)secrets";
+// The folder a run generates secrets into (D49): secrets/ at the top of the project, in any case
+// (Secrets/ on Windows is the same folder), with everything below it. commitAll never stages it,
+// so a project that forgot to ignore it still never commits or pushes a secret. A secrets folder
+// deeper in the tree (src/secrets/) may be real source code and is committed as usual.
+export const SECRETS_PATHSPEC = ":(top,exclude,icase)secrets";
+const SECRETS_DIR = ":(top,icase)secrets";
 
-// git add -A (all but secrets/), then commit. committed is false (with ok true) when there was
-// nothing to commit.
+// git add -A (all but secrets/), unstage secrets/ whatever put it in the index (the builder's own
+// `git add -A`, say), then commit. committed is false (with ok true) when there was nothing to
+// commit.
 export async function commitAll(root, message, opts = {}) {
   const add = await git(root, ["add", "-A", "--", ".", SECRETS_PATHSPEC], opts);
   if (!add.ok) return { ok: false, committed: false, sha: null, stderr: add.stderr };
+  // Back to HEAD's version: a new secret leaves the index, a change to one committed earlier is
+  // not committed. Works before the first commit too, and matching nothing is not an error.
+  const unstage = await git(root, ["reset", "-q", "--", SECRETS_DIR], opts);
+  if (!unstage.ok) return { ok: false, committed: false, sha: null, stderr: unstage.stderr };
   // Staged changes, not the status: an unignored secrets/ stays untracked and must not count.
   const staged = await git(root, ["diff", "--cached", "--quiet"], opts);
   if (staged.code !== 0 && staged.code !== 1) return { ok: false, committed: false, sha: null, stderr: staged.stderr };

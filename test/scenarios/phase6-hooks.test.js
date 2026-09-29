@@ -71,3 +71,21 @@ test("the Stop hook removes its verifying marker when it is done", () => {
   assert.equal(out.decision, "block", "no ready marker: the gate nudges");
   assert.equal(fs.existsSync(path.join(root, ".autoclaude", "gate.json")), false);
 });
+
+test("a second Stop hook leaves a live gate's marker alone and stands down; a stale marker is replaced and removed", () => {
+  const root = project();
+  const marker = path.join(root, ".autoclaude", "gate.json");
+  // This test process stands in for a gate still at work.
+  const live = JSON.stringify({ pid: process.pid, at: new Date().toISOString() });
+  fs.writeFileSync(marker, live);
+  let r = run("stop-gate.js", root, { hook_event_name: "Stop", stop_hook_active: false });
+  assert.equal(r.status, 0);
+  assert.equal(r.stdout, "", "another gate is at work: this stop is allowed");
+  assert.equal(fs.readFileSync(marker, "utf8"), live, "neither overwritten nor removed");
+  assert.match(fs.readFileSync(path.join(root, ".autoclaude", "logs", "gate.log"), "utf8"), /another gate is at work in this project/);
+  // Written longer ago than any gate can take: a reused pid, not a gate.
+  fs.writeFileSync(marker, JSON.stringify({ pid: process.pid, at: new Date(Date.now() - 3 * 3600 * 1000).toISOString() }));
+  r = run("stop-gate.js", root, { hook_event_name: "Stop", stop_hook_active: false });
+  assert.equal(JSON.parse(r.stdout).decision, "block");
+  assert.equal(fs.existsSync(marker), false);
+});

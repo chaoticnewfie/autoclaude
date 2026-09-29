@@ -8,7 +8,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { writeFileAtomic } from "./fsatomic.js";
 import { MARKERS } from "./plan.js";
-import { collectHandback, pushLine } from "./summary.js";
+import { collectHandback, pushLine, pushStatus } from "./summary.js";
 
 export const HANDOFF_FILE = "HANDOFF.md";
 
@@ -133,7 +133,7 @@ function notIgnored(root, files, env) {
 // runDecisions is a count. A write failure comes back as { path: null, summary, error }.
 export function writeHandoff({ root, config, state, parsed, footprint = null, now = new Date(), env = process.env, commits = null }) {
   const st = state || {};
-  const got = collectHandback({ root, config, state: st, parsed });
+  const got = collectHandback({ root, config, state: st, parsed, env });
   const log = Array.isArray(commits) ? commits : runCommits(root, st.baseCommit || null, env);
   const built = builtSummary(parsed, commitsByStep(log));
   const secretsCreated = footprint && Array.isArray(footprint.secretsCreated) ? footprint.secretsCreated : [];
@@ -169,6 +169,10 @@ export function renderHandoff({ config, state, parsed, got, summary, branch, exp
   const took = Number.isFinite(started) ? fmtDuration(now.getTime() - started) : null;
   const base = state.baseCommit ? String(state.baseCommit).slice(0, 7) : null;
   const fp = summary.footprint;
+  // With git.commitEachStep and git.push the gate commits this file and pushes the run branch
+  // right after it is written, so the push state here is the one from before that push. Worded
+  // so, the pushed file stays true whatever that push does; the completion alert has its result.
+  const pushedAfter = !!(config.git && config.git.commitEachStep && config.git.push);
 
   L.push(`# Hand-back: ${title}`, "");
   L.push(`AutoClaude finished this run on ${fmtWhen(now)}${took ? ` after ${took}` : ""}. ${b.done} of ${b.total} steps are verified${b.built ? ` and ${b.built} are built but not verified yet` : ""}${branch ? `, on the branch ${code(branch)}` : ""}. This file is what the run hands back: what is left for you, what to look at before you merge, and what it left on this computer. It is rewritten at the end of every run.`, "");
@@ -184,7 +188,7 @@ export function renderHandoff({ config, state, parsed, got, summary, branch, exp
   const sec = summary.openFindings.filter((f) => f.source === "security").length;
   L.push(`- Open findings: ${summary.openFindings.length ? `${summary.openFindings.length} (${[sec ? plural(sec, "security finding") : null, summary.openFindings.length - sec ? plural(summary.openFindings.length - sec, "follow-up") : null].filter(Boolean).join(", ")})` : "none"}.`);
   L.push(`- Decisions the run made: ${summary.runDecisions}.`);
-  L.push(`- ${pushLine(summary.push, config)}`);
+  L.push(`- ${pushedAfter ? `Push before this file was committed: ${pushStatus(summary.push, config)}` : pushLine(summary.push, config)}`);
   L.push(`- This computer: ${footprintSummary(fp)}.`, "");
 
   // What the owner has to do comes first.
@@ -202,17 +206,23 @@ export function renderHandoff({ config, state, parsed, got, summary, branch, exp
   if (!planItems.length && !got.leftRows.length) L.push("Nothing. The plan lists nothing for after the run, and the run left nothing for you.", "");
 
   L.push("## Push", "");
-  L.push(pushLine(summary.push, config), "");
   const ps = summary.push;
   const remote = (ps && ps.remote) || "origin";
-  if (ps && !ps.ok && !ps.skipped) {
-    const tags = Array.isArray(ps.unpushedTags) ? ps.unpushedTags : [];
-    L.push("To push what is missing, from the project folder:", "", "```");
-    L.push(`git push ${remote} ${ps.branch || branch || "<run branch>"}`);
+  const failed = !!ps && !ps.ok && !ps.skipped;
+  const tags = failed && Array.isArray(ps.unpushedTags) ? ps.unpushedTags : [];
+  const pushCommands = (lead) => {
+    L.push(lead, "", "```", `git push ${remote} ${(ps && ps.branch) || branch || "<run branch>"}`);
     if (tags.length) L.push(`git push ${remote} ${tags.join(" ")}`);
     L.push("```", "");
-  } else if (!ps && branch) {
-    L.push(`To put the run branch on your remote after your review: ${code(`git push -u ${remote} ${branch}`)}.`, "");
+  };
+  if (pushedAfter) {
+    L.push(`Before this file was committed: ${pushStatus(ps, config)}`, "");
+    if (ps && ps.skipped) L.push("The run commits this file right after writing it and then tries to push the run branch; the completion alert says how that went.", "");
+    else pushCommands(`The run commits this file right after writing it and then pushes the run branch${tags.length ? " and the missing tags" : ""}. The completion alert says how that push went. If it says the push failed, push from the project folder:`);
+  } else {
+    L.push(pushLine(ps, config), "");
+    if (failed) pushCommands("To push what is missing, from the project folder:");
+    else if (!ps && branch) L.push(`To put the run branch on your remote after your review: ${code(`git push -u ${remote} ${branch}`)}.`, "");
   }
 
   if (summary.secretsCreated.length) {
@@ -296,12 +306,16 @@ function stripIntro(section) {
   return (first > 0 ? lines.slice(first) : lines).join("\n").trim();
 }
 
+// What tied a Docker object to this project (footprint.js attributedBy), when it says.
+const tiedBy = (item) => item.attributedBy ? ` (${flat(item.attributedBy)})` : "";
+
 function footprintSummary(fp) {
   if (!fp) return "not checked";
   const bits = [];
   if (fp.removed && fp.removed.length) bits.push(`removed ${fp.removed.length} unused Docker ${fp.removed.length === 1 ? "object" : "objects"} the run created`);
   if (fp.runningCreated && fp.runningCreated.length) bits.push(`${plural(fp.runningCreated.length, "container")} the run started still running`);
   if (fp.kept && fp.kept.length) bits.push(`kept ${fp.kept.length}`);
+  if (fp.unattributed && fp.unattributed.length) bits.push(`left alone ${fp.unattributed.length} not tied to this project`);
   if (fp.errors && fp.errors.length) bits.push(plural(fp.errors.length, "problem"));
   if (bits.length) return bits.join(", ");
   return fp.dockerChecked === false ? "Docker not checked (not installed or not running)" : "nothing left behind in Docker";
@@ -313,17 +327,24 @@ function footprintSection(fp) {
   if (fp.dockerChecked === false && !(fp.errors && fp.errors.length)) out.push("Docker was not checked: it is not installed here, or it was not running when the run ended.", "");
   if (fp.runningCreated && fp.runningCreated.length) {
     out.push("Still running, started by the run. They were left alone because the plan may have wanted them running. If one is not wanted, the command next to it stops and removes it:", "");
-    for (const c of fp.runningCreated) out.push(`- ${describeDocker(c)}, ${c.state || "running"}: ${code(dockerRemoveCommand(c))}`);
+    for (const c of fp.runningCreated) out.push(`- ${describeDocker(c)}${tiedBy(c)}, ${c.state || "running"}: ${code(dockerRemoveCommand(c))}`);
     out.push("");
   }
   if (fp.kept && fp.kept.length) {
     out.push("Created by the run and kept:", "");
-    for (const k of fp.kept) out.push(`- ${describeDocker(k)}: ${flat(k.reason || "kept")}. To remove it: ${code(dockerRemoveCommand(k))}`);
+    for (const k of fp.kept) out.push(`- ${describeDocker(k)}${tiedBy(k)}: ${flat(k.reason || "kept")}. To remove it: ${code(dockerRemoveCommand(k))}`);
+    out.push("");
+  }
+  // New while the run went on, but nothing ties them to this project: no remove command, since
+  // they may hold another project's data.
+  if (fp.unattributed && fp.unattributed.length) {
+    out.push("New while the run was going, but not tied to this project, so the run left them alone (another project, or you, may have made them):", "");
+    for (const u of fp.unattributed) out.push(`- ${describeDocker(u)}${u.kind === "container" && u.state ? `, ${u.state}` : ""}: ${flat(u.reason || "nothing ties it to this project").replace(/[.]$/, "")}.`);
     out.push("");
   }
   if (fp.removed && fp.removed.length) {
     out.push("Removed: unused things the run created.", "");
-    for (const r of fp.removed) out.push(`- ${describeDocker(r)}`);
+    for (const r of fp.removed) out.push(`- ${describeDocker(r)}${tiedBy(r)}`);
     out.push("");
   }
   if (fp.goneSinceStart && fp.goneSinceStart.length) {

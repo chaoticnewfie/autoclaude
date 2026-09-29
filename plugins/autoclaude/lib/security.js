@@ -214,10 +214,14 @@ function relFile(root, file) {
 
 const rel = (root, f) => path.relative(root, f).replace(/\\/g, "/");
 
+// A retry needs at least this, and half of what the first try was given.
+const MIN_RETRY_MS = 60000;
+
 // Runs the security reviewer once for a verification. Resolves to { status: "passed" | "failed"
-// | "infra", failed, sections, findings (the non-blocking ones, for the gate to file),
-// verdictFile, strays }. `run` is injectable for tests. Retries once on an infrastructure
-// failure when the gate's deadline leaves room for it.
+// | "infra" | "out-of-time", failed, sections, findings (the non-blocking ones, for the gate to
+// file), verdictFile, strays }. `run` is injectable for tests. Retries once on an
+// infrastructure failure when the deadline leaves room for it. "out-of-time": the deadline (the
+// gate's time for this checker), not security.timeoutSec, stopped it.
 export async function runSecurityReview({ root, config, step = null, steps = null, parsed, state = null, env = process.env, attempt = 1, deadlineMs = Infinity, run = runHeadless, now = () => Date.now() }) {
   if (!step && !(Array.isArray(steps) && steps.length)) throw new Error("runSecurityReview needs a step or steps");
   step = step || steps[steps.length - 1];
@@ -242,14 +246,19 @@ export async function runSecurityReview({ root, config, step = null, steps = nul
   let tries = 0;
   let totalMs = 0;
   let cost = 0;
+  // The last try was stopped by the deadline rather than by security.timeoutSec.
+  let cut = false;
+  const firstBudget = Math.max(0, Math.min(s.timeoutSec * 1000, deadlineMs - now()));
   while (tries < 2) {
     const remaining = deadlineMs - now();
-    if (tries > 0 && remaining < s.timeoutSec * 1000 * 0.5) { errors.push("no time left for a retry before the gate's own timeout"); break; }
+    if (tries > 0 && remaining < Math.max(MIN_RETRY_MS, firstBudget * 0.5)) { errors.push("no time left for a retry before the gate's own timeout"); break; }
     tries++;
     const timeoutMs = Math.max(30000, Math.min(s.timeoutSec * 1000, remaining));
     result = await runWithWrapUp(run, { prompt, args, cwd: reportDir, env, role: "security", timeoutMs, deadlineMs });
+    cut = !result.ok && !!result.timedOut && timeoutMs < s.timeoutSec * 1000;
     totalMs += result.durationMs || 0;
     if (typeof result.costUsd === "number") cost += result.costUsd;
+    if (cut) { errors.push(`stopped at the gate's deadline after ${Math.round(timeoutMs / 1000)} s (its own limit is ${s.timeoutSec} s)`); break; }
     if (result.ok) {
       const raw = result.structured;
       verdict = raw && typeof raw === "object" && Array.isArray(raw.findings)
@@ -274,6 +283,16 @@ export async function runSecurityReview({ root, config, step = null, steps = nul
   });
   const verdictRel = rel(root, verdictFile);
 
+  if (!evaluation && cut) {
+    return {
+      status: "out-of-time",
+      failed: `${LABEL} ran out of the gate's time (${tries} ${tries === 1 ? "try" : "tries"}): ${errors.join("; ")}`,
+      sections: [{ title: `${LABEL}: out of time`, body: `Tries: ${tries}\nErrors:\n${errors.map((e) => `- ${e}`).join("\n")}\nVerdict file: ${verdictRel}` }],
+      findings: [],
+      verdictFile: verdictRel,
+      strays
+    };
+  }
   if (!evaluation) {
     return {
       status: "infra",

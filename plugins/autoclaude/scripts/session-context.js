@@ -12,7 +12,7 @@ import { fileURLToPath } from "node:url";
 import { findProjectRoot } from "../lib/paths.js";
 import { loadState, saveState, STATUS } from "../lib/state.js";
 import { loadConfig } from "../lib/config.js";
-import { parsePlan, stepById, nextStep, stepText } from "../lib/plan.js";
+import { parsePlan, stepById, nextStep, stepText, isFinished } from "../lib/plan.js";
 import { readText, appendLine } from "../lib/fsatomic.js";
 import { readMachineNotify, writeMachineNotify } from "../lib/notify.js";
 import { isBuilderSession } from "../lib/builder.js";
@@ -53,11 +53,15 @@ export function buildContext({ root, state, config, planText, progressText, prom
     parts.push("## Current step\n\nNo unfinished step is left in the plan. Run `autoclaude ready` with no id to let the gate close the run.");
   }
   // The feature the step belongs to, so a fresh session per feature (D49) sees the whole of it:
-  // with verifyAt "phase" every Accept line below is checked when the last step is ready.
+  // with verifyAt "phase" every Accept line below is checked when the step that closes the
+  // feature is ready. That is the last step not yet done or built, which is not the phase's last
+  // once the owner has ticked that one and the gate reopened an earlier built step.
   if (step && step.phase && step.phase.steps.length > 1) {
     const perFeature = !(config.gate && config.gate.verifyAt === "step");
     const rows = step.phase.steps.map((s) => `- [${s.marker}] ${s.id} ${s.title}${s === step ? "  <- current" : ""}`);
-    parts.push(`## Current feature: Phase ${step.phase.num} ${step.phase.title}\n\n${rows.join("\n")}\n\n${perFeature ? `[~] is built and waiting for the feature's verification, which runs over every Accept line of these steps when ${step.phase.steps[step.phase.steps.length - 1].id} is ready.` : "Each step is verified on its own ready (gate.verifyAt is \"step\")."}`);
+    const open = step.phase.steps.filter((s) => !isFinished(s));
+    const closer = open.length ? open[open.length - 1] : step.phase.steps[step.phase.steps.length - 1];
+    parts.push(`## Current feature: Phase ${step.phase.num} ${step.phase.title}\n\n${rows.join("\n")}\n\n${perFeature ? `[~] is built and waiting for the feature's verification, which runs over every Accept line of these steps when ${closer.id} is ready.${closer === step ? ` ${step.id}, the current step, closes the feature.` : ""}` : "Each step is verified on its own ready (gate.verifyAt is \"step\")."}`);
   }
   if (state.fixup && Array.isArray(state.fixup.findings) && state.fixup.findings.length) {
     const list = state.fixup.findings.map((f, i) => `${i + 1}. [${f.source || "?"}, ${f.severity || "?"}] ${f.text || ""}${f.doc ? ` (${f.doc})` : ""}`).join("\n");

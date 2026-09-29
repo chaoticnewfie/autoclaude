@@ -5,7 +5,8 @@ import { projectPaths } from "./paths.js";
 
 export const STATUS = Object.freeze({ idle: "idle", running: "running", paused: "paused", complete: "complete" });
 // Every pauseReason the gate, the CLI and the supervisor set.
-export const PAUSE_REASONS = Object.freeze(["review", "blocked", "step-failed", "security", "stuck", "infra", "commit-failed", "weekly-limit"]);
+// "out-of-time": a verification that does not fit in one stop, twice for the same step.
+export const PAUSE_REASONS = Object.freeze(["review", "blocked", "step-failed", "security", "stuck", "infra", "out-of-time", "commit-failed", "weekly-limit"]);
 
 export function defaultState() {
   return {
@@ -17,7 +18,13 @@ export function defaultState() {
     currentStep: null,
     attempts: {},
     infraFailures: {},
+    // Per step: verifications that ran out of the gate's time (a check or checker stopped at
+    // its deadline, or the whole gate cut off by the hook's timeout). The second one pauses.
+    outOfTime: {},
     uncommitted: [],
+    // The gate's commit message for each step in `uncommitted`, so `autoclaude resume` commits
+    // it with the body the gate wrote.
+    uncommittedMessages: {},
     noProgress: 0,
     recoveries: 0,
     toolCallsAtLastGate: 0,
@@ -38,6 +45,15 @@ export function defaultState() {
     // { phase, stepId, findings: [...], attempt, report, checks }. The next ready runs the checks
     // only, then closes the feature.
     fixup: null,
+    // A verified step or feature on its way into a commit: { verifyId, stepId, scope, attempt,
+    // timings, findings, report, feature, phaseEnd, fixupDone, headBefore, pid, at }. Recorded
+    // with the ticks before the verification's snapshot goes, so a gate cut off during the
+    // commit, the tag or the push is finished by the next stop instead of verified again.
+    closing: null,
+    // The plan is complete and the gate is finishing the run (machine footprint, hand-back,
+    // its commit and push, the alert): { at, footprintDone, footprint, handoffDone, handoff,
+    // committed, pushed, pushState }. The run is marked complete only once that is done.
+    completing: null,
     // Set by the gate after a verified feature when a supervisor is live; the supervisor ends the
     // builder, clears it, and starts a fresh session for the next feature.
     freshSession: false,
@@ -49,6 +65,9 @@ export function defaultState() {
     // The last push of the run branch: { branch, remote, ok, skipped, at, error,
     // unpushedCommits, unpushedTags }, or null when the gate has not pushed.
     pushState: null,
+    // Where the decisions log stood when the run started ({ D, N }, the highest numbers), so
+    // the hand-back counts only this run's entries (lib/summary.js).
+    decisionsAtStart: null,
     ownerAnswer: null,
     lastBlockedQuestion: null,
     usageStaleWarned: false,

@@ -385,9 +385,13 @@ async function cmdRun(args, io) {
   const fresh = state.status === STATUS.idle || continuing;
   const skip = fresh ? [] : ["plan", "git", "checks", "playwright", "dev server", "usage"];
   // The checks are judged with this terminal's own PATH: the window, the builder and the gate
-  // inherit it, and it is what gets recorded for `autoclaude checks` below.
-  const pf = await preflight(project, { env: io.env, checksEnv: io.env, devServer: fresh, skip });
+  // inherit it, and it is what gets recorded for `autoclaude checks` below. Only a check from Git
+  // Bash (the planning session's Bash tool) is judged the way `autoclaude checks` judges it,
+  // without Git Bash's own folders: the run itself is started from a terminal that has none.
+  const gitBashCheck = checkOnly && !!io.env.MSYSTEM;
+  const pf = await preflight(project, { env: io.env, checksEnv: gitBashCheck ? checksEnv(null, io.env).env : io.env, devServer: fresh, skip });
   io.out(`autoclaude: preflight${fresh ? "" : ` (a run is under way, ${describeState(state)}, so only the tools and the folder's trust are checked)`}`);
+  if (gitBashCheck) io.out("  PATH for the checks: this shell's PATH without Git Bash's own folders, as `autoclaude run` from PowerShell or cmd would see it");
   io.out(formatPreflight(pf));
   const what = continuing ? "continue the finished plan with its new steps" : fresh ? "start the run" : `bring back the ${state.status} run`;
   if (checkOnly) {
@@ -698,14 +702,27 @@ async function cmdStart(args, io) {
   const now = io.now().toISOString();
   const baseCommit = await git.head(root, { env: gitEnv });
   const usage = readUsage({ staleAfterMin: config.usage.staleAfterMin, now: io.now().getTime() });
+  // Steps an earlier run verified but could not commit: start needs a clean tree, so they are
+  // committed by now (by hand) or gone; `resume` must not commit later edits under their names.
+  if ((state.uncommitted || []).length) io.out(`autoclaude: the last run verified ${state.uncommitted.join(", ")} but could not commit ${state.uncommitted.length === 1 ? "it" : "them"}; the working tree is clean, so that is taken as done.`);
+  // Tags an earlier run could not push are still pushed with this run's next push.
+  const leftTags = [];
+  for (const t of (state.pushState && state.pushState.unpushedTags) || []) if (await git.tagExists(root, t, { env: gitEnv })) leftTags.push(t);
+  // Where the decisions log stands, so the hand-back counts only this run's entries.
+  const mark = await optional(io, "./summary.js", "decisionsMark");
+  let decisionsAtStart = null;
+  if (mark) { try { decisionsAtStart = mark(readText(path.join(root, config.docs.decisions), "") || ""); } catch {} }
   updateState(root, (s) => {
     s.status = STATUS.running; s.pauseReason = null; s.pauseRequested = false; s.haltSession = false; s.currentStep = first.id;
-    s.attempts = {}; s.infraFailures = {}; s.noProgress = 0; s.recoveries = 0; s.tickedByGate = ticked; s.startedAt = now; s.stepStartedAt = now;
+    s.attempts = {}; s.infraFailures = {}; s.outOfTime = {}; s.noProgress = 0; s.recoveries = 0; s.tickedByGate = ticked; s.startedAt = now; s.stepStartedAt = now;
     s.headAtLastGate = null; s.toolCallsAtLastGate = 0; s.baseCommit = baseCommit; s.ownerAnswer = null; s.lastBlockedQuestion = null;
-    s.usageAtStart = usage.sevenDay && !usage.stale ? usage.sevenDay.pct : null; s.weeklyResetsAt = null;
-    // Nothing of an earlier run's feature carries over (D49).
-    s.fixup = null; s.freshSession = false; s.phaseBaseCommit = null; s.phaseStartedAt = null; s.pushState = null;
+    s.usageAtStart = usage.sevenDay && !usage.stale ? usage.sevenDay.pct : null; s.weeklyResetsAt = null; s.decisionsAtStart = decisionsAtStart;
+    s.uncommitted = []; s.uncommittedMessages = {};
+    // Nothing of an earlier run's feature carries over (D49), except the tags it could not push.
+    s.fixup = null; s.freshSession = false; s.phaseBaseCommit = null; s.phaseStartedAt = null; s.closing = null; s.completing = null;
+    s.pushState = leftTags.length ? { branch: null, remote: null, ok: false, skipped: false, at: (s.pushState && s.pushState.at) || null, error: (s.pushState && s.pushState.error) || "not pushed by the last run", unpushedCommits: null, unpushedTags: leftTags } : null;
   });
+  if (leftTags.length) io.out(`  ${leftTags.join(", ")} ${leftTags.length === 1 ? "was" : "were"} not pushed by the last run; the next push takes ${leftTags.length === 1 ? "it" : "them"} along.`);
   io.out(`autoclaude: running on branch ${branch}${co.created ? " (created)" : ""}. First step: ${first.id} ${first.title}.`);
   io.out(`  the builder session works the plan; the gate verifies on every stop. Watch with \`autoclaude status\`.`);
   // The session that ran `start` began before the run existed, so it never got the run's rules
@@ -890,7 +907,7 @@ async function cmdResume(args, io) {
     io.out(`autoclaude: committed ${c.ids.join(", ")} (${String(c.sha || "").slice(0, 7)}), which passed verification before the commit failed`);
     state = loadState(project.root);
   }
-  const changes = resumeRun(project, state);
+  const changes = resumeRun(project, state, {}, { env: io.env });
   const next = loadState(project.root);
   const notes = next.pendingNotes.length;
   io.out(`autoclaude: resumed on ${next.currentStep || "?"}${notes ? ` with ${notes} review note(s) waiting for Claude` : ""}. The supervisor nudges the session on its next pass.`);
@@ -963,7 +980,7 @@ function cmdAnswer(args, io) {
     id, date: at.slice(0, 10), step, title: "Owner answer to a blocked question",
     fields: [["Question", question], ["Answer", text], ["By", "owner, with `autoclaude answer`"]]
   }));
-  const changes = resumeRun(project, state, { ownerAnswer: { step, question, answer: text, at, decisionId: id }, lastBlockedQuestion: null });
+  const changes = resumeRun(project, state, { ownerAnswer: { step, question, answer: text, at, decisionId: id }, lastBlockedQuestion: null }, { env: io.env });
   io.out(`autoclaude: answer recorded in ${project.config.docs.decisions} as ${id}; the run is going again on ${loadState(project.root).currentStep || "?"}.`);
   io.out("  Claude gets the answer at its next session start and in the gate's next message.");
   for (const c of changes) io.out(`  ${c}`);

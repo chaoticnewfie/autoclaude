@@ -70,6 +70,23 @@ test("run active: injects the rules, the current step, the progress tail and pen
   assert.match(fs.readFileSync(path.join(root, ".autoclaude", "logs", "hooks.log"), "utf8"), /SessionStart startup injected/);
 });
 
+test("the feature section names the step that will close the feature, not a phase's last step the owner ticked", () => {
+  const root = project();
+  // The owner ticked S1.3 during a pause; the gate reopened S1.2, whose ready now verifies Phase 1.
+  fs.writeFileSync(path.join(root, "PLAN.md"), "# Demo plan\n\n## Phase 1: One\n- [~] **S1.1** Built already\n  - Accept: a\n- [ ] **S1.2** Reopened\n  - Accept: b\n- [x] **S1.3** Ticked by the owner\n  - Accept: c\n");
+  saveState(root, { ...defaultState(), status: "running", currentStep: "S1.2" });
+  const ctx = JSON.parse(runHook(root).stdout).hookSpecificOutput.additionalContext;
+  assert.match(ctx, /every Accept line of these steps when S1\.2 is ready\. S1\.2, the current step, closes the feature\./);
+  assert.doesNotMatch(ctx, /when S1\.3 is ready/);
+
+  // Two steps still to build: the later one closes the feature, and the current one does not.
+  fs.writeFileSync(path.join(root, "PLAN.md"), "# Demo plan\n\n## Phase 1: One\n- [ ] **S1.1** First\n  - Accept: a\n- [ ] **S1.2** Second\n  - Accept: b\n- [x] **S1.3** Ticked by the owner\n  - Accept: c\n");
+  saveState(root, { ...defaultState(), status: "running", currentStep: "S1.1" });
+  const early = JSON.parse(runHook(root).stdout).hookSpecificOutput.additionalContext;
+  assert.match(early, /every Accept line of these steps when S1\.2 is ready\.\n/);
+  assert.doesNotMatch(early, /the current step, closes the feature/);
+});
+
 test("an owner answer to a blocked question is injected first, with its decision id", () => {
   const root = project();
   saveState(root, { ...defaultState(), status: "running", currentStep: "S1.2", ownerAnswer: { step: "S1.2", question: "Cookies or localStorage?", answer: "Cookies, httpOnly", at: "2026-09-27T04:00:00.000Z", decisionId: "D-008" } });

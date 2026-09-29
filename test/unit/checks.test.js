@@ -80,6 +80,25 @@ test("runChecks enforces the per-check timeout and reports timedOut", async () =
   assert.equal(r.failed.reason, "timed out after 1 s");
 });
 
+test("runChecks caps every check at the gate's deadline: one stopped by it, or not started for lack of time, is out of time", async () => {
+  // Its own timeout would allow 10 minutes; the deadline allows about a second and a half.
+  const long = { ...slow("long"), timeoutSec: 600 };
+  const started = Date.now();
+  let r = await runChecks([long, passing("after")], { deadlineMs: Date.now() + 1500, minMs: 500 });
+  assert.ok(Date.now() - started < 10000, "the deadline, not the check's own timeout, ended it");
+  assert.deepEqual([r.ok, r.failed.name, r.failed.ran, r.failed.timedOut, r.failed.outOfTime], [false, "long", true, true, true]);
+  assert.match(r.failed.reason, /^stopped at the gate's deadline after \d+ s \(its own timeoutSec is 600\)$/);
+  assert.equal(r.results[1].skipped, true);
+
+  // Too little left to start: not run at all, and still out of time rather than a failure.
+  r = await runChecks([passing("late")], { deadlineMs: Date.now() + 2000 });
+  assert.deepEqual([r.ok, r.failed.ran, r.failed.outOfTime, r.failed.reason], [false, false, true, "no time left before the gate's deadline"]);
+
+  // A check that times out on its own timeout inside the deadline is a plain failure.
+  r = await runChecks([slow()], { deadlineMs: Date.now() + 60000 });
+  assert.deepEqual([r.failed.timedOut, r.failed.outOfTime, r.failed.reason], [true, false, "timed out after 1 s"]);
+});
+
 test("a check that needs the dev server fails without running when it is not ready", async () => {
   const seen = [];
   const check = { ...passing("e2e"), needsDevServer: true };

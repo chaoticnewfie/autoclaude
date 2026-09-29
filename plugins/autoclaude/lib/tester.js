@@ -77,6 +77,23 @@ export function turnScale(lines) {
   return Math.min(4, Math.max(1, Math.ceil(lines / 5)));
 }
 
+// The steps a browser check covers: the step, or in phase mode the feature (the tester leaves
+// out no-ui steps).
+function checkedSteps(kind, step, steps) {
+  const phaseMode = Array.isArray(steps) && steps.length > 0;
+  return !phaseMode ? [step || steps[steps.length - 1]] : kind === "tester" ? steps.filter((s) => !isNoUi(s)) : steps;
+}
+
+// The time a browser check allows itself (tester.timeoutSec, scaled for the tester like its
+// turns), so the gate can share its own time out among the checkers in proportion.
+export function browserTimeoutSec(kind, config, { step = null, steps = null } = {}) {
+  const list = checkedSteps(kind, step, steps);
+  return config.tester.timeoutSec * (kind === "tester" ? turnScale(acceptCount(list)) : 1);
+}
+
+// A retry needs at least this, and half of what the first try was given.
+export const MIN_RETRY_MS = 60000;
+
 // steps: the whole feature (phase mode); otherwise the single step, with the features verified
 // earlier in its phase to smoke-check.
 export function buildPrompt(kind, { template, url, step = null, steps = null, parsed, testChanges = "", screenshotDir, turns = 40 }) {
@@ -259,18 +276,21 @@ export function verdictSection(kind, verdict, evaluation, meta = {}) {
 }
 
 // Runs the tester (kind "tester") or the bug bash (kind "bugbash") for one verification.
-// Resolves to { status: "passed" | "failed" | "infra", failed, sections, followUps, verdictFile,
-// screenshots }. `run` is injectable for tests. Retries once on an infrastructure failure when
-// the gate's deadline leaves room for it. Takes `steps` (the whole feature, phase mode) or
-// `step`; in phase mode the tester leaves out steps tagged no-ui (their tests verify them), and
-// its test changes run from state.phaseBaseCommit (read from the run state when not passed).
+// Resolves to { status: "passed" | "failed" | "infra" | "out-of-time", failed, sections,
+// followUps, verdictFile, screenshots }. `run` is injectable for tests. Retries once on an
+// infrastructure failure when the deadline leaves room for it. "out-of-time": the deadline
+// (the gate's time for this checker), not the checker's own timeout, stopped it; that is a
+// verification too big for one stop, not a machine problem. Takes `steps` (the whole feature,
+// phase mode) or `step`; in phase mode the tester leaves out steps tagged no-ui (their tests
+// verify them), and its test changes run from state.phaseBaseCommit (read from the run state
+// when not passed).
 export async function runBrowserCheck({ kind = "tester", root, config, step = null, steps = null, parsed, state = null, env = process.env, attempt = 1, deadlineMs = Infinity, run = runHeadless, now = () => Date.now() }) {
   const k = KINDS[kind];
   if (!k) throw new Error(`unknown browser check ${kind}`);
   const phaseMode = Array.isArray(steps) && steps.length > 0;
   if (!phaseMode && !step) throw new Error("runBrowserCheck needs a step or steps");
   const anchor = step || steps[steps.length - 1];
-  const list = !phaseMode ? [anchor] : kind === "tester" ? steps.filter((s) => !isNoUi(s)) : steps;
+  const list = checkedSteps(kind, step, steps);
   if (list.length === 0) {
     return { status: "passed", failed: null, sections: [{ title: `${k.label}: skipped`, body: "Every step of this feature is tagged no-ui; its tests verify it." }], followUps: [], verdictFile: null, screenshots: [] };
   }
@@ -312,12 +332,16 @@ export async function runBrowserCheck({ kind = "tester", root, config, step = nu
   let tries = 0;
   let totalMs = 0;
   let cost = 0;
+  // The last try was stopped by the deadline rather than by the checker's own timeout.
+  let cut = false;
+  const firstBudget = Math.max(0, Math.min(timeoutSec * 1000, deadlineMs - now()));
   while (tries < 2) {
     const remaining = deadlineMs - now();
-    if (tries > 0 && remaining < timeoutSec * 1000 * 0.5) { errors.push("no time left for a retry before the gate's own timeout"); break; }
+    if (tries > 0 && remaining < Math.max(MIN_RETRY_MS, firstBudget * 0.5)) { errors.push("no time left for a retry before the gate's own timeout"); break; }
     tries++;
     const timeoutMs = Math.max(30000, Math.min(timeoutSec * 1000, remaining));
     result = await runWithWrapUp(run, { prompt, args, cwd: shotsDir, env, role: kind, timeoutMs, deadlineMs });
+    cut = !result.ok && !!result.timedOut && timeoutMs < timeoutSec * 1000;
     totalMs += result.durationMs || 0;
     if (typeof result.costUsd === "number") cost += result.costUsd;
     if (result.ok) {
@@ -327,8 +351,9 @@ export async function runBrowserCheck({ kind = "tester", root, config, step = nu
       result = { ...result, ok: false };
       evaluation = null;
     } else {
-      errors.push(result.error);
+      errors.push(cut ? `stopped at the gate's deadline after ${Math.round(timeoutMs / 1000)} s (its own limit is ${timeoutSec} s)` : result.error);
     }
+    if (cut) break;
   }
 
   const strays = await sweepStrays(root, before, shotsDir, env);
@@ -342,6 +367,16 @@ export async function runBrowserCheck({ kind = "tester", root, config, step = nu
   });
   const verdictRel = rel(root, verdictFile);
 
+  if (!evaluation && cut) {
+    return {
+      status: "out-of-time",
+      failed: `${k.label} ran out of the gate's time (${tries} ${tries === 1 ? "try" : "tries"}): ${errors.join("; ")}`,
+      sections: [{ title: `${k.label}: out of time`, body: `Tries: ${tries}\nErrors:\n${errors.map((e) => `- ${e}`).join("\n")}\nVerdict file: ${verdictRel}` }],
+      followUps: [],
+      verdictFile: verdictRel,
+      screenshots
+    };
+  }
   if (!evaluation) {
     return {
       status: "infra",

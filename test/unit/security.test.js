@@ -245,6 +245,17 @@ test("runSecurityReview: no retry when the gate deadline is too close", async ()
   assert.match(r.failed, /no time left for a retry/);
 });
 
+test("runSecurityReview: stopped by the gate's deadline is out of time, not infra", async () => {
+  const T = 1_000_000;
+  const timedOut = { ok: false, infra: true, error: "timed out after 120 s", timedOut: true, durationMs: 120000 };
+  let { r, calls } = await review([timedOut], { deadlineMs: T + 120000, now: () => T });
+  assert.deepEqual([r.status, calls.length, calls[0].timeoutMs], ["out-of-time", 1, 120000]);
+  assert.match(r.failed, /^Security review ran out of the gate's time \(1 try\): stopped at the gate's deadline after 120 s \(its own limit is 900 s\)/);
+  assert.equal(r.sections[0].title, "Security review: out of time");
+  ({ r } = await review([{ ...timedOut, error: "timed out after 900 s" }], { deadlineMs: T + 2000000, now: () => T }));
+  assert.equal(r.status, "infra", "its own timeout, with time to spare, is the checker's problem");
+});
+
 const DECIDED = `# Kiosk plan
 
 ## Goal

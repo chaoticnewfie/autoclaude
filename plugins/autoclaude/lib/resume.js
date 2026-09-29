@@ -8,41 +8,86 @@
 // for the owner to read.
 import path from "node:path";
 import { readText, readJson, writeFileAtomic, removeIfExists } from "./fsatomic.js";
-import { parsePlan, setMarker, stepById, firstUnfinished, isFinished, isPhaseEnd, reopenUnverified, MARKERS } from "./plan.js";
-import { updateState, STATUS } from "./state.js";
+import { parsePlan, setMarker, stepById, firstUnfinished, isFinished, isPhaseEnd, reopenUnverified, planSlug, MARKERS } from "./plan.js";
+import { loadState, updateState, STATUS } from "./state.js";
 import { projectPaths } from "./paths.js";
 import { isPidAlive } from "./proc.js";
 import * as git from "./git.js";
 import { liveSupervisorPid } from "./builder.js";
 
-// The plan and PROGRESS.md as they were before a verification wrote its ticks (lib/gate.js):
-// { step, plan, progress, ticked: [ids], added: "<the PROGRESS lines it appended>" }. It stays
-// on disk while the checks run and goes once the verification has an outcome.
+// What a verification wrote before its checks ran (lib/gate.js): { id, step, pid, at, plan,
+// progress, ticked: [ids], added: "<the PROGRESS lines it appended>", rows: [{ file, text,
+// created }] (the findings rows it filed) }. A fix-up pass writes one with fixup: true and
+// nothing to undo, so a pass that is cut off is counted as well. It stays on disk while the
+// checks run and goes once the verification has an outcome.
 export function pendingVerifyFile(root) {
   return path.join(projectPaths(root).runtimeDir, "verify-pending.json");
 }
 
-// Whether a gate process is at work in the project right now (scripts/stop-gate.js keeps
-// .autoclaude/gate.json with its pid while it runs).
-export function gateRunning(root) {
+// Whether a gate process other than `except` is at work in the project right now
+// (scripts/stop-gate.js keeps .autoclaude/gate.json with its pid while it runs).
+export function gateRunning(root, { except = null } = {}) {
   try {
     const j = readJson(path.join(projectPaths(root).runtimeDir, "gate.json"), null);
-    return !!(j && j.pid && isPidAlive(j.pid));
+    return !!(j && j.pid && j.pid !== except && isPidAlive(j.pid));
   } catch {
     return false;
   }
 }
 
+// The time any gate can take: its budget plus the supervisor's margin. A pid recorded longer ago
+// than that is a reused one.
+function gateLifeMs(config) {
+  return (((config && config.gate && config.gate.timeoutSec) || 1800) + 300) * 1000;
+}
+
+// Whether the gate that wrote `rec` (a verification snapshot, or state.closing: { pid, at }) is
+// not `self`, is still alive and is still within a gate's lifetime. gate.json can be overwritten
+// by a second session's gate; these records cannot.
+export function heldByLiveGate(rec, self, config) {
+  if (!rec || !Number.isSafeInteger(rec.pid) || rec.pid <= 0 || rec.pid === self) return false;
+  const at = Date.parse(rec.at || "");
+  if (Number.isFinite(at) && Date.now() - at > gateLifeMs(config)) return false;
+  return isPidAlive(rec.pid);
+}
+
+// Another gate at work in the project than `self`: a live gate.json of another pid, not older
+// than a gate's lifetime, or a pending verification whose gate is alive.
+export function liveOtherGate(root, config, self) {
+  try {
+    const j = readJson(path.join(projectPaths(root).runtimeDir, "gate.json"), null);
+    if (j && j.pid && j.pid !== self && isPidAlive(j.pid)) {
+      const at = Date.parse(j.at || "");
+      if (!Number.isFinite(at) || Date.now() - at < gateLifeMs(config)) return true;
+    }
+  } catch {}
+  let snap = null;
+  try { snap = readJson(pendingVerifyFile(root), null); } catch { snap = null; }
+  return heldByLiveGate(snap, self, config);
+}
+
 // Undoes a verification that was cut off (the hook's timeout, `pause --now` ending the session
-// and its gate, a crash): the ticks it wrote come out and its PROGRESS lines go, and nothing
-// else, so edits the owner made during a pause stay. Left to a gate that is still alive when
-// unlessGateRunning is set. Returns { step, ids } or null when there was nothing to undo.
-export function undoCutVerification(root, config, { unlessGateRunning = false } = {}) {
+// and its gate, a crash): the ticks it wrote come out, its PROGRESS lines and findings rows go,
+// and nothing else, so edits the owner made during a pause stay. With unlessGateRunning it is
+// left to a gate that is still alive (`self`, the caller's own pid, never counts as one). A
+// snapshot whose outcome the run state already records (a gate cut off between recording it
+// and removing the file) is only removed. `own` is the gate taking out its own verification
+// after a failure. A cut-off found while the run is running (not ended by the owner's pause)
+// counts towards state.outOfTime. Returns { step, ids, fixup, count } (count: that step's
+// out-of-time count when this one was counted, else 0) or null when there was nothing to undo.
+export function undoCutVerification(root, config, { unlessGateRunning = false, self = null, own = false } = {}) {
   const file = pendingVerifyFile(root);
   let snap;
   try { snap = readJson(file, null); } catch { snap = {}; }
   if (!snap) return null;
-  if (unlessGateRunning && gateRunning(root)) return null;
+  if (!own) {
+    if (unlessGateRunning && (gateRunning(root, { except: self }) || heldByLiveGate(snap, self, config))) return null;
+    const st = loadState(root);
+    if (snap.id && ((st.closing && st.closing.verifyId === snap.id) || (st.fixup && st.fixup.verifyId === snap.id))) {
+      removeIfExists(file);
+      return null;
+    }
+  }
   const ids = [];
   if (typeof snap.plan === "string") {
     const planFile = path.join(root, config.plan);
@@ -61,7 +106,7 @@ export function undoCutVerification(root, config, { unlessGateRunning = false } 
     }
   }
   const progressFile = path.join(root, config.docs.progress);
-  const cur = readText(progressFile, null);
+  const cur = snap.fixup ? null : readText(progressFile, null);
   if (cur !== null) {
     let next = cur;
     if (typeof snap.added === "string" && snap.added) {
@@ -74,32 +119,85 @@ export function undoCutVerification(root, config, { unlessGateRunning = false } 
     if (next === "" && (snap.progress === null || snap.progress === undefined)) removeIfExists(progressFile);
     else if (next !== cur) writeFileAtomic(progressFile, next);
   }
+  // The findings rows it filed, the last copy of each; a file it created goes when nothing else
+  // was written to it.
+  for (const r of Array.isArray(snap.rows) ? snap.rows : []) {
+    if (!r || typeof r.file !== "string" || typeof r.text !== "string" || !r.text) continue;
+    const f = path.join(root, r.file);
+    const text = readText(f, null);
+    const i = text === null ? -1 : text.lastIndexOf(r.text);
+    if (i < 0) continue;
+    const next = text.slice(0, i) + text.slice(i + r.text.length);
+    if (r.created && next.trim() === "") removeIfExists(f);
+    else writeFileAtomic(f, next);
+  }
   removeIfExists(file);
-  return { step: snap.step || null, ids };
+  let count = 0;
+  if (!own && snap.step && loadState(root).status === STATUS.running) {
+    const st = updateState(root, (s) => { s.outOfTime = { ...(s.outOfTime || {}), [snap.step]: ((s.outOfTime || {})[snap.step] || 0) + 1 }; });
+    count = st.outOfTime[snap.step];
+  }
+  return { step: snap.step || null, ids, fixup: !!snap.fixup, count };
+}
+
+// The commit a tag points at, or null.
+async function tagCommit(root, name, env) {
+  const r = await git.git(root, ["rev-parse", "--verify", "-q", `refs/tags/${name}^{commit}`], { env });
+  return r.ok ? r.stdout.trim() || null : null;
+}
+
+// The tag a verified phase gets: ac-phase-<n>, unless that tag marks Phase <n> of another plan
+// (the plan at the tagged commit has another title; a new plan whose numbering starts again):
+// then ac-phase-<n>-<plan slug>, so the new plan's phases are tagged too. Returns { name, sha
+// (the commit an existing tag of that name points at, else null), other (the other plan's slug,
+// when the plain name was taken by it), plain }.
+export async function phaseTag(root, config, parsed, num, { env } = {}) {
+  const plain = `ac-phase-${num}`;
+  const at = await tagCommit(root, plain, env);
+  if (!at) return { name: plain, sha: null, other: null, plain };
+  const slug = planSlug(parsed);
+  const theirs = await git.showFile(root, plain, config.plan, { env });
+  const other = theirs === null ? null : planSlug(parsePlan(theirs));
+  if (other === slug) return { name: plain, sha: at, other: null, plain };
+  const name = `${plain}-${slug}`;
+  return { name, sha: await tagCommit(root, name, env), other: other || "another plan", plain };
+}
+
+// The message `autoclaude resume` commits pending steps with: the gate's own message (its
+// Accept lines, checks, decisions and findings) when the state kept it, with a line saying who
+// made the commit.
+export function pendingCommitMessage(ids, titles, messages = {}) {
+  const note = `Committed by \`autoclaude resume\`: the gate had verified or built ${ids.join(", ")}, but its own commit failed.`;
+  const kept = ids.map((id) => messages && messages[id]).filter((m) => typeof m === "string" && m.trim());
+  const subjectOf = (m) => m.split(/\r?\n/)[0];
+  const bodyOf = (m) => m.split(/\r?\n/).slice(1).join("\n").replace(/^\s*\n/, "").trimEnd();
+  const subject = ids.length === 1 && kept.length === 1 ? subjectOf(kept[0]) : `autoclaude(${ids.join(", ")}): ${titles.join("; ")}`;
+  return [subject, "", note, ...kept.map((m) => `\n${bodyOf(m)}`)].join("\n") + "\n";
 }
 
 // Steps that passed verification (or were built) but could not be committed (the gate paused
-// the run as "commit-failed"). Commits them in one commit, tags a phase end the way the gate
-// would have, and leaves that tag for the next push. Returns { ok, ids, sha, error }.
+// the run as "commit-failed"). Commits them in one commit, with the gate's message, tags a phase
+// end the way the gate would have, and leaves that tag for the next push. Returns { ok, ids,
+// sha, error }.
 export async function commitPending(project, state, { env } = {}) {
   const ids = state.uncommitted || [];
   if (!ids.length) return { ok: true, ids: [], sha: null, error: null };
   const parsed = parsePlan(readText(path.join(project.root, project.config.plan), ""));
   const titles = ids.map((id) => { const s = parsed.steps.find((x) => x.id === id); return s ? s.title : id; });
-  const c = await git.commitAll(project.root, `autoclaude(${ids.join(", ")}): ${titles.join("; ")}\n\nCommitted by \`autoclaude resume\`: the gate had verified or built ${ids.join(", ")}, but its own commit failed.`, { env });
+  const c = await git.commitAll(project.root, pendingCommitMessage(ids, titles, state.uncommittedMessages || {}), { env });
   if (!c.ok) return { ok: false, ids, sha: null, error: String(c.stderr || "").trim() || "unknown error" };
   const tags = [];
   const cfgGit = project.config.git || {};
   for (const id of ids) {
     const s = parsed.steps.find((x) => x.id === id);
     if (!s || !s.phase || s.marker !== MARKERS.done || !isPhaseEnd(parsed, id) || cfgGit.tagPhaseEnds === false) continue;
-    const name = `ac-phase-${s.phase.num}`;
+    const t = await phaseTag(project.root, project.config, parsed, s.phase.num, { env });
     // As in the gate: with pushes on, a phase verified before keeps its first tag.
-    if (cfgGit.push && (await git.tagExists(project.root, name, { env }))) continue;
-    if ((await git.tag(project.root, name, { force: true, env })).ok) tags.push(name);
+    if (t.sha && cfgGit.push) continue;
+    if ((await git.tag(project.root, t.name, { force: true, env })).ok) tags.push(t.name);
   }
   updateState(project.root, (s) => {
-    s.uncommitted = []; s.headAtLastGate = c.sha || s.headAtLastGate;
+    s.uncommitted = []; s.uncommittedMessages = {}; s.headAtLastGate = c.sha || s.headAtLastGate;
     if (tags.length && cfgGit.push) {
       const prev = s.pushState || {};
       s.pushState = { ...prev, unpushedTags: [...new Set([...(prev.unpushedTags || []), ...tags])] };
@@ -108,14 +206,16 @@ export async function commitPending(project, state, { env } = {}) {
   return { ok: true, ids, sha: c.sha, error: null };
 }
 
-export function resumeRun(project, state, extra = {}) {
+// `env` is the environment of the process running the resume: AUTOCLAUDE_BUILDER=1 there means
+// it is the builder session itself (/autoclaude:resume typed in the run window).
+export function resumeRun(project, state, extra = {}, { env = process.env } = {}) {
   const { root, config } = project;
   const planFile = path.join(root, config.plan);
   const changes = [];
   // First the leftovers of a verification that was cut off, or its ticks would read as the
   // owner's and its feature would be skipped.
   const cut = undoCutVerification(root, config, { unlessGateRunning: true });
-  if (cut) changes.push(`the verification of ${cut.step || "the last step"} was cut off; its plan ticks and PROGRESS lines were taken out again`);
+  if (cut) changes.push(cut.fixup ? `the fix-up checks of ${cut.step || "the last step"} were cut off` : `the verification of ${cut.step || "the last step"} was cut off; its plan ticks and PROGRESS lines were taken out again`);
   let text = readText(planFile, "");
   let parsed = parsePlan(text);
   let edited = false;
@@ -163,10 +263,14 @@ export function resumeRun(project, state, extra = {}) {
   else if (id !== (state.currentStep || null)) changes.push(`current step is now ${id || "none (every step is done)"}`);
   // A pause at a feature's end (review, weekly limit) leaves the old builder session behind: the
   // next feature still gets a fresh one (D49), from a live supervisor only, since without one
-  // nothing would start it. An answered question carries on in the session that asked it.
+  // nothing would start it. An answered question carries on in the session that asked it, and
+  // so does a resume typed in the builder's own session: the supervisor would end that session
+  // in the middle of the work the resume sets going.
   const boundary = !fixup && current && current.phase && current.phase.steps.every((s) => !isFinished(s));
-  const fresh = !!(boundary && state.pauseReason !== "blocked" && liveSupervisorPid(root));
+  const insideBuilder = !!(env && env.AUTOCLAUDE_BUILDER === "1");
+  const fresh = !!(boundary && state.pauseReason !== "blocked" && !insideBuilder && liveSupervisorPid(root));
   if (fresh) changes.push(`${id} starts a new feature, so the supervisor opens a fresh builder session for it`);
+  else if (boundary && insideBuilder && state.pauseReason !== "blocked") changes.push(`${id} starts a new feature; this is the builder's own session, so it carries on here`);
   // With nothing built and no fix-up pass, no feature is under way: a base or start time left
   // behind (a gate cut off at the wrong moment) would stretch the next feature's review.
   const underWay = !!fixup || parsed.steps.some((s) => s.marker === MARKERS.built);
@@ -180,7 +284,10 @@ export function resumeRun(project, state, extra = {}) {
     s.currentStep = id;
     s.fixup = fixup;
     if (!underWay) { s.phaseBaseCommit = null; s.phaseStartedAt = null; }
-    if (id) { s.attempts = { ...s.attempts, [id]: 0 }; s.infraFailures = { ...(s.infraFailures || {}), [id]: 0 }; }
+    if (id) {
+      s.attempts = { ...s.attempts, [id]: 0 }; s.infraFailures = { ...(s.infraFailures || {}), [id]: 0 };
+      s.outOfTime = { ...(s.outOfTime || {}), [id]: 0 };
+    }
     Object.assign(s, extra);
   });
   return changes;

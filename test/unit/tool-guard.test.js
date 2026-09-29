@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import os from "node:os";
 import path from "node:path";
 import { decide, writesTo } from "../../plugins/autoclaude/scripts/tool-guard.js";
 import { mergeConfig } from "../../plugins/autoclaude/lib/config.js";
@@ -167,6 +168,67 @@ test("force pushes: --force, -f in a cluster, --force-with-lease, a +refspec and
   }
   for (const c of ["git push origin main", "git push -u origin feature", "git push --follow-tags origin main", "git push origin HEAD:main"]) {
     assert.equal(sh(on, c), null, c);
+  }
+});
+
+test("pushes that delete or force remote refs are denied whatever the remote, in any spelling git accepts; a plain push is not", () => {
+  const on = pushOn(nix);
+  const DELETE = /Deleting remote branches or tags/;
+  for (const c of ["git push origin --delete release", "git push -d origin release", "git push -ud origin x", "git push origin :release", "git push https://example.com/other.git :refs/tags/v1", "git push --prune origin 'refs/heads/*:refs/heads/*'", "git push --del origin x"]) {
+    assert.match(sh(on, c), DELETE, c);
+  }
+  // Git takes any unambiguous prefix of a long option: --mirr is --mirror, --force-w is --force-with-lease.
+  for (const c of ["git push --mirr origin", "git push --m origin", "git push --force-w origin main", "git push --force-i origin main", "git push -vf", "git push origin main -f", "git push --all --force origin", "git push origin +main"]) {
+    assert.match(sh(on, c), /Force pushes/, c);
+  }
+  // Settings that turn a later plain push into a forced or mirrored one, or alias push away.
+  for (const c of ["git -c alias.p='push --force' p origin main", "git -c remote.origin.push=+HEAD:main push origin", "git -c remote.origin.mirror=true push origin", "git -c push.default=matching push", "git -c include.path=/tmp/x.cfg push", "git --config-env=alias.p=P p", "git config alias.p 'push --force'", "git config --local remote.origin.mirror true", "git config set alias.pf 'push -f'", "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.p GIT_CONFIG_VALUE_0='push --force' git p"]) {
+    assert.match(sh(on, c), /Changing git aliases or push settings/, c);
+  }
+  assert.match(sh(nix, "git -c alias.p='push --force' p origin main"), /Changing git aliases/, "with pushing off too");
+  assert.match(ps(pushOn(win), "$env:GIT_CONFIG_PARAMETERS = \"'alias.p=push --force'\"; git p"), /Changing git aliases/);
+  // A plain push to any remote, a new repository included, and harmless settings.
+  for (const c of ["git push origin HEAD:main", "git push https://github.com/someone/new-repo.git HEAD", "git push -u origin feature", "git push --all origin", "git push --tags", "git push -o ci.skip origin x", "git push -uo ci.skip origin x", "git push --no-force-with-lease origin x", "git config --get alias.p", "git config --global push.autoSetupRemote true", "git config user.email x@example.com", "git -c core.quotepath=off status"]) {
+    assert.equal(sh(on, c), null, c);
+  }
+});
+
+test("this computer's AutoClaude defaults, notify settings and Claude Code user settings are read-only during a run", () => {
+  const cfg = path.join(os.homedir(), ".claude-test");
+  const m = { ...ctx, configDir: cfg };
+  const MACHINE = /AutoClaude and Claude Code settings/;
+  for (const f of [path.join(cfg, "autoclaude", "defaults.json"), path.join(cfg, "autoclaude", "notify.json"), path.join(cfg, "settings.json")]) {
+    for (const tool of ["Edit", "Write", "MultiEdit"]) assert.match(decide({ tool_name: tool, tool_input: { file_path: f } }, m), /this computer's AutoClaude or Claude Code settings/, `${tool} ${f}`);
+    assert.match(decide({ tool_name: "Bash", tool_input: { command: `echo '{}' > "${f.replace(/\\/g, "/")}"` } }, m), MACHINE, f);
+  }
+  if (process.platform === "win32") assert.match(decide({ tool_name: "Write", tool_input: { file_path: path.join(cfg.toUpperCase(), "AUTOCLAUDE", "Defaults.json") } }, m), /read-only during a run/);
+  const bash = (command) => decide({ tool_name: "Bash", tool_input: { command } }, m);
+  const pwsh = (command) => decide({ tool_name: "PowerShell", tool_input: { command } }, m);
+  for (const c of [
+    "echo '{\"tester\":{\"enabled\":false}}' > ~/.claude-test/autoclaude/defaults.json", "echo x > \"$CLAUDE_CONFIG_DIR/autoclaude/defaults.json\"",
+    "echo x >> ${CLAUDE_CONFIG_DIR}/settings.json", "cp other.json ~/.claude-test/autoclaude/notify.json", "tee \"$X/autoclaude/defaults.json\" < x.json",
+    "node -e \"require('fs').writeFileSync(require('os').homedir() + '/.claude-test/autoclaude/defaults.json', '{}')\""
+  ]) assert.match(bash(c), MACHINE, c);
+  const s = path.sep; // PowerShell takes either separator; Windows people type backslashes
+  for (const c of [`Set-Content -Path $env:CLAUDE_CONFIG_DIR${s}autoclaude${s}defaults.json -Value '{}'`, `Copy-Item x.json -Destination $env:USERPROFILE${s}.claude-test${s}settings.json`, `[IO.File]::WriteAllText("$env:CLAUDE_CONFIG_DIR${s}autoclaude${s}notify.json", "{}")`]) {
+    assert.match(pwsh(c), MACHINE, c);
+  }
+  // Reading them, and files of the same name elsewhere, are fine.
+  for (const c of ["cat ~/.claude-test/autoclaude/defaults.json", "echo x > autoclaude/defaults.json.bak", "echo x > .claude/settings.json", "cp a.json config/settings.json"]) assert.equal(bash(c), null, c);
+  assert.equal(pwsh(`Get-Content $env:CLAUDE_CONFIG_DIR${s}settings.json`), null);
+  assert.equal(decide({ tool_name: "Write", tool_input: { file_path: path.join(root, ".claude", "settings.json") } }, m), null, "a project's own Claude settings are its files");
+});
+
+test("the Claude config folder is found the way lib/paths.js finds it: CLAUDE_CONFIG_DIR first", () => {
+  const saved = process.env.CLAUDE_CONFIG_DIR;
+  const dir = path.join(os.tmpdir(), "autoclaude-guard-config");
+  process.env.CLAUDE_CONFIG_DIR = dir;
+  try {
+    assert.match(d("Write", { file_path: path.join(dir, "autoclaude", "defaults.json") }), /read-only during a run/);
+    assert.match(d("Bash", { command: `echo x > "${path.join(dir, "settings.json").replace(/\\/g, "/")}"` }), /AutoClaude and Claude Code settings/);
+  } finally {
+    if (saved === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+    else process.env.CLAUDE_CONFIG_DIR = saved;
   }
 });
 

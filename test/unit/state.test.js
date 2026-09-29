@@ -61,5 +61,7 @@ test("defaults carry the builder session fields, and PAUSE_REASONS lists the rea
   assert.equal(s.builderSessionId, null);
   assert.equal(s.haltSession, false);
   assert.deepEqual([s.fixup, s.freshSession, s.phaseBaseCommit, s.phaseStartedAt, s.pushState], [null, false, null, null, null]);
-  assert.deepEqual([...PAUSE_REASONS].sort(), ["blocked", "commit-failed", "infra", "review", "security", "step-failed", "stuck", "weekly-limit"]);
+  // What a gate cut off by the hook's timeout leaves for the next stop, and what resume needs.
+  assert.deepEqual([s.outOfTime, s.closing, s.completing, s.uncommittedMessages, s.decisionsAtStart], [{}, null, null, {}, null]);
+  assert.deepEqual([...PAUSE_REASONS].sort(), ["blocked", "commit-failed", "infra", "out-of-time", "review", "security", "step-failed", "stuck", "weekly-limit"]);
 });

@@ -23,8 +23,50 @@ export function playwrightBrowsersDir(env = process.env) {
   return path.join(homeDir(), ".cache", "ms-playwright");
 }
 
+// Windows' own bash.exe (in System32, or next to wsl.exe) is WSL's launcher, not Git Bash: what it
+// runs lands in the default WSL distro (on a Docker Desktop machine often Docker's internal
+// docker-desktop one), without the project's tools. A run started from cmd or PowerShell finds it
+// first, because Git for Windows puts only its cmd folder on PATH.
+export function isWslBash(file, env = process.env) {
+  if (!file || !/^bash(\.exe)?$/i.test(path.basename(file))) return false;
+  const dir = path.resolve(path.dirname(file)).toLowerCase();
+  const sysRoot = env.SystemRoot || env.SYSTEMROOT || env.windir || env.WINDIR;
+  if (sysRoot && ["System32", "Sysnative", "SysWOW64"].some((d) => path.resolve(sysRoot, d).toLowerCase() === dir)) return true;
+  try { return fs.existsSync(path.join(path.dirname(file), "wsl.exe")); } catch { return false; }
+}
+
+// Git for Windows' bash.exe, found from git on PATH (<Git>\cmd\git.exe, <Git>\bin\git.exe or
+// <Git>\mingw64\bin\git.exe) or in its default folder; null when there is none.
+export function gitBashPath(env = process.env) {
+  const git = findOnPath("git", env);
+  const candidates = [];
+  if (git) {
+    const up = path.dirname(path.dirname(git));
+    candidates.push(path.join(up, "bin", "bash.exe"), path.join(path.dirname(up), "bin", "bash.exe"));
+  }
+  const pf = env.ProgramFiles || env.PROGRAMFILES;
+  if (pf) candidates.push(path.join(pf, "Git", "bin", "bash.exe"));
+  return candidates.find((c) => !isWslBash(c, env) && (() => { try { return fs.statSync(c).isFile(); } catch { return false; } })()) || null;
+}
+
+// On Windows, when a command starts with a bare `bash` that PATH resolves to WSL's launcher: the
+// problem and its fix, for a FAIL line. null otherwise. A path written out (for example
+// "C:/Windows/System32/bash.exe") or `wsl ...` says the owner means it, and is left alone.
+export function wslBashProblem(command, env = process.env, platform = process.platform) {
+  if (platform !== "win32") return null;
+  const first = String(command || "").trim().split(/\s+/)[0];
+  if (!/^bash(\.exe)?$/i.test(first)) return null;
+  const found = findOnPath(first, env);
+  if (!found || !isWslBash(found, env)) return null;
+  const gitBash = gitBashPath(env);
+  const fix = gitBash
+    ? `start the command with "${gitBash.replace(/\\/g, "/")}" instead of \`bash\`, or put ${path.dirname(gitBash)} before ${path.dirname(found)} on PATH in the terminal that starts the run`
+    : "install Git for Windows and start the command with its bash.exe (by default \"C:/Program Files/Git/bin/bash.exe\") instead of `bash`";
+  return `\`bash\` here is ${found}, Windows' WSL launcher, not Git Bash: the command would run inside WSL (on a Docker Desktop machine, its internal docker-desktop distro) without this project's tools. To fix it, ${fix}. To use WSL on purpose, start the command with \`wsl\``;
+}
+
 // The executable a check command starts with, and whether it can run here.
-export function checkRunnable(command, root, env = process.env) {
+export function checkRunnable(command, root, env = process.env, { platform = process.platform } = {}) {
   const cmd = String(command).trim();
   const quoted = cmd.match(/^"([^"]+)"/);
   const first = quoted ? quoted[1] : cmd.split(/\s+/)[0];
@@ -33,6 +75,8 @@ export function checkRunnable(command, root, env = process.env) {
     return fs.existsSync(full) ? { ok: true } : { ok: false, detail: `${first} does not exist` };
   }
   if (!findOnPath(first, env)) return { ok: false, detail: `\`${first}\` is not on PATH` };
+  const wsl = wslBashProblem(cmd, env, platform);
+  if (wsl) return { ok: false, detail: wsl };
   const npm = cmd.match(/^npm\s+(?:run(?:-script)?\s+(\S+)|(test|start))\b/);
   if (npm) {
     const script = npm[1] || npm[2];
@@ -136,7 +180,7 @@ export async function preflight(project, { env = process.env, checksEnv = null, 
   for (const [i, c] of config.checks.entries()) {
     const miss = unmet.find((u) => u.index === i);
     if (miss) { bad.push(miss.detail); continue; }
-    const r = checkRunnable(c.command, root, cenv);
+    const r = checkRunnable(c.command, root, cenv, { platform });
     if (!r.ok) bad.push(`${c.name}: ${r.detail}`);
     if (c.needsDevServer && !hasDevServer) bad.push(`${c.name}: needsDevServer is true but devServer.command and devServer.url are not both set, so this check would fail every step`);
   }
@@ -154,7 +198,10 @@ export async function preflight(project, { env = process.env, checksEnv = null, 
     try { found = fs.readdirSync(dir).some((d) => /^chromium/i.test(d)); } catch {}
     add("playwright", found ? "ok" : "fail", found ? dir : `no Chromium under ${dir}; run \`npx playwright install chromium\``);
   }
-  if (hasDevServer) {
+  // The dev server's command runs through the same shell and PATH as the checks.
+  const devWsl = hasDevServer ? wslBashProblem(config.devServer.command, cenv, platform) : null;
+  if (devWsl) add("dev server", "fail", `devServer.command: ${devWsl}`);
+  else if (hasDevServer) {
     if (devServer) {
       const before = devServerInfo({ root });
       const ds = await restartDevServer(config.devServer, { root, env: cenv });

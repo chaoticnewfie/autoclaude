@@ -203,6 +203,70 @@ test("recursive deletes inside the OS temp folder pass; the temp folder itself a
   for (const c of ["rm -rf /tmp", "rm -rf /var/lib/x", "rm -rf /tmp/*"]) assert.match(sh(posix, c), RECURSIVE, c);
 });
 
+test("commands run by inline code, sed's e command or a shell in a linter image still meet the rules", () => {
+  for (const [c, reason] of [
+    ["ruby -e 'system \"ssh pve uptime\"'", HOSTS], ["perl -e 'system \"ssh pve uptime\"'", HOSTS], ["perl -e 'print `ssh pve uptime`'", HOSTS],
+    ["perl -e 'print qx(ssh pve uptime)'", HOSTS], ["ruby -e 'puts %x(ssh pve uptime)'", HOSTS], ["perl -e 'open(my $f, \"ssh pve uptime |\")'", HOSTS],
+    ["php -r 'exec(\"ssh pve uptime\");'", HOSTS], ["python -Ic \"import os; os.system('ssh pve')\"", HOSTS],
+    ["perl - <<'EOF'\nsystem \"ssh pve uptime\";\nEOF", HOSTS], ["ruby - <<'EOF'\nputs `sh deploy/deploy.sh`\nEOF", SCRIPTS],
+    ["sed -n '1e ssh pve uptime' README.md", HOSTS], ["sed 's/.*/ssh pve uptime/e' README.md", HOSTS], ["sed -e '$e sh deploy/deploy.sh' notes.txt", SCRIPTS],
+    ["docker run --rm -v \"$HOME/.ssh:/root/.ssh:ro\" koalaman/shellcheck-alpine sh -c \"apk add openssh-client && ssh root@pve qm list\"", HOSTS],
+    ["docker run --rm -v \"$PWD:/mnt:ro\" koalaman/shellcheck-alpine sh /mnt/deploy/deploy.sh", SCRIPTS],
+    ["docker run --rm hadolint/hadolint:latest-debian sh -c \"ssh pve uptime\"", HOSTS],
+    ["docker run --rm -v \"$PWD:/mnt:ro\" koalaman/shellcheck-alpine /bin/sh -c 'ssh pve'", HOSTS]
+  ]) {
+    assert.match(String(sh(win, c)), new RegExp(`does not allow that command.*${reason}`), c);
+  }
+  // Inline code that only reads files, a sed that only prints, and a linter reading its files stay allowed.
+  for (const c of [
+    "ruby -e 'puts File.read(\"deploy/deploy.sh\").lines.grep(/ssh/)'", "perl -ne 'print if /ssh/' deploy/deploy.sh", "sed -e 's/ssh/SSH/' deploy/deploy.sh",
+    "sed -n '/^exit/p' deploy/deploy.sh", "sed -n '/pve/,$p' deploy/deploy.sh", "docker run --rm -v \"$PWD:/mnt:ro\" koalaman/shellcheck-alpine shellcheck /mnt/deploy/deploy.sh",
+    "docker run --rm -v \"$PWD:/mnt:ro\" koalaman/shellcheck -x /mnt/deploy/deploy.sh"
+  ]) assert.equal(sh(win, c), null, c);
+});
+
+const off = { root: "C:\\proj", config: mergeConfig({ git: { push: false } }), tempDirs: ["C:\\Users\\someone\\AppData\\Local\\Temp"] };
+
+test("recursive deletes: a variable or cd that may not have taken effect is not taken for the temp folder", () => {
+  // A variable set after ||, && or in an if body is not sure after that part of the line.
+  for (const c of [
+    "d=/c/Users/X; [ -d \"$d\" ] || d=$(mktemp -d); rm -rf \"$d\"", "d=$(mktemp -d); if [ -n \"$KEEP\" ]; then d=/c/Users/X; fi; rm -rf \"$d\"",
+    "d=$(mktemp -d); [ -n \"$KEEP\" ] && d=/c/Users/X; rm -rf \"$d\"", "cd /c/Users || cd /tmp; rm -rf build", "d=/c/work; [ -d x ] || d=$(mktemp -d); bash -c \"rm -rf $d\"",
+    // Keywords in front of a command do not hide it.
+    "if true; then rm -rf /c/Users; fi", "while true; do rm -rf /c/Users; done", "! rm -rf /c/Users"
+  ]) assert.match(sh(off, c), RECURSIVE, c);
+  assert.match(ps(off, "$d='C:\\work'; if (-not (Test-Path $d)) { $d = Join-Path $env:TEMP x }; Remove-Item -Recurse -Force $d"), RECURSIVE);
+  for (const c of [
+    "d=$(mktemp -d) && rm -rf \"$d\"", "cd /tmp && d=$(mktemp -d) && rm -rf \"$d\"", "for i in 1 2; do d=$(mktemp -d); rm -rf \"$d\"; done",
+    "{ d=$(mktemp -d); rm -rf \"$d\"; }", "cd /tmp || exit 1; rm -rf build", "if [ -d /tmp/x ]; then rm -rf /tmp/x; fi"
+  ]) assert.equal(sh(off, c), null, c);
+  assert.equal(ps(off, "$d = Join-Path $env:TEMP x; if (Test-Path $d) { Remove-Item -Recurse -Force $d }"), null);
+});
+
+test("recursive deletes: a wildcard for most of the temp folder is refused, a narrow one passes", () => {
+  // Other programs keep their files there too, and other sessions their scratchpads.
+  for (const c of ["rm -rf \"$TMPDIR\"/*.*", "rm -rf \"$TMPDIR\"/[a-z]*", "rm -rf /tmp/?*", "rm -rf /tmp/a*", "Remove-Item -Recurse $env:TEMP\\*.*"]) {
+    assert.match(c.startsWith("Remove") ? ps(off, c) : sh(off, c), RECURSIVE, c);
+  }
+  for (const c of ["rm -rf /tmp/autoclaude-*", "rm -rf /tmp/*.log", "rm -rf /tmp/tmp.*"]) assert.equal(sh(off, c), null, c);
+});
+
+test("recursive deletes: a link or junction in the temp folder that leads out of it is judged where it leads", (t) => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), "ac guard link "));
+  after(() => fs.rmSync(base, { recursive: true, force: true }));
+  const scratch = path.join(base, "scratch");
+  const outside = path.join(base, "outside");
+  fs.mkdirSync(path.join(scratch, "own"), { recursive: true });
+  fs.mkdirSync(outside);
+  fs.writeFileSync(path.join(outside, "keep.txt"), "keep\n");
+  try { fs.symlinkSync(outside, path.join(scratch, "link"), process.platform === "win32" ? "junction" : "dir"); } catch (e) { t.skip(`cannot make a link here: ${e.code}`); return; }
+  const host = { root: process.platform === "win32" ? "C:\\proj" : "/proj", config: off.config, tempDirs: [scratch] };
+  const fwd = (p) => p.replace(/\\/g, "/");
+  for (const c of [`rm -rf "${fwd(scratch)}/link/"`, `rm -rf "${fwd(scratch)}/link/../x"`, `cd "${fwd(scratch)}/link" && rm -rf ./*`]) assert.match(sh(host, c), RECURSIVE, c);
+  assert.match(ps(host, `Remove-Item -Recurse -Force '${path.join(scratch, "link")}'`), RECURSIVE);
+  for (const c of [`rm -rf "${fwd(scratch)}/own"`, `rm -rf "${fwd(scratch)}/own/../new"`, `rm -rf "${fwd(scratch)}/not-yet/x"`]) assert.equal(sh(host, c), null, c);
+});
+
 test("without tempDirs the guard uses this machine's temp folder, in its short and long forms", () => {
   const root = process.platform === "win32" ? "C:\\proj" : "/proj";
   const ctx = { root, config: mergeConfig({ git: { push: false } }) };

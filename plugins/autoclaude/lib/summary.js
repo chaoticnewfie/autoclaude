@@ -5,6 +5,7 @@
 // HANDOFF.md always count the same things. Node built-ins only.
 import fs from "node:fs";
 import path from "node:path";
+import { spawnSync } from "node:child_process";
 import { readText } from "./fsatomic.js";
 import { progress } from "./plan.js";
 
@@ -67,17 +68,56 @@ export function parseDecisions(text) {
   return out;
 }
 
-// Decisions the run made itself: not planning ones, not the owner's answers to a blocked
-// question ("By: owner"), and (when the run's start date is known) not ones logged before it,
-// so a second run does not count the first run's.
-export function runDecisions(entries, { sinceDate = null } = {}) {
-  return entries.filter((e) => e.kind === "decision" && String(e.step || "").trim().toLowerCase() !== "planning" && !/^owner\b/i.test(String(e.fields.by || "").trim()) && (!sinceDate || !e.date || e.date >= sinceDate));
+// Where a decisions log stands: the highest D-### and N-### numbers in it, 0 when there are
+// none. Each new entry is numbered one above the highest already there, so the entries logged
+// after this mark are exactly the later ones; a date cannot tell two runs of one day apart.
+export function decisionsMark(text) {
+  const mark = { D: 0, N: 0 };
+  for (const e of parseDecisions(text)) {
+    const n = Number(e.id.slice(2));
+    if (n > mark[e.id[0]]) mark[e.id[0]] = n;
+  }
+  return mark;
 }
 
-// Decisions marked "Owner review: yes"; with sinceDate, only this run's (an earlier run's were
-// in its own hand-back).
-export function ownerReviewDecisions(entries, { sinceDate = null } = {}) {
-  return entries.filter((e) => e.kind === "decision" && e.ownerReview && (!sinceDate || !e.date || e.date >= sinceDate));
+// Logged during this run: numbered above `since` (a decisionsMark from the run's start) when
+// that is known for the entry's kind, otherwise dated on or after sinceDate. An entry without a
+// date counts.
+function isNew(e, { since = null, sinceDate = null } = {}) {
+  const top = since && typeof since === "object" ? since[e.id[0]] : undefined;
+  if (Number.isInteger(top) && top >= 0) return Number(e.id.slice(2)) > top;
+  return !sinceDate || !e.date || e.date >= sinceDate;
+}
+
+// Decisions the run made itself: not planning ones, not the owner's answers to a blocked
+// question ("By: owner"), and not ones logged before the run started (see isNew), so a second
+// run does not count the first run's.
+export function runDecisions(entries, { since = null, sinceDate = null } = {}) {
+  return entries.filter((e) => e.kind === "decision" && String(e.step || "").trim().toLowerCase() !== "planning" && !/^owner\b/i.test(String(e.fields.by || "").trim()) && isNew(e, { since, sinceDate }));
+}
+
+// Decisions marked "Owner review: yes"; with since or sinceDate, only this run's (an earlier
+// run's were in its own hand-back).
+export function ownerReviewDecisions(entries, { since = null, sinceDate = null } = {}) {
+  return entries.filter((e) => e.kind === "decision" && e.ownerReview && isNew(e, { since, sinceDate }));
+}
+
+// Where the decisions log stood when the run started: state.decisionsAtStart, recorded by
+// `autoclaude start`, or for a run started without it the log as committed at the run's base
+// commit (start needs a clean tree, so that is the file as it was). null when neither is known,
+// and the run's start date decides instead.
+export function decisionsAtStart({ root, config, state, env = process.env }) {
+  const m = state && state.decisionsAtStart;
+  if (m && typeof m === "object" && (Number.isInteger(m.D) || Number.isInteger(m.N))) return m;
+  const base = state && typeof state.baseCommit === "string" ? state.baseCommit.trim() : "";
+  const rel = String((config && config.docs && config.docs.decisions) || "").replace(/\\/g, "/").replace(/^(\.\/)+/, "");
+  if (!/^[0-9a-f]{7,64}$/i.test(base) || !rel || path.isAbsolute(rel)) return null;
+  try {
+    const r = spawnSync("git", ["show", `${base}:./${rel}`], { cwd: root, env, encoding: "utf8", windowsHide: true, timeout: 30000 });
+    return r.status === 0 ? decisionsMark(r.stdout) : null;
+  } catch {
+    return null;
+  }
 }
 
 // Markdown table rows. Header names (lower case) map the cells when the table has a header;
@@ -173,7 +213,7 @@ export function afterRunItems(section) {
 // What the owner gets back, from the files the run keeps: the items left for them (the plan's
 // "After the run" list plus follow-ups the run left for the owner), the other unresolved rows,
 // decisions to review and the run's own decisions. Shared by the alert and HANDOFF.md.
-export function collectHandback({ root, config, state, parsed }) {
+export function collectHandback({ root, config, state, parsed, env = process.env }) {
   const planText = parsed && Array.isArray(parsed.lines) ? parsed.lines.join("\n") : readText(path.join(root, config.plan), "");
   const section = afterRunSection(planText);
   const rows = unresolvedRows(root, config);
@@ -182,16 +222,16 @@ export function collectHandback({ root, config, state, parsed }) {
     ...afterRunItems(section).map((text) => ({ text, from: "plan" })),
     ...left.map((r) => ({ text: r.text, from: r.file, status: r.status }))
   ];
-  const runStart = state && state.startedAt ? String(state.startedAt).slice(0, 10) : null;
+  const since = { since: decisionsAtStart({ root, config, state, env }), sinceDate: state && state.startedAt ? String(state.startedAt).slice(0, 10) : null };
   const decisions = parseDecisions(readText(path.join(root, config.docs.decisions), ""));
   return {
     afterRun: section,
     ownerItems,
     leftRows: left,
     openFindings: rows.filter((r) => !r.leftForOwner),
-    ownerReviewDecisions: ownerReviewDecisions(decisions, { sinceDate: runStart }),
-    runDecisions: runDecisions(decisions, { sinceDate: runStart }),
-    notes: decisions.filter((e) => e.kind === "note" && (!runStart || !e.date || e.date >= runStart))
+    ownerReviewDecisions: ownerReviewDecisions(decisions, since),
+    runDecisions: runDecisions(decisions, since),
+    notes: decisions.filter((e) => e.kind === "note" && isNew(e, since))
   };
 }
 
@@ -210,23 +250,30 @@ function howMany(v) {
   return typeof v === "number" && v > 0 ? v : 0;
 }
 
-// One sentence on the push state (state.pushState, written by the gate after each feature).
-export function pushLine(pushState, config) {
+// The push state (state.pushState, written by the gate after each feature) as a sentence
+// without its label: "<branch> and its tags are on origin (...)." or "FAILED for <branch> ...".
+export function pushStatus(pushState, config) {
   const on = !!(config && config.git && config.git.push);
   const ps = pushState && typeof pushState === "object" ? pushState : null;
-  if (!ps) return on ? "Push: nothing has been pushed yet." : "Push: off (git.push is false), so nothing was pushed.";
+  if (!ps) return on ? "nothing has been pushed yet." : "off (git.push is false), so nothing was pushed.";
   // The recorded time is UTC; say so, since the owner reads it in local time.
   const when = ps.at ? ` (${String(ps.at).replace("T", " ").slice(0, 16)} UTC)` : "";
   const branch = ps.branch || "the run branch";
   const remote = ps.remote ? `${ps.remote}` : "the remote";
-  if (ps.skipped) return `Push: skipped${when}${ps.error ? `: ${String(ps.error).split(/\r?\n/)[0].slice(0, 200)}` : ""}. Nothing is on ${remote} from this run.`;
-  if (ps.ok) return `Push: ${branch} and its tags are on ${remote}${when}.`;
+  if (ps.skipped) return `skipped${when}${ps.error ? `: ${String(ps.error).split(/\r?\n/)[0].slice(0, 200)}` : ""}. Nothing is on ${remote} from this run.`;
+  if (ps.ok) return `${branch} and its tags are on ${remote}${when}.`;
   const commits = howMany(ps.unpushedCommits);
   const tags = Array.isArray(ps.unpushedTags) ? ps.unpushedTags : [];
   const tagCount = tags.length || howMany(ps.unpushedTags);
   const left = [commits ? count(commits, "commit") : null, tagCount ? `${count(tagCount, "tag")}${tags.length ? ` (${tags.join(", ")})` : ""}` : null].filter(Boolean).join(" and ");
   const err = String(ps.error || "no error recorded").split(/\r?\n/)[0].slice(0, 200);
-  return `Push FAILED for ${branch}${when}: ${err}.${left ? ` Not on the remote: ${left}.` : ""}`;
+  return `FAILED for ${branch}${when}: ${err}.${left ? ` Not on the remote: ${left}.` : ""}`;
+}
+
+// One sentence on the push state, labelled.
+export function pushLine(pushState, config) {
+  const s = pushStatus(pushState, config);
+  return s.startsWith("FAILED ") ? `Push ${s}` : `Push: ${s}`;
 }
 
 function fmtDuration(ms) {
@@ -291,7 +338,8 @@ export function buildSummary({ root, config, state, parsed, usage = null, now = 
     const bits = [
       f.removed && f.removed.length ? `removed ${f.removed.length} unused thing${f.removed.length === 1 ? "" : "s"} the run created` : null,
       f.runningCreated && f.runningCreated.length ? `${count(f.runningCreated.length, "container")} it started still running` : null,
-      f.kept && f.kept.length ? `kept ${f.kept.length}` : null
+      f.kept && f.kept.length ? `kept ${f.kept.length}` : null,
+      f.unattributed && f.unattributed.length ? `left alone ${f.unattributed.length} not tied to this project` : null
     ].filter(Boolean);
     if (bits.length) lines.push(`Docker: ${bits.join(", ")}.`);
   }

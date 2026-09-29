@@ -1,12 +1,16 @@
 // PreToolUse hook: while a run is active, keep the builder inside the rules (PLAN.md 4.2, 4.7).
 //   - AskUserQuestion is denied with the section 4.5 guidance (no human is there).
-//   - Edits to the plan, autoclaude.config.json and .autoclaude/ are denied.
+//   - Edits to the plan, autoclaude.config.json and .autoclaude/ are denied, and so are edits to
+//     this computer's settings the run reads (the AutoClaude defaults and notify files, Claude
+//     Code's user settings): the builder must not switch off what verifies it.
 //   - Bash and PowerShell commands that would write, delete or move those files, push while
-//     pushing is off, force-push, hard-reset, commit or tag, or delete recursively outside the
-//     project and the temp folder are denied.
+//     pushing is off, force-push or delete remote refs, change git aliases or push settings,
+//     hard-reset, commit or tag, or delete recursively outside the project and the temp folder
+//     are denied. A plain push is fine while git.push is on.
 //   - The project's guard.deny rules are tested against each command the line runs, not its
 //     data (P8.4, see ruleTexts): the rehearsal's false positives were heredoc bodies, greps
-//     and a read-only linter naming a forbidden script.
+//     and a read-only linter naming a forbidden script. Commands run from inside other programs
+//     (inline code that starts processes, sed's e command, a shell in a linter image) count.
 // Only the builder session is guarded (lib/builder.js): a person's own session opened in the
 // project during a supervised run is left alone. Silent and instant when no run is active.
 // Never throws.
@@ -14,7 +18,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { findProjectRoot } from "../lib/paths.js";
+import { findProjectRoot, claudeConfigDir } from "../lib/paths.js";
 import { loadState, STATUS } from "../lib/state.js";
 import { loadConfig } from "../lib/config.js";
 import { recordDenial } from "../lib/denials.js";
@@ -29,9 +33,10 @@ function deny(reason) {
 // Windows; the PowerShell tool exists there too and gets exactly the same rules.
 const SHELL_TOOLS = { Bash: "bash", PowerShell: "powershell" };
 
-// ctx: { root, config } plus, for tests, tempDirs (the temp folders; default: this machine's)
-// and readFile (how package.json is read for `npm run`).
-export function decide(input, { root, config, tempDirs, readFile }) {
+// ctx: { root, config } plus, for tests, tempDirs (the temp folders; default: this machine's),
+// configDir (the Claude config folder; default: this machine's, CLAUDE_CONFIG_DIR first as in
+// lib/paths.js) and readFile (how package.json is read for `npm run`).
+export function decide(input, { root, config, tempDirs, configDir, readFile }) {
   const tool = input.tool_name || "";
   const ti = input.tool_input || {};
   const cli = "autoclaude";
@@ -45,16 +50,42 @@ export function decide(input, { root, config, tempDirs, readFile }) {
     const abs = path.resolve(root, String(file)).toLowerCase();
     return protectedRel.includes(abs) || abs === runtimeDir || abs.startsWith(runtimeDir + path.sep);
   };
+  const P = pathApi(root);
+  const cfgDir = configDir || claudeConfigDir();
   if (["Edit", "Write", "MultiEdit", "NotebookEdit"].includes(tool)) {
     const file = ti.file_path || ti.notebook_path;
     if (isProtected(file)) return `${path.basename(String(file))} is managed by the gate during a run. Only the gate ticks ${config.plan}; the config and .autoclaude/ are read-only for you. Continue the current step instead.`;
+    if (file) {
+      const abs = P.resolve(root, String(file));
+      if (machineFiles(P, cfgDir).some((m) => sameFile(P, abs, m.abs))) return `${P.basename(abs)} holds this computer's AutoClaude or Claude Code settings, which this run uses; it is read-only during a run. Continue the current step instead.`;
+    }
     return null;
   }
-  if (SHELL_TOOLS[tool]) return decideShell(String(ti.command || ""), SHELL_TOOLS[tool], { root, config, cwd: input.cwd, cli, tempDirs, readFile });
+  if (SHELL_TOOLS[tool]) return decideShell(String(ti.command || ""), SHELL_TOOLS[tool], { root, config, cwd: input.cwd, cli, tempDirs, cfgDir, readFile });
   return null;
 }
 
-function decideShell(cmd, shell, { root, config, cwd, cli, tempDirs, readFile }) {
+// This computer's settings a run reads (D49), in the Claude config folder: the AutoClaude
+// defaults (tester, security review, retries for every project that inherits them), the
+// notification settings, and Claude Code's user settings (permissions and auto mode, which the
+// supervisor's --settings merges with). `code` tells inline code that names one.
+function machineFiles(P, dir) {
+  const d = P.resolve(String(dir));
+  const flat = (s) => s.replace(/\\+/g, "/").toLowerCase();
+  return [
+    { abs: P.join(d, "autoclaude", "defaults.json"), code: (t) => /autoclaude[\\/]+defaults\.json/i.test(t) },
+    { abs: P.join(d, "autoclaude", "notify.json"), code: (t) => /autoclaude[\\/]+notify\.json/i.test(t) },
+    { abs: P.join(d, "settings.json"), code: (t) => flat(t).includes(flat(P.join(d, "settings.json"))) }
+  ];
+}
+
+// The same file, compared where it really is: 8.3 short names, links and junctions resolved.
+function sameFile(P, a, b) {
+  const key = (p) => (P === path.win32 ? p.toLowerCase() : p);
+  return key(a) === key(b) || key(real(P, a)) === key(real(P, b));
+}
+
+function decideShell(cmd, shell, { root, config, cwd, cli, tempDirs, cfgDir, readFile }) {
   const P = pathApi(root);
   const base = cwd && P.isAbsolute(String(cwd)) ? String(cwd) : root;
 
@@ -68,20 +99,30 @@ function decideShell(cmd, shell, { root, config, cwd, cli, tempDirs, readFile })
   // The temp folders, read only when a command names one ($TEMP, /tmp, a mktemp result).
   let temps = null;
   const tempsNow = () => (temps ??= tempRoots(P, tempDirs));
-  const expand = (w) => tempWord(w, tempsNow, P);
+  const expand = (w) => configWord(tempWord(w, tempsNow, P), cfgDir);
   // An effect's path made absolute: the session's cwd, then every cd earlier on the line.
   const where = (item) => resolveTarget(expand(item.path), item.dirs.reduce((from, d) => resolveTarget(expand(d), from, P), base), P);
+  // The same, where the file system really leads: through links, junctions and short names.
+  const whereReal = (item) => physicalTarget(expand(item.path), item.dirs.reduce((from, d) => physicalTarget(expand(d), from, P), real(P, base)), P);
   const runtime = P.resolve(root, ".autoclaude");
+  const machine = machineFiles(P, cfgDir);
   const messages = {
     plan: `Shell writes to ${config.plan} are not allowed; only the gate edits it.`,
     config: "autoclaude.config.json is read-only during a run.",
-    runtime: ".autoclaude/ is the gate's state; do not write to it."
+    runtime: ".autoclaude/ is the gate's state; do not write to it.",
+    machine: "This computer's AutoClaude and Claude Code settings (autoclaude/defaults.json, autoclaude/notify.json and settings.json in the Claude config folder) are read-only during a run."
   };
 
+  // Git settings handed to git through the environment on this line (GIT_CONFIG_PARAMETERS,
+  // GIT_CONFIG_KEY_<n>) can alias a push just like -c can.
+  if (fx.git.length && /GIT_CONFIG_(PARAMETERS|KEY_\d+)/i.test(cmd) && GIT_TRICK_TEXT.test(cmd)) return gitTrickMessage("GIT_CONFIG_*");
   for (const g of fx.git) {
+    const trick = gitSettingTrick(g);
+    if (trick) return gitTrickMessage(trick);
     if (g.sub === "push") {
-      const force = g.args.some((a) => /^--(force|force-with-lease|force-if-includes|mirror)$/.test(a) || /^-[a-zA-Z]*f[a-zA-Z]*$/.test(a) || /^\+./.test(a));
-      if (force) return "Force pushes are not allowed during an AutoClaude run.";
+      const risk = pushRisk(g.args);
+      if (risk === "force") return "Force pushes are not allowed during an AutoClaude run.";
+      if (risk === "delete") return "Deleting remote branches or tags (--delete, a :ref refspec, --prune) is not allowed during an AutoClaude run. Push with a plain `git push`; the owner removes branches.";
       if (!config.git.push) return "Pushing is off for this run (git.push is false in autoclaude.config.json). The owner pushes after review.";
     }
     if (g.sub === "reset" && g.args.includes("--hard")) return "git reset --hard is not allowed during an AutoClaude run. Undo your own changes file by file instead (edit them back, or `git restore <file>`).";
@@ -99,8 +140,11 @@ function decideShell(cmd, shell, { root, config, cwd, cli, tempDirs, readFile })
   for (const d of fx.recursive) {
     const abs = where(d);
     if (abs && (contains(P, root, abs) || (d.rootOk && same(abs, root)))) continue;
-    // Scratch folders under the OS temp folder are the builder's own (the rehearsal's mktemp -d).
-    if (abs && inTemp(P, abs, tempsNow(), root, same)) continue;
+    // Scratch folders under the OS temp folder are the builder's own (the rehearsal's mktemp -d),
+    // judged by where the path really leads: a link or junction in the temp folder that points
+    // elsewhere, or a `..` after one, is not in the temp folder.
+    const phys = abs && whereReal(d);
+    if (phys && inTemp(P, phys, tempsNow().map((t) => real(P, t)), real(P, root), same)) continue;
     return "Recursive deletes outside the project (or of the whole project) are not allowed during an AutoClaude run. Delete only paths inside the project folder, or inside the temp folder.";
   }
 
@@ -111,16 +155,84 @@ function decideShell(cmd, shell, { root, config, cwd, cli, tempDirs, readFile })
   ];
   for (const w of fx.writes) {
     const abs = where(w);
-    if (!abs) continue; // a variable we cannot expand: nothing to compare
+    if (!abs) {
+      // A variable we cannot expand: nothing to compare, unless the path plainly ends in one of
+      // the machine settings files.
+      if (/(^|[\\/])autoclaude[\\/]+(defaults|notify)\.json$/i.test(String(w.path))) return messages.machine;
+      continue;
+    }
     const hit = guarded.find((g) => touches(P, root, abs, g, w.tree, same));
     if (hit) return messages[hit.kind];
+    if (machine.some((m) => touches(P, root, abs, { kind: "machine", abs: m.abs }, w.tree, same) || sameFile(P, abs, m.abs))) return messages.machine;
   }
   // Code run from the command line (node -e, python -c) that writes files and names a protected one.
   for (const text of fx.code) {
     const hit = guarded.find((g) => text.toLowerCase().includes(g.name.toLowerCase()));
     if (hit) return messages[hit.kind];
+    if (machine.some((m) => m.code(text))) return messages.machine;
   }
   return null;
+}
+
+// ---- Pushes and git settings ------------------------------------------------------------------
+
+// What a git push would destroy on the remote: "force" (--force or -f in any cluster,
+// --force-with-lease, --force-if-includes, --mirror, a +refspec), "delete" (--delete or -d,
+// --prune, a :ref refspec), or null for a plain push to any remote. Git takes any unambiguous
+// prefix of a long option (--mirr is --mirror), so a prefix counts as the option.
+const PUSH_FORCE = ["force", "force-with-lease", "force-if-includes", "mirror"];
+const PUSH_DELETE = ["delete", "prune"];
+const PUSH_VALUED = /^(--push-option|--repo|--receive-pack|--exec)$/;
+function pushRisk(args) {
+  let risk = null;
+  let options = true;
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (options && a === "--") { options = false; continue; }
+    if (options && /^--./.test(a)) {
+      const name = a.slice(2).split("=")[0].toLowerCase();
+      if (PUSH_FORCE.some((o) => o.startsWith(name))) return "force";
+      if (PUSH_DELETE.some((o) => o.startsWith(name))) risk = "delete";
+      if (PUSH_VALUED.test(a)) i++;
+      continue;
+    }
+    if (options && /^-./.test(a)) {
+      // A cluster of short flags (-uf, -df); -o takes the rest of the word, or the next word.
+      for (let k = 1; k < a.length; k++) {
+        if (a[k] === "o") { if (k === a.length - 1) i++; break; }
+        if (a[k] === "f") return "force";
+        if (a[k] === "d") risk = "delete";
+      }
+      continue;
+    }
+    // The remote, then refspecs: +src:dst forces, :dst deletes.
+    if (a.startsWith("+")) return "force";
+    if (/^:./.test(a)) risk = "delete";
+  }
+  return risk;
+}
+
+// Git settings that change what a later plain git command does: an alias (git -c
+// alias.p='push --force' p), a remote's push refspecs or mirror flag, push.default, and an
+// included config file that could set any of them.
+const GIT_TRICK = /^(alias\..|remote\..+\.(push|mirror)$|push\.default$|include\.path$|includeif\..)/i;
+const GIT_TRICK_TEXT = /(^|[\s'"=])(alias\.[\w-]|remote\.\S+\.(push|mirror)\b|push\.default\b|include\.path\b|includeif\.)/i;
+
+// The setting a git command sets that GIT_TRICK names (through -c, --config-env or git config),
+// or null. Reading, listing and unsetting are fine.
+function gitSettingTrick(g) {
+  for (const kv of g.configs) {
+    const k = String(kv).split("=")[0].trim();
+    if (GIT_TRICK.test(k)) return k;
+  }
+  if (g.sub !== "config") return null;
+  const ops = operands(g.args, { takesValue: [/^(-f|--file|--blob|--type|--default|--comment|--value|--url)$/] });
+  const reads = g.args.some((a) => /^(--get\S*|-l|--list|--unset\S*|--remove-section)$/.test(a)) || /^(get|list|unset|remove-section)$/.test(ops[0] || "");
+  return reads ? null : ops.find((o) => GIT_TRICK.test(o)) || null;
+}
+
+function gitTrickMessage(setting) {
+  return `Changing git aliases or push settings (${setting}) is not allowed during an AutoClaude run. Run git commands by their own names; push, when this run allows it, with a plain \`git push\`.`;
 }
 
 // The first guard.deny rule that matches a command on the line: { text, via, why } or null.
@@ -159,7 +271,10 @@ export function writesTo(cmd, target, shell = "bash") {
 // names an input file, and a `#` that starts a word starts a comment. Heredoc bodies and
 // here-strings are data: they land in `heredocs` ({ delim, quoted, body }), never in the
 // commands, except that bash still runs the $(...) and `...` inside an unquoted heredoc. `pipe`
-// is true when the command reads the output of the one before it.
+// is true when the command reads the output of the one before it. `sep` is what came before
+// the command (null, ";", "&", "&&", "||", "|", a newline or a bracket; && and || outlast a
+// newline or a bracket after them), and `scope` names the ( ) and { } groups it sits in, as
+// "/" at the top and "/1/", "/1/2/" inside: a variable set in a group may not be set after it.
 export function parseCommandLine(cmd, shell = "bash") {
   const s = String(cmd || "");
   const escape = shell === "powershell" ? "`" : shell === "cmd" ? "^" : "\\";
@@ -176,6 +291,10 @@ export function parseCommandLine(cmd, shell = "bash") {
   let pending = null; // "out": the next word is a redirect target; "in": an input; "heredoc": a delimiter; "string": a here-string
   let piped = false;
   let quote = null;
+  let sep = null;
+  let ended = false; // the last endCommand produced a command
+  const groups = [];
+  let groupCount = 0;
   const endWord = () => {
     if (word === null) return;
     if (pending === "out") redirects.push(word);
@@ -194,13 +313,19 @@ export function parseCommandLine(cmd, shell = "bash") {
     endWord();
     pending = null;
     if (words.length || redirects.length || inputs.length || docs.length) {
-      commands.push({ words, redirects, inputs, heredocs: docs, pipe: piped });
+      commands.push({ words, redirects, inputs, heredocs: docs, pipe: piped, sep, scope: `/${groups.map((g) => `${g}/`).join("")}` });
       piped = false;
+      ended = true;
     }
     words = [];
     redirects = [];
     inputs = [];
     docs = [];
+  };
+  const separator = (kind) => {
+    endCommand();
+    if (ended || (sep !== "&&" && sep !== "||")) sep = kind;
+    ended = false;
   };
   for (let i = 0; i < s.length; i++) {
     const c = s[i];
@@ -277,7 +402,7 @@ export function parseCommandLine(cmd, shell = "bash") {
     }
     if (c === "&" && next === ">") { endWord(); continue; } // &> file: the > follows
     if (c === "\n") {
-      endCommand();
+      separator("\n");
       // Heredoc bodies: every line up to its delimiter is data, not commands.
       for (const doc of waiting.splice(0)) {
         const lines = [];
@@ -297,13 +422,16 @@ export function parseCommandLine(cmd, shell = "bash") {
       continue;
     }
     if (c === "|") {
-      if (next === "|") { i++; endCommand(); continue; } // ||: the next command runs on failure, no pipe
+      if (next === "|") { i++; separator("||"); continue; } // ||: the next command runs on failure, no pipe
       if (next === "&") i++; // |& pipes stderr as well
-      endCommand();
+      separator("|");
       piped = true;
       continue;
     }
-    if (";&(){}".includes(c)) { endCommand(); continue; }
+    if (c === "&" && next === "&") { i++; separator("&&"); continue; }
+    if (c === "(" || c === "{") { separator(c); groups.push(++groupCount); continue; }
+    if (c === ")" || c === "}") { separator(c); groups.pop(); continue; }
+    if (c === ";" || c === "&") { separator(c); continue; }
     if (/\s/.test(c)) { endWord(); continue; }
     word = (word ?? "") + c;
   }
@@ -356,41 +484,103 @@ const CODE_WRITERS = /\b(?:write|append)File(?:Sync)?\b|\b(?:rm|unlink|rename|co
 const DOTNET_WRITERS = /\[(?:System\.)?IO\.(?:File|Directory)\]::(?:WriteAll\w*|AppendAll\w*|Delete|Move|Replace|Create\w*)\s*\(\s*["']?([^"',)]+)/gi;
 
 // What a command line does that the guard cares about. Paths are as written, with the cd
-// targets earlier on the line in `dirs`: { git: [{ sub, args, dirs }], recursive: [{ path, dirs }],
-// writes: [{ path, dirs, tree }], code: [text] }. A write with tree set (a delete or a move) also
-// counts when it takes a protected path along with a folder. Variables set earlier on the line
-// (d=$(mktemp -d), S=C:/x, $d = Join-Path $env:TEMP x) are expanded into later paths.
+// targets earlier on the line in `dirs`: { git: [{ sub, args, dirs, configs }],
+// recursive: [{ path, dirs }], writes: [{ path, dirs, tree }], code: [text] }. A write with tree
+// set (a delete or a move) also counts when it takes a protected path along with a folder.
+// Variables set earlier on the line (d=$(mktemp -d), S=C:/x, $d = Join-Path $env:TEMP x) are
+// expanded into later paths; see walk for the ones set conditionally.
 export function shellEffects(cmd, shell = "bash") {
   const out = { git: [], recursive: [], writes: [], code: [] };
-  walk(parseCommandLine(cmd, shell), [], 0, out, new Map());
+  walk(parseCommandLine(cmd, shell), { dirs: [], sdirs: [], vars: new Map(), sure: new Map() }, 0, out);
   for (const m of String(cmd || "").matchAll(DOTNET_WRITERS)) out.writes.push({ path: m[1].trim(), dirs: [], tree: true });
   return out;
 }
 
-function walk(commands, dirs, depth, out, vars) {
+// A cd whose target is not sure: the paths after it cannot be placed.
+const UNKNOWN_DIR = "${cd}";
+
+// Variables and cd: `vars` and `dirs` hold what was set last, which a write is checked against.
+// `sure` and `sdirs` keep only what holds whatever ran, for recursive deletes: a value set after
+// || is unknown from then on, and one set after &&, in an if/while/until/for/select/case body or
+// inside ( ) or { } is unknown once that part of the line ends. So
+// `d=/x; [ -d "$d" ] || d=$(mktemp -d); rm -rf "$d"` is not taken for a temp folder.
+function walk(commands, ctx, depth, out) {
+  let { dirs, sdirs } = ctx;
+  const { vars, sure } = ctx;
+  const blocks = []; // the bash bodies open here, by number
+  let blockCount = 0;
+  let chain = 0; // numbers each run of commands joined by && (or a pipe)
+  const scoped = []; // sure values that hold only where they were set: { names, cwd, scope, blocks, chain }
   for (const c of commands) {
+    if (c.sep !== "&&" && c.sep !== "|") chain++;
+    // Shell keywords in front of the command open, switch and close bodies.
+    let lead = 0;
+    for (; lead < c.words.length; lead++) {
+      const k = c.words[lead];
+      if (k === "if" || k === "while" || k === "until") blocks.push(++blockCount);
+      else if (k === "elif" || k === "else") { blocks.pop(); blocks.push(++blockCount); }
+      else if (ENDS.has(k)) blocks.pop();
+      else if (!KEYWORDS.has(k)) break;
+    }
+    const header = ["for", "select", "case"].includes(c.words[lead]);
+    if (header) blocks.push(++blockCount);
+    const scope = c.scope || "/";
+    const bscope = `/${blocks.map((b) => `${b}/`).join("")}`;
+    for (let k = scoped.length - 1; k >= 0; k--) {
+      const s = scoped[k];
+      if (scope.startsWith(s.scope) && bscope.startsWith(s.blocks) && (!s.chain || s.chain === chain)) continue;
+      for (const n of s.names) sure.delete(n);
+      if (s.cwd) sdirs = [...sdirs, UNKNOWN_DIR];
+      scoped.splice(k, 1);
+    }
+    const partial = scope !== "/" || blocks.length > 0 || c.sep === "&&";
+    const hold = (entry) => scoped.push({ names: [], cwd: false, ...entry, scope, blocks: bscope, chain: c.sep === "&&" ? chain : 0 });
+
     for (const r of c.redirects) out.writes.push({ path: expandVars(r, vars), dirs, tree: false });
-    const set = assignment(c.words, vars);
+    if (header) {
+      // for x in ...: the loop sets x.
+      const v = /^[A-Za-z_]\w*$/.test(c.words[lead + 1] || "") ? c.words[lead + 1].toLowerCase() : null;
+      if (v && c.words[lead] !== "case") { vars.delete(v); sure.delete(v); }
+      continue;
+    }
+    const cw = c.words.slice(lead);
+    const set = assignment(cw, vars);
+    const names = new Map();
+    assignment(cw, names);
+    if (names.size) {
+      if (c.sep === "||") for (const n of names.keys()) sure.delete(n);
+      else {
+        assignment(cw, sure);
+        if (partial) hold({ names: [...names.keys()] });
+      }
+    }
     if (set === true) continue;
-    const raw = (Array.isArray(set) ? set : c.words).map((w) => expandVars(w, vars));
-    const words = splitOptions(stripWrappers(raw));
+    const run = Array.isArray(set) ? set : cw;
+    const words = splitOptions(stripWrappers(run.map((w) => expandVars(w, vars))));
     if (!words.length) continue;
     const name = commandName(words[0]);
     const args = words.slice(1);
+    // The same words with only the sure values in them.
+    const sargs = splitOptions(stripWrappers(run.map((w) => expandVars(w, sure)))).slice(1);
     const add = (p, tree = false) => out.writes.push({ path: p, dirs, tree });
+    const nest = (text, sh) => walk(parseCommandLine(text, sh), { dirs, sdirs, vars: new Map(vars), sure: new Map(sure) }, depth + 1, out);
 
     if (CD.has(name)) {
       const d = operands(args)[0];
       if (d && d !== "-") dirs = [...dirs, d];
+      const sd = operands(sargs)[0];
+      if (sd && sd !== "-") {
+        sdirs = [...sdirs, c.sep === "||" ? UNKNOWN_DIR : sd];
+        if (c.sep !== "||" && partial) hold({ cwd: true });
+      }
     } else if (name === "git") {
       gitEffect(args, dirs, out);
     } else if (DELETE.has(name)) {
       const cmdStyle = CMD_STYLE.has(name);
+      const opts = { takesValue: PS_VALUE, slashSwitches: cmdStyle };
       const recursive = args.some(isRecursiveFlag) || (cmdStyle && args.some((a) => /^\/\/?s$/i.test(a)));
-      for (const t of operands(args, { takesValue: PS_VALUE, slashSwitches: cmdStyle })) {
-        add(t, true);
-        if (recursive) out.recursive.push({ path: t, dirs });
-      }
+      for (const t of operands(args, opts)) add(t, true);
+      if (recursive) for (const t of operands(sargs, opts)) out.recursive.push({ path: t, dirs: sdirs });
     } else if (MOVE.has(name)) {
       for (const t of operands(args, { takesValue: PS_VALUE, slashSwitches: CMD_STYLE.has(name) })) add(t, true);
     } else if (COPY.has(name)) {
@@ -408,62 +598,79 @@ function walk(commands, dirs, depth, out, vars) {
     } else if (name === "find" && args.some((a) => /^-(delete|exec|execdir|ok)$/.test(a))) {
       // find <start>... -delete / -exec rm: what matches under each start point goes. The project
       // root is a fine start point when a test narrows the match; with none, everything goes.
-      const starts = [];
-      for (const a of args) { if (/^[-(!]/.test(a)) break; starts.push(a); }
+      const starts = (list) => {
+        const s = [];
+        for (const a of list) { if (/^[-(!]/.test(a)) break; s.push(a); }
+        return s.length ? s : ["."];
+      };
       const deletes = args.includes("-delete") || args.some((a, i) => /^-(exec|execdir|ok)$/.test(a) && DELETE.has(commandName(args[i + 1] || "")));
       const filtered = args.some((a) => /^-(i?name|i?path|i?wholename|i?regex|type|newer|mtime|mmin|size|empty)$/.test(a));
       if (deletes) {
-        for (const t of starts.length ? starts : ["."]) {
-          if (!filtered) add(t, true);
-          out.recursive.push({ path: t, dirs, rootOk: filtered });
-        }
+        if (!filtered) for (const t of starts(args)) add(t, true);
+        for (const t of starts(sargs)) out.recursive.push({ path: t, dirs: sdirs, rootOk: filtered });
       }
     } else if (CODE_RUNNERS.has(name)) {
       if (CODE_WRITERS.test(words.join(" "))) out.code.push(words.join(" "));
     } else if (depth < 3) {
       // A shell inside the shell: read the command it runs the same way. PowerShell joins the
       // words after -Command with spaces; cmd /c takes the rest of the line as it was typed.
+      // The body is read twice when a variable in it is not sure: once as written with the last
+      // values (for writes), once with only the sure ones (for recursive deletes).
+      const both = (bodyOf, sh) => {
+        const body = bodyOf(args);
+        const sbody = bodyOf(sargs);
+        if (body) nest(body, sh);
+        if (sbody && sbody !== body) nest(sbody, sh);
+        return body;
+      };
       if (SHELLS.has(name) || name === "eval") {
-        const k = name === "eval" ? -1 : args.findIndex((a) => /^-[a-zA-Z]*c[a-zA-Z]*$/.test(a));
-        const body = name === "eval" ? args.join(" ") : k >= 0 ? args[k + 1] : null;
-        if (body) walk(parseCommandLine(body, "bash"), dirs, depth + 1, out, new Map(vars));
+        const body = both((a) => {
+          if (name === "eval") return a.join(" ");
+          const k = a.findIndex((x) => /^-[a-zA-Z]*c[a-zA-Z]*$/.test(x));
+          return k >= 0 ? a[k + 1] : null;
+        }, "bash");
         // bash <<EOF ... EOF: the heredoc is the script.
-        else if (name !== "eval" && !scriptOperand(args)) {
-          for (const doc of c.heredocs) if (doc.body) walk(parseCommandLine(doc.body, "bash"), dirs, depth + 1, out, new Map(vars));
+        if (!body && name !== "eval" && !scriptOperand(args)) {
+          for (const doc of c.heredocs) if (doc.body) nest(doc.body, "bash");
         }
       } else if (name === "cmd") {
-        const k = args.findIndex((a) => /^\/\/?[ck]$/i.test(a));
-        const rest = k >= 0 ? args.slice(k + 1) : [];
-        const body = rest.length === 1 ? rest[0] : rest.map((a) => (/\s/.test(a) ? `"${a}"` : a)).join(" ");
-        if (body) walk(parseCommandLine(body, "cmd"), dirs, depth + 1, out, new Map(vars));
+        both((a) => {
+          const k = a.findIndex((x) => /^\/\/?[ck]$/i.test(x));
+          const rest = k >= 0 ? a.slice(k + 1) : [];
+          return rest.length === 1 ? rest[0] : rest.map((x) => (/\s/.test(x) ? `"${x}"` : x)).join(" ");
+        }, "cmd");
       } else if (["powershell", "pwsh", "invoke-expression", "iex"].includes(name)) {
-        const k = name.startsWith("i") ? -1 : args.findIndex((a) => /^-c(o(m(m(a(n(d)?)?)?)?)?)?$/i.test(a));
-        const body = name.startsWith("i") ? operands(args).join(" ") : k >= 0 ? args.slice(k + 1).join(" ") : null;
-        if (body) walk(parseCommandLine(body, "powershell"), dirs, depth + 1, out, new Map(vars));
+        both((a) => {
+          if (name.startsWith("i")) return operands(a).join(" ");
+          const k = a.findIndex((x) => /^-c(o(m(m(a(n(d)?)?)?)?)?)?$/i.test(x));
+          return k >= 0 ? a.slice(k + 1).join(" ") : null;
+        }, "powershell");
       }
     }
   }
 }
 
 // git [global options] <sub> <args>: the subcommand and where it sits. -C <dir> moves where the
-// paths after it resolve.
+// paths after it resolve; configs holds the name=value of every -c and --config-env.
 function gitSub(args) {
   let i = 0;
   const dirs = [];
+  const configs = [];
   while (i < args.length && args[i].startsWith("-")) {
     const a = args[i];
     if (a === "-C") { if (args[i + 1] !== undefined) dirs.push(args[i + 1]); i += 2; }
-    else if (/^(-c|--git-dir|--work-tree|--namespace|--config-env|--super-prefix)$/.test(a)) i += 2;
+    else if (a === "-c" || a === "--config-env") { if (args[i + 1] !== undefined) configs.push(args[i + 1]); i += 2; }
+    else if (/^(--git-dir|--work-tree|--namespace|--super-prefix)$/.test(a)) i += 2;
     else i++;
   }
-  return { sub: String(args[i] || "").toLowerCase(), at: i, dirs };
+  return { sub: String(args[i] || "").toLowerCase(), at: i, dirs, configs };
 }
 
 function gitEffect(args, dirs, out) {
   const g = gitSub(args);
   const gdirs = [...dirs, ...g.dirs];
   const rest = args.slice(g.at + 1);
-  out.git.push({ sub: g.sub, args: rest, dirs: gdirs });
+  out.git.push({ sub: g.sub, args: rest, dirs: gdirs, configs: g.configs });
   // Restoring, removing or moving a file through git rewrites it like any other writer.
   if (["checkout", "restore", "rm", "mv"].includes(g.sub)) {
     const valued = [/^(-s|--source|-b|-B|--orphan|-m|--conflict|--pathspec-from-file)$/];
@@ -636,9 +843,16 @@ const KEYWORDS = new Set(["if", "then", "else", "elif", "while", "until", "do", 
 const ENDS = new Set(["fi", "done", "esac"]);
 const HEADERS = new Set(["for", "select", "case", "foreach", "function"]);
 // The flag that gives an interpreter its code on the command line.
-const INLINE = { node: /^(-e|-p|--eval|--print|-pe)$/, deno: /^(-e|--eval)$/, bun: /^(-e|--eval|-p|--print)$/, python: /^-c$/, python3: /^-c$/, py: /^-c$/, ruby: /^-[a-zA-Z]*e$/, perl: /^-[a-zA-Z]*[eE]$/, php: /^-r$/ };
-// Code that starts other programs: only then is inline or heredoc code tested as a command.
-const SPAWNS = /\bsubprocess\b|\bos\.(system|popen|exec\w*|spawn\w*|posix_spawn\w*)\b|\bpty\.spawn\b|\bchild_process\b|\b(execSync|execFileSync|spawnSync|execFile|execa)\b|\bPopen\b|\bProcess\.Start\b|\bStart-Process\b|\bInvoke-Expression\b|\b(shell_exec|passthru|proc_open|popen|system)\s*\(|\bOpen3\b|\bDeno\.(run|Command)\b|\bBun\.(spawn|\$)/;
+const INLINE = { node: /^(-e|-p|--eval|--print|-pe)$/, deno: /^(-e|--eval)$/, bun: /^(-e|--eval|-p|--print)$/, python: /^-[bBdEiIOPqsSuvx]*c$/, python3: /^-[bBdEiIOPqsSuvx]*c$/, py: /^-[bBdEiIOPqsSuvx]*c$/, ruby: /^-[a-zA-Z]*e$/, perl: /^-[a-zA-Z]*[eE]$/, php: /^-r$/, lua: /^-e$/ };
+// Code that starts other programs: only then is inline or heredoc code tested as a command, raw
+// (a file it only reads is not run). system/exec/spawn count with or without parentheses
+// (Perl's and Ruby's `system "ssh ..."`), and Perl, Ruby and PHP also run what is in backticks,
+// qx(), %x() or a piped open.
+const SPAWNS = /\bsubprocess\b|\bcreate_subprocess_\w+|\bos\.(system|popen|exec\w*|spawn\w*|posix_spawn\w*)\b|\bpty\.spawn\b|\bchild_process\b|\b(execSync|execFileSync|spawnSync|execFile|execa)\b|\bPopen\b|\bProcess\.Start\b|\bStart-Process\b|\bInvoke-Expression\b|\b(shell_exec|passthru|proc_open|popen|system)\s*\(|(?<![.\w$])(system|exec|spawn|popen)\s*[("'`$]|\b(Kernel|Process)\.(system|exec|spawn)\b|\bIO\.popen\b|\bOpen3\b|\bPTY\.spawn\b|\bDeno\.(run|Command)\b|\bBun\.(spawn|\$)/;
+const SHELL_OUT = /`[^`]*`|\bqx\s*[^\w\s]|%x\s*[^\w\s]|\bopen\b[^;]*["'][^"']*\|[^"']*["']/;
+function startsProcesses(name, code) {
+  return SPAWNS.test(code) || (/^(perl|ruby|php)$/.test(name) && SHELL_OUT.test(code));
+}
 const LINTER_IMAGE = /^(shellcheck|shfmt|hadolint|actionlint|yamllint|markdownlint(-cli2?)?|jsonlint|codespell|typos|editorconfig-checker|psscriptanalyzer)([-_.][\w.-]*)?$/i;
 const DOCKER_VALUED = /^(-v|--volume|--mount|-e|--env|--env-file|-w|--workdir|--network|--net|--name|-u|--user|--entrypoint|-p|--publish|--platform|-l|--label|--label-file|--add-host|--cpus|-m|--memory|--memory-swap|--tmpfs|--cap-add|--cap-drop|--device|-h|--hostname|--pull|--restart|--log-driver|--log-opt|--security-opt|--ulimit|--gpus|--shm-size|--stop-timeout|--stop-signal|--dns|--ipc|--pid|--userns|--cidfile|--runtime|--isolation|--cpuset-cpus|--expose|--link|--volumes-from|-a|--attach)$/;
 const FIND_ACTIONS = /^-(exec|execdir|ok|okdir|delete|fprint0?|fprintf|fls)$/;
@@ -725,13 +939,23 @@ function collectTexts(commands, st, vars, out) {
     }
     if (INLINE[name]) {
       const i = args.findIndex((a) => INLINE[name].test(a));
-      if (i >= 0) { push(SPAWNS.test(args[i + 1] || "") ? [rest[0], ...args.slice(0, i + 2)] : [rest[0], ...args.slice(0, i)]); continue; }
+      if (i >= 0) { push(startsProcesses(name, args[i + 1] || "") ? [rest[0], ...args.slice(0, i + 2)] : [rest[0], ...args.slice(0, i)]); continue; }
       const ops = operands(args, { takesValue: [/^(-W|-X|-r|--require|--import|--loader|--experimental-loader|--input-type|-I)$/] });
       if (args.includes("-m") || (ops.length && ops[0] !== "-")) { push(dropValues(rest)); continue; }
       push([...rest, ...inputs]);
-      for (const b of docs) if (SPAWNS.test(b)) out.push({ text: `${rest[0]} ${b}`, via: st.via });
+      for (const b of docs) if (startsProcesses(name, b)) out.push({ text: `${rest[0]} ${b}`, via: st.via });
       fed();
       continue;
+    }
+    if (name === "sed") {
+      // GNU sed runs commands too: its scripts are tested then (and an `e command` is read as a
+      // command line), the files it reads are not.
+      const scripts = sedScripts(args).filter(sedRuns);
+      if (scripts.length) {
+        push([rest[0], ...scripts]);
+        for (const s of scripts) for (const m of s.matchAll(SED_E_TEXT)) deeper(m[1], "bash");
+        continue;
+      }
     }
     if (name === "git") {
       const g = gitSub(args);
@@ -741,7 +965,14 @@ function collectTexts(commands, st, vars, out) {
     }
     if (name === "docker" || name === "podman") {
       const lint = linterRun(args);
-      push(lint ? [rest[0], ...lint] : dropValues(rest));
+      if (!lint) { push(dropValues(rest)); continue; }
+      // After the image: the linter's own options and the files it reads, or a command the image
+      // runs (shellcheck-alpine and the hadolint *-debian images have a shell). A first word that
+      // is not an option, a linter or a file name is that command, and is read like one.
+      const [first] = lint.after;
+      const command = first !== undefined && !first.startsWith("-") && !LINTER_IMAGE.test(commandName(first)) && !/\.\w+$|(^|[\\/])(Dockerfile|Containerfile)[^\\/]*$/i.test(first);
+      push([rest[0], ...lint.keep, ...(command ? [] : lint.after.filter(isRemote))]);
+      if (command && st.depth < 4) collectTexts([{ words: lint.after, redirects: [], inputs: [], heredocs: [], pipe: false }], { ...st, depth: st.depth + 1 }, new Map(vars), out);
       continue;
     }
     if (readsOnly(name, args)) { push([rest[0], ...args.filter(isRemote)]); continue; }
@@ -771,11 +1002,40 @@ function unwrap(words) {
   return words.slice(i);
 }
 
-// Read-only in this invocation: a reader, sed without -i, awk that neither writes, pipes nor
-// runs anything, find without an action, `command -v`.
+// The scripts a sed command line gives inline: every -e (--expression) value, else the first
+// operand. A script from -f is not seen.
+function sedScripts(args) {
+  const out = [];
+  let file = false;
+  const ops = [];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    const e = /^-[nErsuz]*e(.*)$/.exec(a) || /^--expression(?:=(.*))?$/.exec(a);
+    if (e) { const v = e[1] ? e[1] : args[++i]; if (v !== undefined) out.push(v); continue; }
+    if (/^(-[nErsuz]*f|--file)(=|$)/.test(a)) { file = true; if (/^(-[nErsuz]*f|--file)$/.test(a)) i++; continue; }
+    if (/^(-l|--line-length)$/.test(a)) { i++; continue; }
+    if (a.startsWith("-") && a !== "-") continue;
+    ops.push(a);
+  }
+  if (!out.length && !file && ops.length) out.push(ops[0]);
+  return out;
+}
+
+// GNU sed's e command (`e cmd` runs cmd, a bare `e` runs the line) and the e flag of s, which
+// runs what the substitution produced. An address may come first: 1e, $e, /re/e, 1,3e.
+const SED_ADDR = String.raw`(?:(?:\d+|\$|/(?:\\.|[^\\/])*/[IM]*)(?:\s*[,~]\s*\+?(?:\d+|\$|/(?:\\.|[^\\/])*/[IM]*))?)?\s*!?\s*`;
+const SED_E = new RegExp(String.raw`(?:^|[;\n{}])\s*${SED_ADDR}e(?=\s|;|}|$)`);
+const SED_E_TEXT = new RegExp(String.raw`(?:^|[;\n{}])\s*${SED_ADDR}e[ \t]+([^\n]+)`, "g");
+const SED_S_E = new RegExp(String.raw`(?:^|[;\n{}])\s*${SED_ADDR}s(.)(?:\\.|(?!\1)[^\\])*\1(?:\\.|(?!\1)[^\\])*\1[gpiImM0-9]*e`);
+function sedRuns(script) {
+  return SED_E.test(script) || SED_S_E.test(script);
+}
+
+// Read-only in this invocation: a reader, sed without -i or a command it runs, awk that neither
+// writes, pipes nor runs anything, find without an action, `command -v`.
 function readsOnly(name, args) {
   if (READERS.has(name) || name === "command") return true;
-  if (name === "sed") return !args.some((a) => /^(-[a-zA-Z]*i|--in-place)/.test(a));
+  if (name === "sed") return !args.some((a) => /^(-[a-zA-Z]*i|--in-place)/.test(a)) && !sedScripts(args).some(sedRuns);
   if (["awk", "gawk", "mawk", "nawk"].includes(name)) {
     if (args.some((a) => /^-f/.test(a) || a === "--file")) return false;
     const program = operands(args, { takesValue: [/^-(v|F)$/, /^--(assign|field-separator)$/] })[0];
@@ -785,8 +1045,8 @@ function readsOnly(name, args) {
   return false;
 }
 
-// docker run of a linter image with every mount read-only: the options up to the image, without
-// the mounts, or null when it is anything else.
+// docker run of a linter image with every mount read-only: { keep, after }, the options up to
+// the image without the mounts, and the words after the image; null when it is anything else.
 function linterRun(args) {
   let i = args[0] === "container" ? 1 : 0;
   if (args[i] !== "run") return null;
@@ -812,7 +1072,7 @@ function linterRun(args) {
   const image = args[i];
   if (!image || !LINTER_IMAGE.test(image.split("/").pop().split(/[:@]/)[0])) return null;
   keep.push(image);
-  return keep;
+  return { keep, after: args.slice(i + 1) };
 }
 
 // A PowerShell -Value or -InputObject is data in any command; so is a git commit message.
@@ -876,24 +1136,75 @@ function pathApi(root) {
 }
 
 // A path word as the shell would see it, made absolute against `from`, or null when it depends on
-// a variable that cannot be known here. Git Bash's /c/... is C:\...; ~, $HOME, $env:USERPROFILE,
-// $PWD and $(pwd) are expanded.
+// a variable that cannot be known here (a relative path with no known `from` included). Git
+// Bash's /c/... is C:\...; ~, $HOME, $env:USERPROFILE, $PWD and $(pwd) are expanded.
 export function resolveTarget(word, from, P = path) {
-  if (from === null || from === undefined) return null;
+  const s = splitTarget(word, from, P);
+  return s && P.resolve(s.start, s.rest);
+}
+
+// resolveTarget in two parts: { start, rest }, the folder the path starts from and the rest as
+// written (absolute or not, `..` still in it), or null.
+function splitTarget(word, from, P) {
+  const known = from !== null && from !== undefined;
   let t = String(word);
   const home = /^(~|\$HOME|\$\{HOME\}|\$env:HOME|\$env:USERPROFILE|%USERPROFILE%)(?=$|[\\/])/i.exec(t);
   const here = /^(\$PWD|\$\{PWD\}|\$\(pwd\)|\$\(Get-Location\))(?=$|[\\/])/i.exec(t);
+  if (here && !known) return null;
   const start = home ? os.homedir() : here ? from : null;
   if (start !== null) t = t.slice((home || here)[0].length);
   if (/\$[\w{(:]|%\w+%/.test(t)) return null;
-  if (start !== null) return P.resolve(start, `.${t}`);
+  if (start !== null) return { start, rest: `.${t}` };
   if (P === path.win32) {
     const m = /^\/(?:cygdrive\/|mnt\/)?([A-Za-z])(?=\/|$)/.exec(t);
     if (m) t = `${m[1]}:/${t.slice(m[0].length)}`;
   } else if (/^[A-Za-z]:[\\/]|^\\\\/.test(t)) {
     return null; // a Windows path on a POSIX machine
   }
-  return P.resolve(from, t);
+  if (!known && !P.isAbsolute(t)) return null;
+  return { start: known ? from : P.resolve(P.parse(t).root), rest: t };
+}
+
+// The path as the file system reaches it: each existing folder on the way is resolved through
+// links, junctions and 8.3 short names before the next name or `..` is applied, so a link in
+// the temp folder that points elsewhere, and `..` after one, land where they really lead. Only a
+// path in this machine's own style can be looked up; any other stays as resolveTarget has it.
+function physicalTarget(word, from, P) {
+  const s = splitTarget(word, from, P);
+  if (!s) return null;
+  if (P !== path || UNC.test(s.rest) || (!P.isAbsolute(s.rest) && UNC.test(s.start))) return P.resolve(s.start, s.rest);
+  const root = P.isAbsolute(s.rest) ? P.parse(s.rest).root : "";
+  let cur = root ? P.resolve(root) : real(P, P.resolve(s.start));
+  for (const name of s.rest.slice(root.length).split(P.sep === "\\" ? /[\\/]+/ : /\/+/)) {
+    if (!name || name === ".") continue;
+    if (name === "..") { cur = P.dirname(cur); continue; }
+    cur = P.join(cur, name);
+    if (!/[*?[]/.test(name)) { try { cur = fs.realpathSync.native(cur); } catch {} }
+  }
+  return cur;
+}
+
+// An absolute path with its deepest existing folder resolved as the file system has it (links,
+// junctions, 8.3 short names), and the rest, which does not exist yet, as written. A network
+// path is left alone: looking one up can wait on an unreachable server.
+const UNC = /^[\\/]{2}/;
+function real(P, abs) {
+  if (P !== path || UNC.test(abs)) return abs;
+  const tail = [];
+  for (let d = abs; ; d = P.dirname(d)) {
+    try { return P.join(fs.realpathSync.native(d), ...tail.reverse()); } catch {}
+    if (P.dirname(d) === d) return abs;
+    tail.push(P.basename(d));
+  }
+}
+
+// $CLAUDE_CONFIG_DIR (and its PowerShell and cmd forms) at the start of a path word, replaced by
+// the Claude config folder.
+const CONFIG_VAR = /^(?:\$\{CLAUDE_CONFIG_DIR\}|\$CLAUDE_CONFIG_DIR(?!\w)|\$env:CLAUDE_CONFIG_DIR(?!\w)|%CLAUDE_CONFIG_DIR%)/i;
+function configWord(word, dir) {
+  const w = String(word);
+  const m = CONFIG_VAR.exec(w);
+  return m ? String(dir) + w.slice(m[0].length) : w;
 }
 
 // The OS temp folders for this path style: os.tmpdir() (and its long form: TEMP often holds a
@@ -931,7 +1242,7 @@ function tempWord(word, temps, P) {
 }
 
 // Strictly inside a temp folder, and neither the project nor a folder that holds it. A wildcard
-// may not stand for a whole first-level name (all of the temp folder) or reach the project.
+// may not reach the project, nor stand for all or most of the temp folder (see broadGlob).
 function inTemp(P, abs, temps, root, same) {
   if (same(abs, root) || contains(P, abs, root)) return false;
   if (/[*?]/.test(abs)) {
@@ -941,7 +1252,15 @@ function inTemp(P, abs, temps, root, same) {
       if (P.dirname(d) === d) break;
     }
   }
-  return temps.some((t) => contains(P, t, abs) && !/^[*?]+$/.test(P.relative(t, abs).split(P.sep)[0]));
+  return temps.some((t) => contains(P, t, abs) && !broadGlob(P.relative(t, abs).split(P.sep)[0]));
+}
+
+// A first-level name in the temp folder that is a wildcard for most of it: *, *.*, [a-z]*, ??
+// and the like, with fewer than three letters or digits of its own (autoclaude-* and *.log are
+// narrow enough). Other programs and other sessions keep their files there too.
+function broadGlob(name) {
+  if (!/[*?[]/.test(name)) return false;
+  return name.replace(/\[[^\]]*\]?|[*?]/g, "").replace(/[^A-Za-z0-9]/g, "").length < 3;
 }
 
 // True when `child` is strictly inside `parent`.

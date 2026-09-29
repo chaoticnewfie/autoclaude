@@ -622,6 +622,58 @@ test("start on a continued plan: an old run branch already merged here moves for
   assert.equal(loadState(root).status, "idle");
 });
 
+test("start after a run left work uncommitted or tags unpushed: resume never commits later edits under those steps, the tags still go out, and the decisions log's mark is kept", { skip: !gitAvailable() && "git is not installed" }, async () => {
+  const configDir = fs.mkdtempSync(path.join(os.tmpdir(), "autoclaude-cfg-"));
+  const root = trustedRepo({ plan: PLAN, configDir });
+  const g = (...a) => { const r = spawnSync("git", ["-c", "user.name=t", "-c", "user.email=t@example.com", ...a], { cwd: root, encoding: "utf8" }); assert.equal(r.status, 0, r.stderr); };
+  fs.mkdirSync(path.join(root, "docs"), { recursive: true });
+  fs.writeFileSync(path.join(root, "docs", "DECISIONS.md"), "# DECISIONS\n\n## D-004 (2026-09-27, S1.1) An earlier run's decision\n");
+  g("add", "-A");
+  g("commit", "-q", "-m", "the last run's work, committed by hand");
+  g("tag", "ac-phase-9");
+  // The last run paused commit-failed, and its last push left two tags behind (one since deleted).
+  saveState(root, { ...defaultState(), status: "paused", pauseReason: "commit-failed", uncommitted: ["S1.2"], uncommittedMessages: { "S1.2": "autoclaude(S1.2): Second\n" }, pushState: { ok: false, skipped: false, at: "2026-09-27T20:00:00.000Z", error: "timed out", unpushedTags: ["ac-phase-9", "ac-phase-gone"] } });
+  const marks = [];
+  const deps = {
+    recordFootprintStart: async () => ({}),
+    notifyEvent: async () => ({ sent: false }),
+    decisionsMark: (text) => { marks.push(text); return { D: 4, N: 0 }; }
+  };
+  const r = await run(["start", "--no-preflight"], root, { configDir, env: runEnv(), deps });
+  assert.equal(r.code, 0, r.out + r.err);
+  assert.match(r.out, /the last run verified S1\.2 but could not commit it; the working tree is clean, so that is taken as done/);
+  assert.match(r.out, /ac-phase-9 was not pushed by the last run; the next push takes it along/);
+  const s = loadState(root);
+  assert.deepEqual([s.status, s.uncommitted, s.uncommittedMessages, s.pushState.unpushedTags, s.pushState.ok, s.decisionsAtStart], ["running", [], {}, ["ac-phase-9"], false, { D: 4, N: 0 }]);
+  assert.match(marks[0], /D-004/, "the mark is taken from the decisions log as the run starts");
+});
+
+test("run --check from Git Bash judges the checks without Git Bash's own folders, the way a run from PowerShell or cmd would", { skip: !gitAvailable() && "git is not installed" }, async () => {
+  const configDir = fs.mkdtempSync(path.join(os.tmpdir(), "autoclaude-cfg-"));
+  const root = trustedRepo({ plan: PLAN, configDir });
+  // A tool only Git Bash's usr\bin has.
+  const bashBin = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "autoclaude-fakegit-")), "usr", "bin");
+  fs.mkdirSync(bashBin, { recursive: true });
+  const tool = path.join(bashBin, process.platform === "win32" ? "onlyinbash.exe" : "onlyinbash");
+  fs.writeFileSync(tool, "");
+  fs.chmodSync(tool, 0o755);
+  fs.writeFileSync(path.join(root, "autoclaude.config.json"), JSON.stringify({ version: 1, tester: { enabled: false }, checks: [{ name: "lint", command: "onlyinbash --check", timeoutSec: 60 }] }));
+  spawnSync("git", ["-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "-am", "a check"], { cwd: root });
+  const base = runEnv();
+  const basePath = base.PATH || base.Path || "";
+  for (const k of Object.keys(base)) if (k.toUpperCase() === "PATH") delete base[k];
+  const shell = { ...base, PATH: `${bashBin}${path.delimiter}${basePath}` };
+  delete shell.MSYSTEM;
+  let r = await run(["run", "--check"], root, { configDir, env: { ...shell, MSYSTEM: "MINGW64" } });
+  assert.match(r.out, /FAIL checks: lint: `onlyinbash` is not on PATH/, r.out);
+  assert.match(r.out, /PATH for the checks: this shell's PATH without Git Bash's own folders/);
+  assert.equal(r.code, 1);
+  // Outside Git Bash the shell's PATH is the run's PATH, as before.
+  r = await run(["run", "--check"], root, { configDir, env: shell });
+  assert.match(r.out, /ok\s+checks/, r.out);
+  assert.doesNotMatch(r.out, /PATH for the checks/);
+});
+
 // ---------- Phase 8: --help everywhere, config, decide, the checks' PATH, owner alerts ----------
 
 test("--help and -h on every command print that command's usage and do nothing else", async () => {

@@ -10,11 +10,11 @@ You are the builder in an unattended AutoClaude run for the project at `{{PROJEC
 4. When the step's Accept lines hold, rewrite `{{CONTINUE_HERE}}` (where things are, what is next; a fresh session must be able to pick up from it alone) and run with the Bash tool:
    `{{AUTOCLAUDE_CMD}} ready {{STEP_ID}}`
    Then end your turn. What happens next depends on `gate.verifyAt` in `autoclaude.config.json`, and the gate's message says which:
-   - `"phase"` (the default), a step before the phase's last: the gate commits it as built (`[~]`) with no checks and gives you the next step. Your own tests are all that stand behind it until the feature is verified, and its Accept lines must still hold then.
-   - The phase's last step: before `ready`, do the project's other doc duties from its `CLAUDE.md` (session log, deferred work, facts worth keeping) once for the whole feature. The gate then verifies the whole feature: every check, the browser tester over every Accept line of the phase, and the bug bash and the security review where due. A failure comes back with a report naming the failing Accept lines, which may belong to earlier steps of the feature; fix them, then run `ready` on this step again. You get {{MAX_ATTEMPTS}} attempts per feature.
+   - `"phase"` (the default), a step that does not close its feature: the gate commits it as built (`[~]`) with no checks and gives you the next step. Your own tests are all that stand behind it until the feature is verified, and its Accept lines must still hold then.
+   - The step that closes the feature (normally the phase's last; the "Current feature" section below names it): before `ready`, do the project's other doc duties from its `CLAUDE.md` (session log, deferred work, facts worth keeping) once for the whole feature. The gate then verifies the whole feature: every check, the browser tester over every Accept line of the phase, and the bug bash and the security review where due. A failure comes back with a report naming the failing Accept lines, which may belong to earlier steps of the feature; fix them, then run `ready` on this step again. You get {{MAX_ATTEMPTS}} attempts per feature.
    - `"step"`: every `ready` verifies that step the same way, {{MAX_ATTEMPTS}} attempts per step.
 5. Only the gate changes the boxes in `{{PLAN_FILE}}`, commits, tags and pushes; after a verified feature it pushes the run branch and the phase tag when `git.push` is true. Never edit `{{PLAN_FILE}}`, `.autoclaude/` or `autoclaude.config.json`. Never commit, tag or push this repository yourself, and never force-push.
-6. Log each decision in `{{DECISIONS_FILE}}` when you make it (below). Other paperwork waits for the phase's last step.
+6. Log each decision in `{{DECISIONS_FILE}}` when you make it (below). Other paperwork waits for the step that closes the feature.
 
 ## Fix-up pass
 

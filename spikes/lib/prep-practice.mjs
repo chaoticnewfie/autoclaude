@@ -19,7 +19,12 @@ const git = (cwd, ...args) => {
 fs.rmSync(remote, { recursive: true, force: true });
 prepareFixture({ dest, plan: "happy", git: true, env });
 // Back to an app that has never seen AutoClaude: the plan skill writes all of this itself.
-for (const f of ["PLAN.md", "autoclaude.config.json", "PROGRESS.md", "docs"]) fs.rmSync(path.join(dest, f), { recursive: true, force: true });
+for (const f of ["PLAN.md", "autoclaude.config.json", "PROGRESS.md", "CONTINUE_HERE.md", "docs"]) fs.rmSync(path.join(dest, f), { recursive: true, force: true });
+fs.writeFileSync(path.join(dest, ".gitignore"), "node_modules/\n");
+// The project sits inside this repository, so every session there would also load AutoClaude's
+// own CLAUDE.md (its build rules). A real project has no such parent: exclude it.
+fs.mkdirSync(path.join(dest, ".claude"), { recursive: true });
+fs.writeFileSync(path.join(dest, ".claude", "settings.json"), JSON.stringify({ claudeMdExcludes: ["C:/AutoClaude/CLAUDE.md", "**/AutoClaude/CLAUDE.md"] }, null, 2) + "\n");
 git(dest, "add", "-A");
 git(dest, "commit", "-qm", "practice: the app before AutoClaude");
 const branch = git(dest, "rev-parse", "--abbrev-ref", "HEAD");

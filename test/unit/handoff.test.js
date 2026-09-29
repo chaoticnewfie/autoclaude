@@ -143,9 +143,11 @@ test("writeHandoff: HANDOFF.md with what was built, what is left, secrets by nam
   assert.match(text, /- Follow-up \(2026-09-28\): S2\.1 medium: theme flickers on reload\. Status: open\. \(docs\/BLOCKERS\.md\)/);
   assert.match(text, /- Security \(2026-09-28\): low server\.js:12 no rate limit on \/api\/todos\. Fix: add a limit\. Status: open/);
   assert.doesNotMatch(text, /button wraps/);
-  // Push: what failed and the commands that finish it.
-  assert.match(text, /Push FAILED for autoclaude\/todo-fixture \(2026-09-28 09:00 UTC\): ssh: connect to host github\.com port 22: Connection timed out\. Not on the remote: 2 commits and 1 tag \(ac-phase-2\)\./);
-  assert.match(text, /```\ngit push origin autoclaude\/todo-fixture\ngit push origin ac-phase-2\n```/);
+  // Push: what failed before this file was committed, and the commands that finish it if the
+  // push after it fails too.
+  assert.match(text, /- Push before this file was committed: FAILED for autoclaude\/todo-fixture \(2026-09-28 09:00 UTC\): ssh: connect to host github\.com port 22: Connection timed out\. Not on the remote: 2 commits and 1 tag \(ac-phase-2\)\.\n/);
+  assert.match(text, /## Push\n\nBefore this file was committed: FAILED for autoclaude\/todo-fixture \(2026-09-28 09:00 UTC\)/);
+  assert.match(text, /The completion alert says how that push went\. If it says the push failed, push from the project folder:\n\n```\ngit push origin autoclaude\/todo-fixture\ngit push origin ac-phase-2\n```/);
   // The footprint, with a command for everything it did not remove.
   assert.match(text, /- container `app-db` \(image postgres:16\), running: `docker rm -f app-db`/);
   assert.match(text, /- volume `app-data`: a container uses it\. To remove it: `docker volume rm app-data`/);
@@ -179,6 +181,57 @@ test("writeHandoff: HANDOFF.md with what was built, what is left, secrets by nam
   assert.ok(!leaked.includes("sk-live"));
 });
 
+test("writeHandoff: the push state is worded as before this file, so the pushed file stays true whatever its own push does", () => {
+  const root = tmp();
+  const plan = "# Push plan\n\n## Phase 1: A\n- [x] **S1.1** One\n  - Accept: a\n";
+  const write = (cfg, pushState) => fs.readFileSync(writeHandoff({ root, config: cfg, state: { status: "complete", pushState }, parsed: parsePlan(plan), footprint: null, env, commits: [] }).path, "utf8");
+  const failed = { branch: "autoclaude/p", remote: "origin", ok: false, at: "2026-09-28T09:00:00.000Z", error: "timed out", unpushedCommits: 2, unpushedTags: ["ac-phase-1"] };
+  const ok = { branch: "autoclaude/p", remote: "origin", ok: true, at: "2026-09-28T09:00:00.000Z", unpushedTags: [] };
+  // The gate commits and pushes this file after writing it (the defaults): a failed push before
+  // it may succeed after it, and a pushed branch may fail to take the hand-back commit.
+  for (const ps of [failed, ok, null]) {
+    const text = write(config, ps);
+    assert.doesNotMatch(text, /^(- )?Push( FAILED|:)/m, "no unqualified push state");
+    assert.match(text, /^- Push before this file was committed: /m);
+    assert.match(text, /The run commits this file right after writing it and then pushes the run branch[^\n]*\. The completion alert says how that push went\. If it says the push failed, push from the project folder:\n\n```\ngit push origin [^\n]+\n/);
+    assert.doesNotMatch(text, /after your review/, "the gate pushes the branch itself");
+  }
+  assert.match(write(config, failed), /git push origin autoclaude\/p\ngit push origin ac-phase-1\n```/);
+  assert.match(write(config, ok), /Before this file was committed: autoclaude\/p and its tags are on origin \(2026-09-28 09:00 UTC\)\./);
+  const skipped = write(config, { branch: "autoclaude/p", ok: false, skipped: true, error: "no git remote is configured", unpushedTags: [] });
+  assert.match(skipped, /Before this file was committed: skipped: no git remote is configured\. Nothing is on the remote from this run\.\n\nThe run commits this file right after writing it and then tries to push the run branch; the completion alert says how that went\./);
+  assert.doesNotMatch(skipped, /git push/);
+
+  // Not committed by the gate (git.commitEachStep false): the recorded push is the last one.
+  const uncommitted = write(mergeConfig({ git: { push: true, commitEachStep: false } }), failed);
+  assert.match(uncommitted, /^- Push FAILED for autoclaude\/p \(2026-09-28 09:00 UTC\): timed out\. Not on the remote: 2 commits and 1 tag \(ac-phase-1\)\.$/m);
+  assert.match(uncommitted, /## Push\n\nPush FAILED for autoclaude\/p[^\n]*\n\nTo push what is missing, from the project folder:\n\n```\ngit push origin autoclaude\/p\ngit push origin ac-phase-1\n```/);
+  assert.doesNotMatch(uncommitted, /Before this file was committed/);
+});
+
+test("writeHandoff counts a second run of the same day by the decisions log at the run's base commit", () => {
+  const root = tmp();
+  prepareFixture({ dest: root, plan: "happy", git: true, env });
+  // The first run's entries, committed before the second run started (start needs a clean tree).
+  const first = "# DECISIONS\n\n## D-001 (2026-09-28, planning) Postgres 16\n- By: owner\n\n## D-002 (2026-09-28, S1.1) First run: open port 8080 on the LAN\n- By: decider\n- Owner review: yes\n\n## N-001 (2026-09-28, S1.2) First run's note\n- Note: x\n- Done: y\n";
+  fs.writeFileSync(path.join(root, "docs", "DECISIONS.md"), first);
+  git(root, ["add", "-A"]);
+  git(root, ["commit", "-q", "-m", "first run"]);
+  const base = git(root, ["rev-parse", "HEAD"]);
+  fs.appendFileSync(path.join(root, "docs", "DECISIONS.md"), "\n## D-003 (2026-09-28, S2.1) Second run: keep the default theme\n- By: decider\n\n## N-002 (2026-09-28, S2.1) Second run's note\n- Note: a\n- Done: b\n");
+  const parsed = parsePlan(PLAN);
+  const state = { status: "complete", startedAt: "2026-09-28T15:00:00.000Z", baseCommit: base };
+  const r = writeHandoff({ root, config, state, parsed, footprint: null, env, commits: [] });
+  assert.equal(r.summary.runDecisions, 1);
+  assert.deepEqual(r.summary.ownerReviewDecisions, []);
+  const text = fs.readFileSync(r.path, "utf8");
+  assert.match(text, /## Decisions the run made\n\n1 decision logged during the run, in docs\/DECISIONS\.md:\n\n- D-003 \(S2\.1, by decider\) Second run: keep the default theme\n\n/);
+  assert.match(text, /- Decisions for you to review: none\./);
+  assert.match(buildSummary({ root, config, state, parsed }), /Decisions the run made: 1, owner notes handled: 1\./);
+  // A mark the gate recorded at start wins over the base commit.
+  assert.equal(writeHandoff({ root, config, state: { ...state, decisionsAtStart: { D: 0, N: 0 } }, parsed, footprint: null, env, commits: [] }).summary.runDecisions, 2);
+});
+
 test("writeHandoff on a quiet run: nothing left, nothing open, push off, footprint not checked", () => {
   const root = tmp();
   const plan = "# Quiet plan\n\n## After the run\n\n- Nothing: the run does all of this plan.\n\n## Phase 1: A\n- [x] **S1.1** One\n  - Accept: a\n- [~] **S1.2** Two\n  - Accept: b\n";
@@ -198,4 +251,28 @@ test("writeHandoff on a quiet run: nothing left, nothing open, push off, footpri
   const noDocker = fs.readFileSync(writeHandoff({ root, config, state: {}, parsed: parsePlan(plan), footprint: { removed: [], kept: [], runningCreated: [], secretsCreated: [], goneSinceStart: [], errors: [], dockerChecked: false }, env, commits: [] }).path, "utf8");
   assert.match(noDocker, /Docker was not checked: it is not installed here, or it was not running when the run ended\./);
   assert.match(noDocker, /- This computer: Docker not checked \(not installed or not running\)\./);
+});
+
+test("writeHandoff and the alert list Docker objects not tied to the project, with no remove command, and say what tied the rest", () => {
+  const root = tmp();
+  const plan = "# Docker plan\n\n## Phase 1: A\n- [x] **S1.1** One\n  - Accept: a\n";
+  const footprint = {
+    removed: [{ kind: "volume", id: "app-cache", name: "app-cache", attributedBy: "a container of this project used it" }],
+    kept: [], runningCreated: [{ kind: "container", id: "b".repeat(64), name: "app-web", image: "node:24", state: "running", attributedBy: "its compose folder is in the project" }],
+    unattributed: [
+      { kind: "container", id: "d".repeat(64), name: "other-db", image: "postgres:16", state: "exited", reason: "new since the run started, but its compose folder is outside this project (C:/other); it may be another project's or yours, so the run left it alone" },
+      { kind: "volume", id: "e".repeat(64), name: "e".repeat(64), reason: "not provably new." }
+    ],
+    secretsCreated: [], goneSinceStart: [], errors: [], dockerChecked: true
+  };
+  const r = writeHandoff({ root, config: mergeConfig({ git: { push: false } }), state: { status: "complete" }, parsed: parsePlan(plan), footprint, env, commits: [] });
+  const text = fs.readFileSync(r.path, "utf8");
+  assert.match(text, /- This computer: removed 1 unused Docker object the run created, 1 container the run started still running, left alone 2 not tied to this project\./);
+  assert.match(text, /New while the run was going, but not tied to this project, so the run left them alone \(another project, or you, may have made them\):\n\n- container `other-db` \(image postgres:16\), exited: new since the run started, but its compose folder is outside this project \(C:\/other\); it may be another project's or yours, so the run left it alone\.\n- volume `e{12}`: not provably new\.\n/);
+  const section = text.slice(text.indexOf("New while the run was going"));
+  assert.doesNotMatch(section.slice(0, section.indexOf("\n\n", section.indexOf("\n- "))), /docker (?:rm|volume rm)/, "no remove command for what may be another project's");
+  assert.match(text, /- container `app-web` \(image node:24\) \(its compose folder is in the project\), running: `docker rm -f app-web`/);
+  assert.match(text, /- volume `app-cache` \(a container of this project used it\)\n/);
+  const alert = buildSummary({ root, config: mergeConfig({ git: { push: false } }), state: { status: "complete" }, parsed: parsePlan(plan), handoff: r });
+  assert.match(alert, /Docker: removed 1 unused thing the run created, 1 container it started still running, left alone 2 not tied to this project\./);
 });

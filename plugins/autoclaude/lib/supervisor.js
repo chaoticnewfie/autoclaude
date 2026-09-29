@@ -13,15 +13,15 @@
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
-import { spawn, spawnSync } from "node:child_process";
-import { projectPaths } from "./paths.js";
+import { spawnSync } from "node:child_process";
+import { projectPaths, isWindows } from "./paths.js";
 import { loadState, updateState, STATUS } from "./state.js";
 import { loadConfig } from "./config.js";
 import { readJson, writeJsonAtomic, appendLine, removeIfExists, ensureDir, readText } from "./fsatomic.js";
 import { readHeartbeat } from "./protocol.js";
 import { readUsage } from "./usage.js";
 import { claudeBinary } from "./headless.js";
-import { killTree, isPidAlive } from "./proc.js";
+import { killTree, isPidAlive, cmdShimArg, cmdShimLine, spawnClaude } from "./proc.js";
 import { notify } from "./notify.js";
 import { resumeRun, undoCutVerification } from "./resume.js";
 import { buildSummary } from "./summary.js";
@@ -80,6 +80,10 @@ export function launchArgs(kind, prompt = null, sessionId = null, model = null, 
   if (kind === "fresh") return ["--session-id", sessionId, ...m, "--permission-mode", "auto", prompt || "/autoclaude:resume"];
   return [...(sessionId ? ["--resume", sessionId] : ["--continue"]), ...m, "--permission-mode", "auto", prompt || "/autoclaude:resume"];
 }
+
+// cmdShimArg, cmdShimLine and spawnClaude live in proc.js (headless.js needs them too); they are
+// re-exported here for existing callers.
+export { cmdShimArg, cmdShimLine, spawnClaude };
 
 const ts = (iso) => { const t = iso ? Date.parse(iso) : NaN; return Number.isFinite(t) ? t : null; };
 const mins = (ms) => `${Math.round(ms / MIN)} min`;
@@ -146,7 +150,11 @@ export function queryAgentStatus(pid, env = process.env) {
   if (!pid) return null;
   const exe = claudeBinary(env);
   if (!exe) return null;
-  const r = spawnSync(exe, ["agents", "--json", "--all"], { env: childEnv(env), encoding: "utf8", timeout: 30000, windowsHide: true });
+  const args = ["agents", "--json", "--all"];
+  const opts = { env: childEnv(env), encoding: "utf8", timeout: 30000, windowsHide: true };
+  const r = isWindows && /\.(cmd|bat)$/i.test(exe)
+    ? spawnSync("cmd.exe", ["/d", "/s", "/c", cmdShimLine(exe, args)], { ...opts, windowsVerbatimArguments: true })
+    : spawnSync(exe, args, opts);
   if (r.status !== 0) return null;
   try {
     const list = JSON.parse(r.stdout);
@@ -215,7 +223,13 @@ export async function supervise({
     try { writeJsonAtomic(supFile, sup); savedSup = text; } catch {}
   };
 
-  const doSpawn = spawnChild || ((args, opts) => spawn(claudeBinary(env), args, { ...opts, stdio: "inherit" }));
+  const doSpawn = spawnChild || ((args, opts) => {
+    const exe = claudeBinary(env);
+    if (!exe) throw new Error("the claude CLI was not found; install Claude Code natively (https://claude.ai/install.ps1 on Windows)");
+    return spawnClaude(exe, args, { ...opts, stdio: "inherit" });
+  });
+  // Why the last launch could not start claude at all, for the stuck alert.
+  let spawnError = null;
   // A `--resume <id>` that dies within this long found no conversation to resume (for example a
   // start session that ended before it saved anything); the next relaunch then opens a fresh
   // session under a new id instead of failing the same way until the run pauses as stuck.
@@ -229,8 +243,10 @@ export async function supervise({
   // soon as the gate is gone, so the owner reviewing a pause sees the plan as it is.
   const undoCut = () => {
     try {
+      // Counted as out of time when the run is still running (the gate's next ready pauses the
+      // run the second time), not when the owner's pause ended it.
       const r = undoCutVerification(root, cfgNow(), { unlessGateRunning: true });
-      if (r) log(`the verification of ${r.step || "the last step"} was cut off with the session; its plan ticks and PROGRESS lines were taken out again`);
+      if (r) log(r.fixup ? `the fix-up checks of ${r.step || "the last step"} were cut off with the session` : `the verification of ${r.step || "the last step"} was cut off with the session; its plan ticks and PROGRESS lines were taken out again`);
     } catch (e) {
       appendLine(logFile, `${new Date(now()).toISOString()} could not undo a cut-off verification: ${e && e.message ? e.message : e}`);
     }
@@ -257,7 +273,19 @@ export async function supervise({
     resumeFailedFast = false;
     const resuming = args[0] === "--resume";
     log(`launching claude ${args.join(" ")}`);
-    child = doSpawn(args, { cwd: root, env: childEnv(env) });
+    // A spawn that throws (no claude, or one Node cannot start) is a session that exited at once:
+    // the poll relaunches it and, with no progress, pauses the run as stuck with this reason.
+    try {
+      child = doSpawn(args, { cwd: root, env: childEnv(env) });
+      spawnError = null;
+    } catch (e) {
+      child = null;
+      childAlive = false;
+      childStartedAt = now();
+      spawnError = e && e.message ? e.message : String(e);
+      log(`claude could not start: ${spawnError}`);
+      return;
+    }
     childAlive = true;
     const startedAt = childStartedAt = now();
     child.on("exit", (code) => {
@@ -363,14 +391,14 @@ export async function supervise({
       } else if (d.action === "pause-stuck") {
         updateState(root, (s) => { s.status = STATUS.paused; s.pauseReason = "stuck"; });
         lastStatus = STATUS.paused;
-        await notifyOwner({ title: `AutoClaude stuck on ${state.currentStep || "?"}`, message: `${d.reason}. The run is paused. Look at the ${title} window and .autoclaude/logs/supervisor.log, then \`autoclaude resume\`.`, priority: "high" });
+        await notifyOwner({ title: `AutoClaude stuck on ${state.currentStep || "?"}`, message: `${d.reason}.${spawnError ? ` claude could not start: ${spawnError}.` : ""} The run is paused. Look at the ${title} window and .autoclaude/logs/supervisor.log, then \`autoclaude resume\`.`, priority: "high" });
       } else if (d.action === "pause-weekly") {
         updateState(root, (s) => { s.status = STATUS.paused; s.pauseReason = "weekly-limit"; s.weeklyResetsAt = usage.sevenDay && usage.sevenDay.resetsAt ? new Date(usage.sevenDay.resetsAt).toISOString() : null; });
         lastStatus = STATUS.paused;
         await notifyOwner({ title: "AutoClaude paused: weekly usage limit", message: `${d.reason}. ${cfg.usage.autoResumeAfterWeeklyReset ? "It resumes after the reset." : "Resume with `autoclaude resume` when you want."}`, priority: "default" });
       } else if (d.action === "resume-weekly") {
         const project = { root, config: cfg };
-        resumeRun(project, loadState(root), { weeklyResetsAt: null });
+        resumeRun(project, loadState(root), { weeklyResetsAt: null }, { env });
         await notifyOwner({ title: "AutoClaude resumed after the weekly reset", message: `Continuing ${loadState(root).currentStep || "?"}.`, priority: "default" });
       } else if (d.action === "halt") {
         await stopChild();

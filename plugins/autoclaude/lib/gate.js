@@ -9,22 +9,30 @@
 // non-blocking findings a fix-up pass, then commits, tags and pushes. "step" verifies every step
 // the way 0.9 did. Either way the plan ticks and PROGRESS lines are written before the checks
 // and taken out again on a failure, so the tree that is verified is the tree that is committed.
+//
+// One stop has gate.timeoutSec, at most the hook's own timeout. The checks and the checkers run
+// against a deadline inside it; a verification that does not fit is "out of time", never the
+// builder's attempt, and pauses the run the second time. What a gate cut off by the hook leaves
+// behind is picked up by the next stop: a verification under way is undone (and counted), and a
+// verified commit under way (state.closing) or the end of the run (state.completing) is
+// finished.
 import fs from "node:fs";
 import path from "node:path";
+import crypto from "node:crypto";
 import { findProjectRoot, projectPaths, pluginRoot } from "./paths.js";
 import { isBuilderSession, liveSupervisorPid } from "./builder.js";
 import { loadState, saveState, updateState, STATUS } from "./state.js";
-import { loadConfig } from "./config.js";
+import { loadConfig, MAX_GATE_TIMEOUT_SEC } from "./config.js";
 import { parsePlan, stepById, nextStep, firstUnfinished, isPhaseEnd, isFeatureEnd, isFinished, setMarker, stepText, progress, planSlug, reopenUnverified, MARKERS } from "./plan.js";
 import { readText, writeFileAtomic, writeJsonAtomic, appendLine, ensureDir } from "./fsatomic.js";
-import { pendingVerifyFile, undoCutVerification } from "./resume.js";
+import { pendingVerifyFile, undoCutVerification, liveOtherGate, heldByLiveGate, phaseTag } from "./resume.js";
 import { readReady, clearReady, readBlocked, clearBlocked, readHeartbeat } from "./protocol.js";
 import { runChecks } from "./checks.js";
 import { writeReport, checkFailureSection, summarize, fence } from "./report.js";
 import { restartDevServer, stopDevServer } from "./devserver.js";
-import { runBrowserCheck } from "./tester.js";
+import { runBrowserCheck, browserTimeoutSec } from "./tester.js";
 import { runSecurityReview, securityWanted } from "./security.js";
-import { buildSummary } from "./summary.js";
+import { buildSummary, isOpenStatus } from "./summary.js";
 import * as git from "./git.js";
 import { notify } from "./notify.js";
 import { readUsage } from "./usage.js";
@@ -33,6 +41,16 @@ const MAX_REASON = 4000;
 // The informational alerts and whether each is on when notify.events does not say (D49).
 // lib/notify.js owns the real list; this is only the fallback for an older notify.js.
 const EVENT_DEFAULTS = Object.freeze({ featureVerified: true, stepVerified: false, runStarted: false, runResumed: false, pausedByOwner: false });
+// Seconds of a stop kept after the checkers, for the commit, the tag and the push.
+const RESERVE_SEC = 60;
+// A checker is not started with less of the gate's time than this for it.
+const MIN_CHECKER_MS = 60000;
+// The end of the run in a stop that already verified the last feature: the machine clean-up
+// starts only with this much left on top of the hand-back's share, the hand-back with its share.
+const FOOTPRINT_MIN_MS = 90000;
+const HANDBACK_MS = 45000;
+// The Docker bookkeeping after the checks is best effort and short.
+const NOTE_FOOTPRINT_MS = 30000;
 
 export function cliCommand(env = process.env) {
   // What the builder should type. Claude's Bash tool is Git Bash on Windows, which resolves the
@@ -76,19 +94,49 @@ export function notRunReason(result, config, cli = "autoclaude", step = null) {
   return why;
 }
 
+const BLOCKERS_HEADER = "# BLOCKERS\n\nFollow-ups the AutoClaude gate found that did not fail a step. One row each, appended; close a row by changing its status.\n\n| Date | Found by | Step | What | Owner | Status |\n|---|---|---|---|---|---|\n";
+const SECURITY_HEADER = "# SECURITY-FINDINGS\n\nFindings from the AutoClaude security reviewer that did not fail a step. One row each, appended; close a row by changing its status.\n\n| Date | Severity | File | Issue | Fix | Status |\n|---|---|---|---|---|---|\n";
+const cell = (s) => String(s || "").replace(/\r?\n/g, " ").replace(/\|/g, "\\|").trim();
+
 // Non-blocking security findings, one row each in the security findings file (the template's
-// table: Date | Severity | File | Issue | Fix | Status), committed with the step.
-function appendSecurityFindings(root, config, step, findings, date) {
-  const file = path.join(root, config.docs.security);
-  if (!fs.existsSync(file)) {
-    ensureDir(path.dirname(file));
-    fs.writeFileSync(file, "# SECURITY-FINDINGS\n\nFindings from the AutoClaude security reviewer that did not fail a step. One row each, appended; close a row by changing its status.\n\n| Date | Severity | File | Issue | Fix | Status |\n|---|---|---|---|---|---|\n");
-  }
-  const cell = (s) => String(s || "").replace(/\r?\n/g, " ").replace(/\|/g, "\\|").trim();
-  for (const f of findings) {
+// table: Date | Severity | File | Issue | Fix | Status).
+function securityRows(step, findings, date) {
+  return findings.map((f) => {
     const where = f.line ? `${f.file}:${f.line}` : f.file;
-    appendLine(file, `| ${date} | ${cell(f.severity)} | ${cell(where)} | ${cell(f.issue)} (found at ${step.id}) | ${cell(f.fix)} | open |`);
+    return `| ${date} | ${cell(f.severity)} | ${cell(where)} | ${cell(f.issue)} (found at ${step.id}) | ${cell(f.fix)} | open |`;
+  });
+}
+
+// Medium and low bugs, and possible weakened tests, from a passing browser check: one row each
+// in the blockers file (the template's table).
+function followUpRows(step, items, date) {
+  const part = (label, s) => (s ? `${label}${String(s).trim().replace(/[.\s]+$/, "")}` : null);
+  return items.map((b) => {
+    const what = [part(`${b.severity}: `, b.title), part("Actual: ", b.actual), part("Expected: ", b.expected), part("Repro: ", b.repro)].filter(Boolean).join(". ") + ".";
+    return `| ${date} | ${b.foundBy === "bugbash" ? "bug bash" : "browser tester"} | ${step.id} | ${cell(what)} | Claude | open |`;
+  });
+}
+
+// Files the findings rows of a passed verification, committed with it: docs is [{ file, header,
+// lines }]. They go into the verification's snapshot first, so a gate cut off from here on takes
+// them out with its ticks instead of filing them twice. Returns [{ file, text, created }].
+function fileRows(g, snap, docs) {
+  const entries = [];
+  for (const d of docs) {
+    if (!d.lines.length) continue;
+    const abs = path.join(g.root, d.file);
+    const cur = readText(abs, null);
+    const created = cur === null;
+    const lead = !created && cur && !cur.endsWith("\n") ? "\n" : "";
+    entries.push({ file: d.file, abs, created, text: (created ? d.header : lead) + d.lines.map((l) => `${l}\n`).join("") });
   }
+  if (!entries.length) return [];
+  writeJsonAtomic(pendingVerifyFile(g.root), { ...snap, rows: entries.map(({ file, text, created }) => ({ file, text, created })) });
+  for (const e of entries) {
+    ensureDir(path.dirname(e.abs));
+    fs.appendFileSync(e.abs, e.text);
+  }
+  return entries;
 }
 
 // Owner notes and an owner answer not yet passed to the builder in a gate message. The text goes
@@ -109,28 +157,13 @@ export function ownerInput(state, config) {
   return { text: parts.join("\n\n") + "\n\n", mark };
 }
 
-// Medium and low bugs, and possible weakened tests, from a passing browser check: one row each
-// in the blockers file (the template's table), committed with the step.
-function appendFollowUps(root, config, step, items, date) {
-  const file = path.join(root, config.docs.blockers);
-  if (!fs.existsSync(file)) {
-    ensureDir(path.dirname(file));
-    fs.writeFileSync(file, "# BLOCKERS\n\nFollow-ups the AutoClaude gate found that did not fail a step. One row each, appended; close a row by changing its status.\n\n| Date | Found by | Step | What | Owner | Status |\n|---|---|---|---|---|---|\n");
-  }
-  const cell = (s) => String(s || "").replace(/\r?\n/g, " ").replace(/\|/g, "\\|").trim();
-  const part = (label, s) => (s ? `${label}${String(s).trim().replace(/[.\s]+$/, "")}` : null);
-  for (const b of items) {
-    const what = [part(`${b.severity}: `, b.title), part("Actual: ", b.actual), part("Expected: ", b.expected), part("Repro: ", b.repro)].filter(Boolean).join(". ") + ".";
-    appendLine(file, `| ${date} | ${b.foundBy === "bugbash" ? "bug bash" : "browser tester"} | ${step.id} | ${cell(what)} | Claude | open |`);
-  }
-}
-
-// The fix-up list: every non-blocking finding of a verified feature, where it was filed.
-function fixupFindings(config, followUps, securityFindings) {
+// The fix-up list: every non-blocking finding of a verified feature, where it was filed, and
+// the row it was filed as (rows.followUps and rows.security, in the findings' order).
+function fixupFindings(config, followUps, securityFindings, rows = {}) {
   const cut = (s) => { const t = String(s || "").replace(/\s+/g, " ").trim(); return t.length > 200 ? t.slice(0, 197) + "..." : t; };
   return [
-    ...followUps.map((b) => ({ source: b.foundBy === "bugbash" ? "bug bash" : "browser tester", severity: b.severity || "low", text: cut(b.title || b.actual), doc: config.docs.blockers })),
-    ...securityFindings.map((f) => ({ source: "security review", severity: f.severity || "low", text: cut(`${f.line ? `${f.file}:${f.line}` : f.file || "?"}: ${f.issue}`), doc: config.docs.security }))
+    ...followUps.map((b, i) => ({ source: b.foundBy === "bugbash" ? "bug bash" : "browser tester", severity: b.severity || "low", text: cut(b.title || b.actual), doc: config.docs.blockers, row: (rows.followUps || [])[i] || null })),
+    ...securityFindings.map((f, i) => ({ source: "security review", severity: f.severity || "low", text: cut(`${f.line ? `${f.file}:${f.line}` : f.file || "?"}: ${f.issue}`), doc: config.docs.security, row: (rows.security || [])[i] || null }))
   ];
 }
 
@@ -139,6 +172,42 @@ function fixupText(g, fixup) {
   const n = fixup.findings.length;
   const list = fixup.findings.map((f, i) => `${i + 1}. [${f.source}, ${f.severity}] ${f.text} (${f.doc})`).join("\n");
   return `Phase ${fixup.phase} passed its verification, with ${n} non-blocking finding${n === 1 ? "" : "s"} to handle before the feature closes. For each one: fix it and set its row's Status to "fixed", or leave it for the owner: set its row's Status to "left for the owner: <why, and what fixing it would take>" (in ${config.docs.blockers} also set Owner to "owner"). Then run \`${cli} ready ${fixup.stepId}\`: the checks run once more and the feature closes. Do not start the next step yet.\n\nFindings:\n${list}`;
+}
+
+// A table row's cells, as written (an escaped \| stays inside its cell).
+function rowCells(line) {
+  return String(line).trim().replace(/^\|/, "").replace(/(?<!\\)\|\s*$/, "").split(/(?<!\\)\|/).map((c) => c.trim());
+}
+
+const HANDED_OVER = /^\s*left for (the )?owner\s*:\s*\S.{2,}/i;
+// The first four cells (date and what was found) identify a row; the builder changes only the
+// last ones (Owner, Status).
+const ROW_KEY_CELLS = 4;
+
+// The fix-up findings whose rows have no outcome yet: neither closed ("fixed") nor handed over
+// ("left for the owner: <why>"), or no longer in their file at all. Each gets `status` (the
+// row's status, null when the row is gone). A finding recorded without its row (a fix-up pass
+// from an older version) is not checked.
+export function openFixupFindings(root, findings) {
+  const docs = new Map();
+  const open = [];
+  for (const f of findings || []) {
+    if (!f || !f.row || !f.doc) continue;
+    if (!docs.has(f.doc)) docs.set(f.doc, { lines: (readText(path.join(root, f.doc), "") || "").split(/\r?\n/), used: new Set() });
+    const d = docs.get(f.doc);
+    const key = rowCells(f.row).slice(0, ROW_KEY_CELLS).join("\u0000");
+    let status = null;
+    for (let i = d.lines.length - 1; i >= 0; i--) {
+      if (d.used.has(i) || !/^\s*\|/.test(d.lines[i])) continue;
+      const cells = rowCells(d.lines[i]);
+      if (cells.slice(0, ROW_KEY_CELLS).join("\u0000") !== key) continue;
+      d.used.add(i);
+      status = cells[cells.length - 1] || "";
+      break;
+    }
+    if (status === null || (isOpenStatus(status) && !HANDED_OVER.test(status))) open.push({ ...f, status });
+  }
+  return open;
 }
 
 // Which Accept lines (and so which steps) a failed feature verification names: the tester's
@@ -234,20 +303,49 @@ function secs(ms) {
   return `${Math.round((Number(ms) || 0) / 1000)} s`;
 }
 
-// The plan and PROGRESS.md as they were before a verification wrote its ticks, with the ticks
-// and the lines it wrote (lib/resume.js pendingVerifyFile). Kept on disk while the checks run,
-// so a gate cut off by the hook's timeout, or ended with its session by `pause --now`, is undone
-// by the next gate, the supervisor or `autoclaude resume`, whichever comes first.
+// The plan and PROGRESS.md as they were before a verification wrote its ticks, with the ticks,
+// the lines and the findings rows it wrote (lib/resume.js pendingVerifyFile). Kept on disk while
+// the checks run, so a gate cut off by the hook's timeout, or ended with its session by `pause
+// --now`, is undone by the next gate, the supervisor or `autoclaude resume`, whichever comes
+// first. It goes only once the run state records the verification's outcome.
 function clearPending(root) {
   try { fs.rmSync(pendingVerifyFile(root), { force: true }); } catch {}
 }
 
-// Budget for one git call of a push: what is left of this stop's time (gate.timeoutSec, at most
-// the hook's own timeout) over the four network calls a push with its retry can make. A push
-// that outlives the hook would be killed with it.
+// What is left of this stop's time (gate.timeoutSec, at most the hook's own timeout), in ms.
+function timeLeft(g) {
+  return g.startedMs + g.config.gate.timeoutSec * 1000 - g.clock();
+}
+
+// Budget for one git call of a push: what is left of this stop's time over the four network
+// calls a push with its retry can make. A push that outlives the hook would be killed with it.
 function pushTimeoutMs(g) {
-  const left = g.startedMs + g.config.gate.timeoutSec * 1000 - Date.now() - 10000;
+  const left = timeLeft(g) - 10000;
   return Math.max(5000, Math.min(120000, Math.floor(left / 4)));
+}
+
+// Notes which new Docker objects tie to this project while they still exist (lib/footprint.js
+// noteFootprint), after each verification's checks, so the end of the run can tell the run's
+// objects from anyone else's. Best effort and short; never in the verification's way.
+async function noteFootprintNow(g) {
+  if (g.config.footprint && g.config.footprint.docker === false) return;
+  const note = "noteFootprint" in g.deps ? g.deps.noteFootprint : await lazyExport("./footprint.js", "noteFootprint");
+  if (!note) return;
+  try {
+    const r = await note(g.root, { config: g.config, deadline: Date.now() + Math.max(0, Math.min(NOTE_FOOTPRINT_MS, g.deadlineMs - g.clock())) });
+    if (r && r.ok === false && r.reason) logLine(g.root, `footprint note skipped: ${r.reason}`);
+  } catch (e) {
+    logLine(g.root, `footprint note failed: ${e && e.message ? e.message : e}`);
+  }
+}
+
+// Who closes a phase's feature (verifyAt "phase"), for the messages: "S1.3, the step that closes
+// the phase,". That is its last step not yet done or built (isFeatureEnd; session-context.js says
+// the same), which is not the phase's last once the owner has ticked that one.
+function closerText(parsed, phaseNum) {
+  const ph = parsed && parsed.phases ? parsed.phases.find((p) => p.num === phaseNum) : null;
+  const open = ph ? ph.steps.filter((s) => !isFinished(s)) : [];
+  return open.length ? `${open[open.length - 1].id}, the step that closes the phase,` : "the step that closes the phase";
 }
 
 // The commit a feature started from, when the state lost it (a restarted run) but the feature
@@ -326,6 +424,44 @@ function pushLine(config, ps) {
   return `Push: FAILED to ${ps.remote}: ${ps.error}${left ? `. Not pushed: ${left}` : ""}.`;
 }
 
+// What the owner can do about a verification that does not fit in one stop.
+function outOfTimeHelp(config) {
+  return `The checks and the checkers need longer than one stop allows: gate.timeoutSec is ${config.gate.timeoutSec} s, and it cannot go above the Stop hook's ${MAX_GATE_TIMEOUT_SEC} s. The feature is too big for one verification: split its phase into smaller ones, make the checks faster (and keep each check's timeoutSec well below gate.timeoutSec), or lower tester.maxTurns and tester.timeoutSec, or turn off bugBash.atPhaseEnd.`;
+}
+
+// The run pauses because a verification does not fit in one stop; resume clears the count.
+async function pauseOutOfTime(g, st, stepId, what, { report = null, outOfTime = null } = {}) {
+  const { root, config, cli, ev, events, say } = g;
+  const meanwhile = pausedMeanwhile(root);
+  save(g, { ...st, ...(outOfTime ? { outOfTime } : {}), status: STATUS.paused, pauseReason: "out-of-time", haltSession: meanwhile ? !!meanwhile.haltSession : !!st.haltSession });
+  stopDevServer({ root });
+  ev("paused", { reason: "out-of-time" });
+  logLine(root, `${stepId}: paused, out of time: ${what}`);
+  await say({ title: `AutoClaude paused: ${stepId} does not fit in one verification`, message: `${what}.\n${outOfTimeHelp(config)}${report ? `\nReport: ${report}` : ""}\nThen \`${cli} resume\`.`, priority: "high" });
+  return allow(events);
+}
+
+// A check or a checker stopped at the gate's deadline: not the builder's attempt. The first
+// time the builder readies again; the second time the run pauses, since the same verification
+// would run out of time the same way.
+async function ranOutOfTime(g, st, step, what, report) {
+  const { root, cli, ev, events } = g;
+  const n = ((st.outOfTime || {})[step.id] || 0) + 1;
+  const outOfTime = { ...(st.outOfTime || {}), [step.id]: n };
+  ev("out-of-time", { step: step.id, count: n, report });
+  logLine(root, `${step.id}: out of time (${n}): ${what} (${report})`);
+  if (n >= 2) return await pauseOutOfTime(g, st, step.id, what, { report, outOfTime });
+  const meanwhile = pausedMeanwhile(root);
+  if (meanwhile) {
+    save(g, { ...st, outOfTime, status: STATUS.paused, pauseReason: meanwhile.pauseReason || "review", haltSession: !!meanwhile.haltSession });
+    stopDevServer({ root });
+    ev("paused", { reason: "owner", during: "verification" });
+    return allow(events);
+  }
+  save(g, { ...st, outOfTime });
+  return block(`${what}. The gate's time ran out before the verification finished: that is not a failure of ${step.id}, and it did not count as an attempt. Run \`${cli} ready ${step.id}\` again; if it runs out of time again, the run pauses for the owner. Report: ${report}`, events);
+}
+
 export async function runGate(input, deps = {}) {
   const events = [];
   const ev = (type, detail = {}) => events.push({ type, ...detail });
@@ -374,12 +510,39 @@ export async function runGate(input, deps = {}) {
     return say(msg);
   };
   const loaded = { pauseRequested: !!state.pauseRequested, notes: (state.pendingNotes || []).map(noteKey) };
-  const g = { root, config, env, deps, cli, say, sayEvent, planFile, ev, events, startedMs: Date.now(), loaded };
+  // deps.clock (epoch ms) is the gate's clock for its time budget; deps.pid the process the
+  // verification snapshot names (tests).
+  const clock = deps.clock || Date.now;
+  const startedMs = clock();
+  const g = {
+    root, config, env, deps, cli, say, sayEvent, planFile, ev, events, loaded, clock, startedMs,
+    // The checks and the checkers run against this; the rest of the stop is for the commit,
+    // the tag and the push.
+    deadlineMs: startedMs + Math.max(120, config.gate.timeoutSec - RESERVE_SEC) * 1000,
+    pid: "pid" in deps ? deps.pid : process.pid
+  };
 
-  // A verification that was cut off (the hook's timeout, a crash): its ticks and PROGRESS lines
-  // come out first.
-  const interrupted = undoCutVerification(root, config);
-  if (interrupted) { ev("verify-interrupted", { step: interrupted.step }); logLine(root, `the verification of ${interrupted.step} was cut off; its plan ticks and PROGRESS lines were undone`); }
+  // Another session's gate is at work in this project (a second session in a run started by
+  // hand, or a gate left behind by a halt on Linux or macOS): this one stands down and touches
+  // neither that verification nor the plan.
+  if (liveOtherGate(root, config, g.pid)) {
+    ev("gate-busy");
+    logLine(root, "another gate is at work in this project; this stop is allowed without a verification");
+    return allow(events);
+  }
+
+  // A verification that was cut off (the hook's timeout, a crash): its ticks, PROGRESS lines and
+  // findings rows come out first, and it counts as one that ran out of time.
+  const interrupted = undoCutVerification(root, config, { self: g.pid });
+  if (interrupted) {
+    const what = interrupted.fixup ? `the fix-up checks of ${interrupted.step} were cut off` : `the verification of ${interrupted.step} was cut off`;
+    ev("verify-interrupted", { step: interrupted.step, count: interrupted.count });
+    logLine(root, `${what}${interrupted.fixup ? "" : "; its plan ticks, PROGRESS lines and findings rows were undone"}${interrupted.count ? ` (out of time ${interrupted.count})` : ""}`);
+    state.outOfTime = loadState(root).outOfTime;
+    if (interrupted.step && interrupted.count >= 2) {
+      return await pauseOutOfTime(g, state, interrupted.step, `The ${interrupted.fixup ? "fix-up checks" : "verification"} of ${interrupted.step} ${interrupted.fixup ? "were" : "was"} cut off ${interrupted.count} times by the Stop hook's timeout before ${interrupted.fixup ? "they" : "it"} finished`);
+    }
+  }
 
   let planText = readText(planFile, null);
   if (planText === null) { ev("no-plan"); logLine(root, "plan file missing, allowing stop"); return allow(events); }
@@ -395,6 +558,21 @@ export async function runGate(input, deps = {}) {
     ev("integrity-reverted", { ids: rogue.map((s) => s.id) });
     logLine(root, `integrity: reverted ${rogue.map((s) => s.id).join(", ")}`);
     return block(`Only the gate ticks boxes in ${config.plan}. I reverted ${rogue.map((s) => s.id).join(", ")} to [ ]. Do not edit ${config.plan}. When ${state.currentStep} is done, run \`${cli} ready ${state.currentStep}\`.`, events);
+  }
+
+  // A verified step or feature whose gate was cut off before its commit was recorded: finished
+  // now, not verified again.
+  if (state.closing && state.closing.stepId) {
+    const r = await resumeClose(g, state, parsed);
+    if (r) return r;
+  }
+  // The end of the run, cut off or out of time in an earlier stop: finished now.
+  if (state.completing) {
+    if (!firstUnfinished(parsed)) return await complete(g, state, parsed);
+    updateState(root, (s) => { s.completing = null; });
+    state.completing = null;
+    ev("complete-dropped");
+    logLine(root, "the end of the run was not finished, and the plan has unfinished steps again; carrying on with them");
   }
 
   // A feature in its fix-up pass stays on its closing step, which is already ticked.
@@ -467,9 +645,13 @@ export async function runGate(input, deps = {}) {
 
   // Ready.
   clearReady(root);
-  if (fixup) return await fixupReady(g, state, step, parsed);
   const perFeature = verifyMode(config) === "phase";
-  if (perFeature && !isFeatureEnd(parsed, step.id)) return await builtStep(g, state, step, parsed, planText);
+  if (!fixup && perFeature && !isFeatureEnd(parsed, step.id)) return await builtStep(g, state, step, parsed, planText);
+  // A verification that ran out of time twice (counted by whoever undid the cut-off ones, the
+  // supervisor included) is not started a third time.
+  const timesOut = (state.outOfTime || {})[step.id] || 0;
+  if (timesOut >= 2) return await pauseOutOfTime(g, state, step.id, `The verification of ${step.id} ran out of time ${timesOut} times before it finished`);
+  if (fixup) return await fixupReady(g, state, step, parsed);
   return await verify(g, state, step, parsed, planText, perFeature);
 }
 
@@ -494,10 +676,11 @@ async function builtStep(g, state, step, parsed, planText) {
   appendLine(path.join(root, config.docs.progress), `- ${nowIso(deps).slice(0, 10)} ${step.id} ${step.title} (built; verified with Phase ${phase.num})`);
   let sha = null;
   let commitError = null;
+  let message = null;
   if (config.git.commitEachStep) {
-    const message = await commitMessage(g, {
+    message = await commitMessage(g, {
       subject: `autoclaude(${step.id}): ${step.title}`,
-      lead: `Built, not verified yet: ${step.id} is verified with Phase ${phase.num} (${phase.title}), all of it at once, when the phase's last step is ready.`,
+      lead: `Built, not verified yet: ${step.id} is verified with Phase ${phase.num} (${phase.title}), all of it at once, when ${closerText(tparsed, phase.num)} is ready.`,
       steps: [step]
     });
     const c = await git.commitAll(root, message, { env });
@@ -511,19 +694,21 @@ async function builtStep(g, state, step, parsed, planText) {
     pendingNotes: (st.pendingNotes || []).filter((n) => !n.delivered), ownerAnswer: null
   };
   const next = nextStep(tparsed);
-  if (commitError) return await commitFailed(g, base, step, next, commitError);
+  if (commitError) return await commitFailed(g, base, step, next, commitError, message);
   if (next) await g.sayEvent("stepVerified", { title: `AutoClaude: ${step.id} built`, message: `${step.id} ${step.title} is built and committed; its verification comes with Phase ${phase.num} (${phase.title}). Next: ${next.id} ${next.title}.`, priority: "low" });
   return await advance(g, base, { step, parsed: tparsed, next, sha, phaseEnd: false, closedFeature: false, built: true });
 }
 
-// The dev server (when anything needs it) and the configured checks, in order.
-// Returns { failure, failedCheck, sections, timings, devServerReady }.
+// The dev server (when anything needs it) and the configured checks, in order, each capped by
+// the gate's deadline. Returns { failure, failedCheck, outOfTime, sections, timings,
+// devServerReady }; outOfTime is true when a check was stopped (or not started) by the deadline.
 async function runCheckStage(g, { step, browserWanted }) {
   const { root, config, env, deps, cli } = g;
   const sections = [];
   const timings = [];
   let failure = null;
   let failedCheck = null;
+  let outOfTime = false;
   const restart = deps.restartDevServer || restartDevServer;
   const needsServer = config.checks.some((c) => c.needsDevServer) || browserWanted;
   let devServerReady = false;
@@ -538,12 +723,12 @@ async function runCheckStage(g, { step, browserWanted }) {
     }
   }
   if (!failure) {
-    const checkResults = await runChecks(config.checks, { cwd: root, env, devServerReady });
+    const checkResults = await runChecks(config.checks, { cwd: root, env, devServerReady, deadlineMs: g.deadlineMs, now: g.clock });
     for (const r of checkResults.results) {
       const passed = r.code === 0 && !r.timedOut;
       if (r.ran) {
-        sections.push({ title: `Check "${r.name}": ${passed ? "passed" : "FAILED"}`, body: `\`${r.command}\` in ${Math.round(r.durationMs / 1000)} s${passed ? "" : `\n\n${checkFailureSection(r).body}`}` });
-        timings.push({ name: r.name, status: passed ? "passed" : "FAILED", ms: r.durationMs });
+        sections.push({ title: `Check "${r.name}": ${passed ? "passed" : r.outOfTime ? "OUT OF TIME" : "FAILED"}`, body: `\`${r.command}\` in ${Math.round(r.durationMs / 1000)} s${passed ? "" : `\n\n${checkFailureSection(r).body}`}` });
+        timings.push({ name: r.name, status: passed ? "passed" : r.outOfTime ? "out of time" : "FAILED", ms: r.durationMs });
       } else if (!r.skipped) {
         sections.push({ title: `Check "${r.name}": NOT RUN`, body: `\`${r.command}\` did not run: ${notRunReason(r, config, cli, step)}.` });
       }
@@ -551,10 +736,11 @@ async function runCheckStage(g, { step, browserWanted }) {
     const f = checkResults.failed;
     if (f) {
       failedCheck = f;
-      failure = f.ran ? `check "${f.name}" failed` : `check "${f.name}" did not run: ${notRunReason(f, config, cli, step)}`;
+      outOfTime = !!f.outOfTime;
+      failure = f.outOfTime ? `check "${f.name}" ran out of the gate's time: ${f.reason}` : f.ran ? `check "${f.name}" failed` : `check "${f.name}" did not run: ${notRunReason(f, config, cli, step)}`;
     }
   }
-  return { failure, failedCheck, sections, timings, devServerReady };
+  return { failure, failedCheck, outOfTime, sections, timings, devServerReady };
 }
 
 // The full verification of a step ("step" mode) or of the whole phase it closes (feature).
@@ -573,32 +759,82 @@ async function verify(g, state, step, parsed, planText, feature) {
   logLine(root, `verifying ${feature && phase ? `${label} at ${step.id}` : step.id} attempt ${attempt}`);
 
   // Ticks and PROGRESS lines first, so the checks see exactly what the commit will hold. The
-  // snapshot names both, so they come out on a failure, or later if this gate is cut off,
-  // without touching anything else.
+  // snapshot names both (and later the findings rows), so they come out on a failure, or later
+  // if this gate is cut off, without touching anything else.
   const progressFile = path.join(root, config.docs.progress);
   const date = nowIso(deps).slice(0, 10);
   const added = toTick.map((id) => { const s = stepById(parsed, id); return `- ${date} ${s.id} ${s.title} (attempt ${attempt})\n`; }).join("");
-  writeJsonAtomic(pendingVerifyFile(root), { step: step.id, plan: planText, progress: readText(progressFile, null), ticked: toTick, added });
+  const snap = { id: crypto.randomUUID(), step: step.id, pid: g.pid, at: new Date().toISOString(), plan: planText, progress: readText(progressFile, null), ticked: toTick, added };
+  writeJsonAtomic(pendingVerifyFile(root), snap);
   let ticked = planText;
   for (const id of toTick) ticked = setMarker(ticked, id, MARKERS.done);
   writeFileAtomic(planFile, ticked);
   if (added) appendLine(progressFile, added);
-  const restore = () => undoCutVerification(root, config);
+  const restore = () => undoCutVerification(root, config, { own: true });
   const tparsed = parsePlan(ticked);
   const tstep = stepById(tparsed, step.id);
   const scope = scopeIds.map((id) => stepById(tparsed, id));
 
   // Which browser checks this verification needs (Phase 4). The tester skips `no-ui` steps; the
   // bug bash runs when a phase closes and the phase has any UI step at all.
-  const deadlineMs = Date.now() + Math.max(120, config.gate.timeoutSec - 60) * 1000;
   const runBrowser = "runTester" in deps ? deps.runTester : runBrowserCheck;
   const uiSteps = scope.filter((s) => !s.tags.includes("no-ui"));
   const phaseEnd = feature || isPhaseEnd(tparsed, step.id);
   const testerWanted = !!(runBrowser && config.tester.enabled && uiSteps.length);
   const bugBashWanted = !!(runBrowser && config.bugBash.atPhaseEnd && tstep.phase && phaseEnd && tstep.phase.steps.some((s) => !s.tags.includes("no-ui")));
   const stage = await runCheckStage(g, { step: tstep, browserWanted: testerWanted || bugBashWanted });
+  await noteFootprintNow(g);
   const { sections, timings } = stage;
   let failure = stage.failure;
+
+  // Out of the gate's time: nothing is taken as the builder's fault, and the ticks come out.
+  const outOfTime = async (what) => {
+    const n = ((st.outOfTime || {})[step.id] || 0) + 1;
+    const report = writeReport({ root, step: step.id, attempt: `${attempt}-time${n}`, title: `AutoClaude report: ${label}, verified at ${step.id}, ran out of time`, sections });
+    restore();
+    return await ranOutOfTime(g, st, step, what, report.relPath);
+  };
+
+  // A failed attempt: the ticks, PROGRESS lines and any findings rows come out again.
+  const fail = async (failure, failureKind, failedCheck) => {
+    restore();
+    const accepts = feature ? failingAcceptLines(scope, sections, failedCheck) : [];
+    if (accepts.length) sections.unshift({ title: "Failing Accept lines", body: accepts.map((a) => `- ${a.step}: ${a.accept}`).join("\n") });
+    const report = writeReport({ root, step: step.id, attempt, title: `AutoClaude report: ${feature && phase ? `${label}, verified at ${step.id},` : step.id} attempt ${attempt}`, sections });
+    const attempts = { ...st.attempts, [step.id]: attempt };
+    // The verification finished, so it fitted in the stop.
+    const outOfTimeCounts = { ...(st.outOfTime || {}), [step.id]: 0 };
+    ev("failed", { step: step.id, attempt, failure, report: report.relPath, ...(feature ? { accept: accepts } : {}) });
+    logLine(root, `${feature && phase ? `${label} at ${step.id}` : step.id} attempt ${attempt} failed: ${failure} (${report.relPath})`);
+    if (attempt >= max) {
+      // The plan as it is now, not as this gate read it: the owner may have edited it while the
+      // checks ran (a `pause --now`, then a new step or a reworded Accept line).
+      try { writeFileAtomic(planFile, setMarker(readText(planFile, planText), step.id, MARKERS.failed)); } catch (e) { logLine(root, `could not mark ${step.id} [!]: ${e && e.message ? e.message : e}`); }
+      const reason = failureKind === "security" ? "security" : "step-failed";
+      save(g, { ...st, attempts, outOfTime: outOfTimeCounts, status: STATUS.paused, pauseReason: reason });
+      stopDevServer({ root });
+      ev("paused", { reason });
+      await say({ title: `AutoClaude paused: ${feature && phase ? `Phase ${phase.num}, verified at ${step.id},` : step.id} failed ${attempt} times`, message: `${failure}\nReport: ${report.relPath}\nFix it or adjust the plan, then \`${cli} resume\`.`, priority: "high" });
+      return allow(events);
+    }
+    const meanwhile = pausedMeanwhile(root);
+    if (meanwhile) {
+      save(g, { ...st, attempts, outOfTime: outOfTimeCounts, status: STATUS.paused, pauseReason: meanwhile.pauseReason || "review", haltSession: !!meanwhile.haltSession });
+      stopDevServer({ root });
+      ev("paused", { reason: "owner", during: "verification" });
+      return allow(events);
+    }
+    const owner = ownerInput(st, config);
+    save(g, owner.mark({ ...st, attempts, outOfTime: outOfTimeCounts }));
+    const failingSections = sections.filter((s) => /FAILED|failed|NOT RUN|Failing Accept/.test(s.title));
+    const owners = [...new Set(accepts.map((a) => a.step))];
+    const headline = feature && phase
+      ? `${label}, verified at ${step.id}, attempt ${attempt}/${max} failed: ${failure}.${owners.length ? ` The failing Accept lines belong to ${owners.join(", ")}.` : ""} Fix the causes, then run \`${cli} ready ${step.id}\` again.`
+      : `${step.id} attempt ${attempt}/${max} failed: ${failure}. Fix the causes, then run \`${cli} ready ${step.id}\` again.`;
+    return block(owner.text + summarize({ headline, sections: failingSections, reportPath: report.relPath, maxChars: MAX_REASON - owner.text.length }), events);
+  };
+
+  if (stage.outOfTime) return await outOfTime(`The verification of ${label} ran out of time: ${failure}`);
 
   const followUps = [];
   if (!failure && (testerWanted || bugBashWanted) && !stage.devServerReady) {
@@ -609,27 +845,42 @@ async function verify(g, state, step, parsed, planText, feature) {
   }
   // The independent checkers, in order: browser tester, bug bash (both need the dev server),
   // then the security reviewer (P5.4, needs only the diff). Same rules for all three: a failure
-  // counts as an attempt; a checker that cannot run never does, and pauses the second time.
-  // For a feature the tester gets every UI step of the phase, one criterion per Accept line.
+  // counts as an attempt; a checker that cannot run never does, and pauses the second time; one
+  // that runs out of the gate's time is out of time. For a feature the tester gets every UI step
+  // of the phase, one criterion per Accept line. ownSec is each one's own timeout.
   const checkers = [];
   if (!failure && stage.devServerReady) {
-    if (testerWanted) checkers.push({ kind: "tester", label: "browser tester", run: () => runBrowser({ kind: "tester", root, config, step: tstep, ...(feature ? { steps: uiSteps } : {}), parsed: tparsed, state: st, env, attempt, deadlineMs }) });
-    if (bugBashWanted) checkers.push({ kind: "bugbash", label: "bug bash", run: () => runBrowser({ kind: "bugbash", root, config, step: tstep, parsed: tparsed, state: st, env, attempt, deadlineMs }) });
+    if (testerWanted) checkers.push({ kind: "tester", label: "browser tester", ownSec: browserTimeoutSec("tester", config, feature ? { steps: uiSteps } : { step: tstep }), run: (deadlineMs) => runBrowser({ kind: "tester", root, config, step: tstep, ...(feature ? { steps: uiSteps } : {}), parsed: tparsed, state: st, env, attempt, deadlineMs }) });
+    if (bugBashWanted) checkers.push({ kind: "bugbash", label: "bug bash", ownSec: browserTimeoutSec("bugbash", config, { step: tstep }), run: (deadlineMs) => runBrowser({ kind: "bugbash", root, config, step: tstep, parsed: tparsed, state: st, env, attempt, deadlineMs }) });
   }
   // The security review of a feature reads its whole diff, from state.phaseBaseCommit.
   const runSecurity = "runSecurity" in deps ? deps.runSecurity : runSecurityReview;
   const securityOn = feature ? scope.some((s) => securityWanted(config, s, tparsed)) : securityWanted(config, tstep, tparsed);
   if (!failure && runSecurity && securityOn) {
-    checkers.push({ kind: "security", label: "security review", run: () => runSecurity({ root, config, step: tstep, ...(feature ? { steps: scope } : {}), parsed: tparsed, state: st, env, attempt, deadlineMs }) });
+    checkers.push({ kind: "security", label: "security review", ownSec: config.security.timeoutSec, run: (deadlineMs) => runSecurity({ root, config, step: tstep, ...(feature ? { steps: scope } : {}), parsed: tparsed, state: st, env, attempt, deadlineMs }) });
   }
   const securityFindings = [];
   let failureKind = failure ? "checks" : null;
-  for (const c of checkers) {
+  for (let i = 0; i < checkers.length; i++) {
+    const c = checkers[i];
+    // The checkers share what is left of the gate's time. Each may use all of it but a reserve
+    // for every checker after it, half of that one's fair share (in proportion to the checkers'
+    // own timeouts). What one leaves unused goes to the next, and none is starved by those
+    // before it (seen in review: a long tester left the security review 30 s, and the run
+    // paused blaming this machine).
+    const left = g.deadlineMs - g.clock();
+    const total = checkers.slice(i).reduce((n, x) => n + x.ownSec, 0) || 1;
+    const reserve = checkers.slice(i + 1).reduce((n, x) => n + (left * x.ownSec) / total / 2, 0);
+    const allowMs = Math.floor(left - reserve);
     const t0 = Date.now();
-    const r = await c.run();
-    timings.push({ name: c.label, status: r.status === "passed" ? "passed" : r.status === "infra" ? "could not run" : "FAILED", ms: Date.now() - t0 });
+    const leftSec = Math.max(0, Math.round(allowMs / 1000));
+    const r = allowMs < MIN_CHECKER_MS
+      ? { status: "out-of-time", failed: `the ${c.label} had ${leftSec} s of the gate's time left, too little to start it`, sections: [{ title: `The ${c.label}: out of time`, body: `Not started: ${leftSec} s of the gate's time was left for it.` }] }
+      : await c.run(g.clock() + allowMs);
+    timings.push({ name: c.label, status: r.status === "passed" ? "passed" : r.status === "infra" ? "could not run" : r.status === "out-of-time" ? "out of time" : "FAILED", ms: Date.now() - t0 });
     ev(c.kind, { status: r.status, verdictFile: r.verdictFile });
     sections.push(...(r.sections || []));
+    if (r.status === "out-of-time") return await outOfTime(`The verification of ${label} ran out of time: ${r.failed}`);
     if (r.status === "infra") {
       // The checker could not run: a machine problem, never the builder's attempt (P4.2).
       restore();
@@ -662,88 +913,80 @@ async function verify(g, state, step, parsed, planText, feature) {
     if (r.status === "failed") { failure = r.failed; failureKind = c.kind; break; }
   }
 
-  if (failure) {
-    restore();
-    const accepts = feature ? failingAcceptLines(scope, sections, stage.failedCheck) : [];
-    if (accepts.length) sections.unshift({ title: "Failing Accept lines", body: accepts.map((a) => `- ${a.step}: ${a.accept}`).join("\n") });
-    const report = writeReport({ root, step: step.id, attempt, title: `AutoClaude report: ${feature && phase ? `${label}, verified at ${step.id},` : step.id} attempt ${attempt}`, sections });
-    const attempts = { ...st.attempts, [step.id]: attempt };
-    ev("failed", { step: step.id, attempt, failure, report: report.relPath, ...(feature ? { accept: accepts } : {}) });
-    logLine(root, `${feature && phase ? `${label} at ${step.id}` : step.id} attempt ${attempt} failed: ${failure} (${report.relPath})`);
-    if (attempt >= max) {
-      writeFileAtomic(planFile, setMarker(planText, step.id, MARKERS.failed));
-      const reason = failureKind === "security" ? "security" : "step-failed";
-      save(g, { ...st, attempts, status: STATUS.paused, pauseReason: reason });
-      stopDevServer({ root });
-      ev("paused", { reason });
-      await say({ title: `AutoClaude paused: ${feature && phase ? `Phase ${phase.num}, verified at ${step.id},` : step.id} failed ${attempt} times`, message: `${failure}\nReport: ${report.relPath}\nFix it or adjust the plan, then \`${cli} resume\`.`, priority: "high" });
-      return allow(events);
-    }
-    const meanwhile = pausedMeanwhile(root);
-    if (meanwhile) {
-      save(g, { ...st, attempts, status: STATUS.paused, pauseReason: meanwhile.pauseReason || "review", haltSession: !!meanwhile.haltSession });
-      stopDevServer({ root });
-      ev("paused", { reason: "owner", during: "verification" });
-      return allow(events);
-    }
-    const owner = ownerInput(st, config);
-    save(g, owner.mark({ ...st, attempts }));
-    const failingSections = sections.filter((s) => /FAILED|failed|NOT RUN|Failing Accept/.test(s.title));
-    const owners = [...new Set(accepts.map((a) => a.step))];
-    const headline = feature && phase
-      ? `${label}, verified at ${step.id}, attempt ${attempt}/${max} failed: ${failure}.${owners.length ? ` The failing Accept lines belong to ${owners.join(", ")}.` : ""} Fix the causes, then run \`${cli} ready ${step.id}\` again.`
-      : `${step.id} attempt ${attempt}/${max} failed: ${failure}. Fix the causes, then run \`${cli} ready ${step.id}\` again.`;
-    return block(owner.text + summarize({ headline, sections: failingSections, reportPath: report.relPath, maxChars: MAX_REASON - owner.text.length }), events);
-  }
+  if (failure) return await fail(failure, failureKind, stage.failedCheck);
 
-  // Pass. The ticks stay; the findings are filed next to them.
-  clearPending(root);
-  if (followUps.length) appendFollowUps(root, config, step, followUps, date);
-  if (securityFindings.length) appendSecurityFindings(root, config, step, securityFindings, date);
+  // Pass. The findings are filed next to the ticks.
+  const fRows = followUpRows(step, followUps, date);
+  const sRows = securityRows(step, securityFindings, date);
+  const filed = fileRows(g, snap, [{ file: config.docs.blockers, header: BLOCKERS_HEADER, lines: fRows }, { file: config.docs.security, header: SECURITY_HEADER, lines: sRows }]);
+  // Per step, the rows go into this step's commit, so the checks run once more with them in the
+  // tree: the verified commit is a tree the checks passed on (per feature, the fix-up pass runs
+  // them again).
+  if (!feature && filed.length) {
+    const docs = filed.map((e) => e.file).join(" and ");
+    const again = await runCheckStage(g, { step: tstep, browserWanted: false });
+    sections.push(...again.sections.map((s) => ({ ...s, title: `${s.title} (with the findings filed)` })));
+    timings.push(...again.timings.map((t) => ({ ...t, name: `${t.name} (with the findings filed)` })));
+    if (again.outOfTime) return await outOfTime(`The verification of ${label} ran out of time: ${again.failure}`);
+    if (again.failure) return await fail(`${again.failure} once the findings were filed in ${docs}`, "checks", again.failedCheck);
+  }
   const report = writeReport({ root, step: step.id, attempt, title: `AutoClaude report: ${feature && phase ? `${label}, verified at ${step.id},` : step.id} attempt ${attempt} passed`, sections });
   const tickedIds = [...new Set([...(st.tickedByGate || []), ...toTick])];
-  const findings = fixupFindings(config, followUps, securityFindings);
+  const findings = fixupFindings(config, followUps, securityFindings, { followUps: fRows, security: sRows });
   if (feature && findings.length) {
     // The fix-up pass (D49): the builder fixes or hands over each finding, then the checks run
-    // once more before the feature is committed.
-    const fixup = { phase: phase ? phase.num : null, stepId: step.id, findings, attempt, report: report.relPath, checks: timings, at: nowIso(deps) };
-    const next = { ...st, tickedByGate: tickedIds, fixup, attempts: { ...st.attempts, [step.id]: 0 }, infraFailures: { ...(st.infraFailures || {}), [step.id]: 0 }, noProgress: 0 };
+    // once more before the feature is committed. The state records the pass (with the
+    // snapshot's id) before the snapshot goes.
+    const fixup = { phase: phase ? phase.num : null, stepId: step.id, findings, attempt, report: report.relPath, checks: timings, at: nowIso(deps), verifyId: snap.id };
+    const next = { ...st, tickedByGate: tickedIds, fixup, attempts: { ...st.attempts, [step.id]: 0 }, infraFailures: { ...(st.infraFailures || {}), [step.id]: 0 }, outOfTime: { ...(st.outOfTime || {}), [step.id]: 0 }, noProgress: 0 };
     ev("fixup", { step: step.id, findings: findings.length, report: report.relPath });
     logLine(root, `${label} verified at ${step.id} with ${findings.length} non-blocking finding(s); fix-up pass before it closes`);
     const meanwhile = pausedMeanwhile(root);
     if (meanwhile) {
       save(g, { ...next, status: STATUS.paused, pauseReason: meanwhile.pauseReason || "review", haltSession: !!meanwhile.haltSession });
+      clearPending(root);
       stopDevServer({ root });
       ev("paused", { reason: "owner", during: "verification" });
       return allow(events);
     }
     const owner = ownerInput(next, config);
     save(g, owner.mark({ ...next, toolCallsAtLastGate: readHeartbeat(root).count }));
+    clearPending(root);
     return block(`${owner.text}${fixupText(g, fixup)}`, events);
   }
-  return await close(g, { ...st, tickedByGate: tickedIds }, { step: tstep, parsed: tparsed, scope, attempt, timings, findings: findings.length, report: report.relPath, feature, phaseEnd });
+  // The outcome is recorded (the ticks, and the commit to make) before the snapshot goes: a gate
+  // cut off from here on, in a slow pre-commit hook, the tag or the push, leaves ticks the next
+  // stop accepts and a commit it finishes, never ticks it reverts or a feature verified twice.
+  const closing = {
+    verifyId: snap.id, stepId: step.id, scope: scopeIds, attempt, timings, findings: findings.length, report: report.relPath,
+    feature, phaseEnd, fixupDone: false, headBefore: config.git.commitEachStep ? await git.head(root, { env }) : null, pid: g.pid, at: new Date().toISOString()
+  };
+  updateState(root, (s) => { s.tickedByGate = [...new Set([...(s.tickedByGate || []), ...toTick])]; s.closing = closing; });
+  clearPending(root);
+  return await close(g, { ...st, tickedByGate: tickedIds, closing }, { step: tstep, parsed: tparsed, scope, closing });
 }
 
-// The ready after a fix-up pass: the checks only (the ticks and PROGRESS lines are already
-// written), then the feature closes.
+// The ready after a fix-up pass: every finding has an outcome, then the checks only (the ticks
+// and PROGRESS lines are already written), then the feature closes.
 async function fixupReady(g, state, step, parsed) {
   const { root, config, cli, ev, events, say } = g;
   const fixup = state.fixup;
   const attempt = (state.attempts[step.id] || 0) + 1;
   const max = config.retries.maxAttemptsPerStep;
-  ev("verify", { step: step.id, attempt, fixup: true });
-  logLine(root, `fix-up checks for Phase ${fixup.phase} at ${step.id}, attempt ${attempt}`);
-  const stage = await runCheckStage(g, { step, browserWanted: false });
-  if (stage.failure) {
-    const report = writeReport({ root, step: `${step.id}-fixup`, attempt, title: `AutoClaude report: the fix-up checks of Phase ${fixup.phase}, attempt ${attempt}`, sections: stage.sections });
+  // Each finding fixed, or left for the owner with a reason (D49). A ready without that is an
+  // attempt, so a pass that never records them cannot loop.
+  const open = openFixupFindings(root, fixup.findings);
+  if (open.length) {
     const attempts = { ...state.attempts, [step.id]: attempt };
-    ev("failed", { step: step.id, attempt, failure: stage.failure, report: report.relPath, fixup: true });
-    logLine(root, `fix-up checks of Phase ${fixup.phase} attempt ${attempt} failed: ${stage.failure} (${report.relPath})`);
+    const n = open.length;
+    const list = open.map((f, i) => `${i + 1}. [${f.source}, ${f.severity}] ${f.text} (${f.doc}): ${f.status === null ? "its row is no longer in the file" : `status "${f.status}"`}`).join("\n");
+    ev("fixup-open", { step: step.id, open: n, attempt });
+    logLine(root, `fix-up pass of Phase ${fixup.phase} at ${step.id}, attempt ${attempt}: ${n} finding(s) without an outcome`);
     if (attempt >= max) {
       save(g, { ...state, attempts, status: STATUS.paused, pauseReason: "step-failed" });
       stopDevServer({ root });
       ev("paused", { reason: "step-failed", fixup: true });
-      await say({ title: `AutoClaude paused: the fix-up checks of Phase ${fixup.phase} failed ${attempt} times`, message: `${stage.failure}\nReport: ${report.relPath}\nThe feature passed its verification; its fix-up pass broke a check. Fix it, then \`${cli} resume\` (the run resumes in the fix-up pass).`, priority: "high" });
+      await say({ title: `AutoClaude paused: the fix-up pass of Phase ${fixup.phase} left findings open ${attempt} times`, message: `${n} finding${n === 1 ? "" : "s"} still ha${n === 1 ? "s" : "ve"} no outcome:\n${list}\nSet each row's Status to "fixed" or "left for the owner: <why>", then \`${cli} resume\` (the run resumes in the fix-up pass).`, priority: "high" });
       return allow(events);
     }
     const meanwhile = pausedMeanwhile(root);
@@ -755,45 +998,143 @@ async function fixupReady(g, state, step, parsed) {
     }
     const owner = ownerInput(state, config);
     save(g, owner.mark({ ...state, attempts }));
+    return block(`${owner.text}The fix-up pass of Phase ${fixup.phase} is not finished (attempt ${attempt}/${max}): ${n} finding${n === 1 ? " still has" : "s still have"} no outcome. For each one, fix it and set its row's Status to "fixed", or set it to "left for the owner: <why, and what fixing it would take>". Then run \`${cli} ready ${step.id}\` again.\n\n${list}`, events);
+  }
+  ev("verify", { step: step.id, attempt, fixup: true });
+  logLine(root, `fix-up checks for Phase ${fixup.phase} at ${step.id}, attempt ${attempt}`);
+  // Nothing to undo, but a pass cut off by the hook's timeout counts like a verification.
+  writeJsonAtomic(pendingVerifyFile(root), { id: crypto.randomUUID(), step: step.id, fixup: true, pid: g.pid, at: new Date().toISOString(), ticked: [] });
+  const stage = await runCheckStage(g, { step, browserWanted: false });
+  await noteFootprintNow(g);
+  if (stage.outOfTime) {
+    const n = ((state.outOfTime || {})[step.id] || 0) + 1;
+    const report = writeReport({ root, step: `${step.id}-fixup`, attempt: `${attempt}-time${n}`, title: `AutoClaude report: the fix-up checks of Phase ${fixup.phase} ran out of time`, sections: stage.sections });
+    clearPending(root);
+    return await ranOutOfTime(g, state, step, `The fix-up checks of Phase ${fixup.phase} ran out of time: ${stage.failure}`, report.relPath);
+  }
+  if (stage.failure) {
+    clearPending(root);
+    const report = writeReport({ root, step: `${step.id}-fixup`, attempt, title: `AutoClaude report: the fix-up checks of Phase ${fixup.phase}, attempt ${attempt}`, sections: stage.sections });
+    const attempts = { ...state.attempts, [step.id]: attempt };
+    const outOfTimeCounts = { ...(state.outOfTime || {}), [step.id]: 0 };
+    ev("failed", { step: step.id, attempt, failure: stage.failure, report: report.relPath, fixup: true });
+    logLine(root, `fix-up checks of Phase ${fixup.phase} attempt ${attempt} failed: ${stage.failure} (${report.relPath})`);
+    if (attempt >= max) {
+      save(g, { ...state, attempts, outOfTime: outOfTimeCounts, status: STATUS.paused, pauseReason: "step-failed" });
+      stopDevServer({ root });
+      ev("paused", { reason: "step-failed", fixup: true });
+      await say({ title: `AutoClaude paused: the fix-up checks of Phase ${fixup.phase} failed ${attempt} times`, message: `${stage.failure}\nReport: ${report.relPath}\nThe feature passed its verification; its fix-up pass broke a check. Fix it, then \`${cli} resume\` (the run resumes in the fix-up pass).`, priority: "high" });
+      return allow(events);
+    }
+    const meanwhile = pausedMeanwhile(root);
+    if (meanwhile) {
+      save(g, { ...state, attempts, outOfTime: outOfTimeCounts, status: STATUS.paused, pauseReason: meanwhile.pauseReason || "review", haltSession: !!meanwhile.haltSession });
+      stopDevServer({ root });
+      ev("paused", { reason: "owner", during: "verification" });
+      return allow(events);
+    }
+    const owner = ownerInput(state, config);
+    save(g, owner.mark({ ...state, attempts, outOfTime: outOfTimeCounts }));
     const failingSections = stage.sections.filter((s) => /FAILED|failed|NOT RUN/.test(s.title));
     return block(owner.text + summarize({ headline: `The fix-up checks of Phase ${fixup.phase} (attempt ${attempt}/${max}) failed: ${stage.failure}. Fix the causes, then run \`${cli} ready ${step.id}\` again.`, sections: failingSections, reportPath: report.relPath, maxChars: MAX_REASON - owner.text.length }), events);
   }
   const report = writeReport({ root, step: `${step.id}-fixup`, attempt, title: `AutoClaude report: the fix-up checks of Phase ${fixup.phase}, attempt ${attempt} passed`, sections: stage.sections });
   const scope = step.phase ? step.phase.steps : [step];
   const timings = [...(fixup.checks || []), ...stage.timings.map((t) => ({ ...t, name: `${t.name} (after the fix-up)` }))];
-  return await close(g, { ...state }, { step, parsed, scope, attempt: fixup.attempt || 1, timings, findings: fixup.findings.length, report: [fixup.report, report.relPath].filter(Boolean).join(" and "), feature: true, phaseEnd: true, fixupDone: true });
+  const closing = {
+    verifyId: null, stepId: step.id, scope: scope.map((s) => s.id), attempt: fixup.attempt || 1, timings, findings: fixup.findings.length,
+    report: [fixup.report, report.relPath].filter(Boolean).join(" and "), feature: true, phaseEnd: true, fixupDone: true,
+    headBefore: config.git.commitEachStep ? await git.head(root, { env: g.env }) : null, pid: g.pid, at: new Date().toISOString()
+  };
+  updateState(root, (s) => { s.closing = closing; });
+  clearPending(root);
+  return await close(g, { ...state, closing }, { step, parsed, scope, closing });
+}
+
+// A verified commit whose gate was cut off (the hook's timeout in a slow pre-commit hook, the
+// tag or the push) before the state recorded it: finished from state.closing. Returns null when
+// there is nothing to finish, and the normal stop goes on.
+async function resumeClose(g, state, parsed) {
+  const { root, config, ev, events } = g;
+  const rec = state.closing;
+  // Still in the hands of a gate that is alive.
+  if (heldByLiveGate(rec, g.pid, config)) {
+    ev("gate-busy", { closing: rec.stepId });
+    return allow(events);
+  }
+  const step = stepById(parsed, rec.stepId);
+  if (!step || step.marker !== MARKERS.done) {
+    updateState(root, (s) => { s.closing = null; });
+    state.closing = null;
+    ev("close-dropped", { step: rec.stepId });
+    logLine(root, `the commit of ${rec.stepId} was cut off, and the step is no longer ticked; it is done again`);
+    return null;
+  }
+  clearReady(root);
+  ev("close-resumed", { step: step.id });
+  logLine(root, `the commit of ${rec.stepId} was cut off; finishing it`);
+  const scope = (Array.isArray(rec.scope) && rec.scope.length ? rec.scope : [step.id]).map((id) => stepById(parsed, id)).filter(Boolean);
+  return await close(g, { ...state }, { step, parsed, scope, closing: rec, resumed: true });
+}
+
+// The subject of a commit, or "".
+async function subjectOf(g, sha) {
+  const r = await git.git(g.root, ["log", "-1", "--format=%s", sha], { env: g.env });
+  return r.ok ? r.stdout.trim() : "";
 }
 
 // A verified step or feature: commit with a body, tag a phase end, push, alert, move on.
+// c.closing is the state's record of it (state.closing); c.resumed when a later stop finishes
+// the close a cut-off gate began.
 async function close(g, st, c) {
-  const { root, config, env, deps, ev } = g;
-  const { step, parsed, feature, phaseEnd } = c;
+  const { root, config, env, deps, ev, events, cli } = g;
+  const { step, parsed, closing: rec } = c;
+  const feature = !!rec.feature;
+  const phaseEnd = !!rec.phaseEnd;
   const phase = step.phase;
   let sha = null;
   let commitError = null;
   let tagName = null;
+  let message = null;
   if (config.git.commitEachStep) {
     const lead = feature && phase
-      ? `Verified Phase ${phase.num} (${phase.title}) as one feature: ${c.scope.map((s) => s.id).join(", ")}, attempt ${c.attempt}${c.fixupDone ? ", then a fix-up pass" : ""}.`
-      : `Verified ${step.id}, attempt ${c.attempt}.`;
-    const message = await commitMessage(g, { subject: `autoclaude(${step.id}): ${step.title}`, lead, steps: c.scope, timings: c.timings, findings: c.findings, report: c.report });
-    const r = await git.commitAll(root, message, { env });
-    sha = r.sha || null;
-    if (!r.ok) { commitError = String(r.stderr || "").trim() || "unknown error"; logLine(root, `commit failed: ${commitError}`); }
-    else if (phaseEnd && config.git.tagPhaseEnds && phase) {
-      const name = `ac-phase-${phase.num}`;
+      ? `Verified Phase ${phase.num} (${phase.title}) as one feature: ${c.scope.map((s) => s.id).join(", ")}, attempt ${rec.attempt}${rec.fixupDone ? ", then a fix-up pass" : ""}.`
+      : `Verified ${step.id}, attempt ${rec.attempt}.`;
+    message = await commitMessage(g, { subject: `autoclaude(${step.id}): ${step.title}`, lead, steps: c.scope, timings: rec.timings || [], findings: rec.findings || 0, report: rec.report });
+    // A cut-off gate may have made the commit already, before the state recorded it.
+    const head = c.resumed ? await git.head(root, { env }) : null;
+    if (head && head !== rec.headBefore && (await subjectOf(g, head)).startsWith(`autoclaude(${step.id}): `)) {
+      sha = head;
+      logLine(root, `${step.id} was committed (${head.slice(0, 7)}) before its gate was cut off; carrying on from that commit`);
+    } else {
+      const r = await git.commitAll(root, message, { env });
+      if (!r.ok) { commitError = String(r.stderr || "").trim() || "unknown error"; logLine(root, `commit failed: ${commitError}`); }
+      else if (!r.committed) {
+        // Nothing to commit: the verification's ticks were taken out before the commit (another
+        // session's gate, an edit). Nothing verified reached git, so it is verified again.
+        updateState(root, (s) => { s.closing = null; });
+        ev("close-lost", { step: step.id });
+        logLine(root, `${step.id} passed, but nothing was left to commit: its plan ticks were taken out before the commit`);
+        return block(`${feature && phase ? `Phase ${phase.num} (${phase.title})` : step.id} passed its verification, but its plan ticks were gone before the gate could commit them (another session's gate or an edit took them out), so nothing was committed. Run \`${cli} ready ${step.id}\` again.`, events);
+      } else sha = r.sha || null;
+    }
+    if (sha && phaseEnd && config.git.tagPhaseEnds && phase) {
+      const t = await phaseTag(root, config, parsed, phase.num, { env });
+      if (t.other) logLine(root, `${t.plain} marks Phase ${phase.num} of ${t.other}, not of this plan; this plan's Phase ${phase.num} is tagged ${t.name}`);
+      // Already on this very commit: a close that was cut off after its tag.
+      if (t.sha && t.sha === sha) tagName = t.name;
       // A phase verified again (the owner reopened or added a step) keeps the tag of its first
       // verification while pushes are on: a pushed tag moves only with a force push, which a run
       // never makes, and a moved one would fail every later push.
-      if (config.git.push && (await git.tagExists(root, name, { env }))) logLine(root, `${name} already marks an earlier verification of Phase ${phase.num}; left where it is`);
+      else if (t.sha && config.git.push) logLine(root, `${t.name} already marks an earlier verification of Phase ${phase.num}; left where it is`);
       else {
-        const t = await git.tag(root, name, { force: true, env });
-        if (t.ok) tagName = name;
-        else logLine(root, `tag failed: ${t.stderr}`);
+        const r = await git.tag(root, t.name, { force: true, env });
+        if (r.ok) tagName = t.name;
+        else logLine(root, `tag failed: ${r.stderr}`);
       }
     }
   }
-  ev("passed", { step: step.id, attempt: c.attempt, sha, phaseEnd, ...(feature ? { feature: phase ? phase.num : null } : {}) });
+  ev("passed", { step: step.id, attempt: rec.attempt, sha, phaseEnd, ...(feature ? { feature: phase ? phase.num : null } : {}), ...(c.resumed ? { resumed: true } : {}) });
   logLine(root, `${feature && phase ? `Phase ${phase.num} (at ${step.id})` : step.id} verified${sha ? ` (${sha.slice(0, 7)})` : commitError ? " but NOT committed" : ""}`);
 
   // Owner input that reached the builder (in a gate message) belonged to this step: done with.
@@ -804,29 +1145,27 @@ async function close(g, st, c) {
   const took = st.phaseStartedAt ? fmtMinutes(nowMs(deps) - Date.parse(st.phaseStartedAt)) : null;
   const featureDone = phaseEnd && !parsed.steps.some((s) => s.marker === MARKERS.built);
   const base = {
-    ...st, attempts: { ...st.attempts, [step.id]: 0 }, infraFailures: { ...(st.infraFailures || {}), [step.id]: 0 },
-    noProgress: 0, headAtLastGate: sha || st.headAtLastGate, fixup: null,
+    ...st, attempts: { ...st.attempts, [step.id]: 0 }, infraFailures: { ...(st.infraFailures || {}), [step.id]: 0 }, outOfTime: { ...(st.outOfTime || {}), [step.id]: 0 },
+    noProgress: 0, headAtLastGate: sha || st.headAtLastGate, fixup: null, closing: null,
     pendingNotes: (st.pendingNotes || []).filter((n) => !n.delivered), ownerAnswer: null,
     ...(featureDone ? { phaseBaseCommit: null, phaseStartedAt: null } : {})
   };
   const next = nextStep(parsed);
-  if (commitError) return await commitFailed(g, base, step, next, commitError);
-  if (sha) {
-    // Recorded at once (only the fields the commit settled, so an owner pause made meanwhile
-    // stands): a gate cut off from here on, say by the hook's timeout during a slow push, leaves
-    // a state the next stop carries on from instead of ticks the integrity check would revert,
-    // and a tag the next push takes along.
-    const pendingTag = tagName && config.git.push ? tagName : null;
-    updateState(root, (s) => {
-      s.tickedByGate = base.tickedByGate; s.fixup = null; s.headAtLastGate = sha;
-      s.attempts = { ...(s.attempts || {}), [step.id]: 0 };
-      if (featureDone) { s.phaseBaseCommit = null; s.phaseStartedAt = null; }
-      if (pendingTag) {
-        const prev = s.pushState || { branch: null, remote: null, unpushedCommits: null };
-        s.pushState = { ...prev, ok: false, skipped: false, at: nowIso(deps), error: "the gate stopped before its push finished", unpushedTags: [...new Set([...(prev.unpushedTags || []), pendingTag])] };
-      }
-    });
-  }
+  if (commitError) return await commitFailed(g, base, step, next, commitError, message);
+  // Recorded at once (only the fields the commit settled, so an owner pause made meanwhile
+  // stands): a gate cut off from here on, say by the hook's timeout during a slow push, leaves a
+  // state the next stop carries on from, and a tag the next push takes along.
+  const pendingTag = tagName && config.git.push ? tagName : null;
+  updateState(root, (s) => {
+    s.tickedByGate = base.tickedByGate; s.fixup = null; s.closing = null; s.headAtLastGate = sha || s.headAtLastGate;
+    s.attempts = { ...(s.attempts || {}), [step.id]: 0 };
+    s.outOfTime = { ...(s.outOfTime || {}), [step.id]: 0 };
+    if (featureDone) { s.phaseBaseCommit = null; s.phaseStartedAt = null; }
+    if (pendingTag) {
+      const prev = s.pushState || { branch: null, remote: null, unpushedCommits: null };
+      s.pushState = { ...prev, ok: false, skipped: false, at: nowIso(deps), error: "the gate stopped before its push finished", unpushedTags: [...new Set([...(prev.unpushedTags || []), pendingTag])] };
+    }
+  });
   if (sha && config.git.push) base.pushState = await pushNow(g, base, tagName);
   // The last feature's alert is the completion alert.
   if (next) {
@@ -835,9 +1174,9 @@ async function close(g, st, c) {
       const pushed = ps ? (ps.ok ? ` Pushed to ${ps.remote}.` : ps.skipped ? "" : ` Push FAILED: ${ps.error}.`) : "";
       // Per step, the phase's steps were verified one by one; per feature, all at once.
       const n = feature ? c.scope.length : phase.steps.length;
-      await g.sayEvent("featureVerified", { title: `AutoClaude: Phase ${phase.num} verified`, message: `Phase ${phase.num} ${phase.title}: ${n} step${n === 1 ? "" : "s"} verified${took ? ` in ${took}` : ""}${c.attempt > 1 ? ` (attempt ${c.attempt})` : ""}${c.fixupDone ? ", after a fix-up pass" : ""}.${pushed} Next: ${next.id} ${next.title}.`, priority: "default" });
+      await g.sayEvent("featureVerified", { title: `AutoClaude: Phase ${phase.num} verified`, message: `Phase ${phase.num} ${phase.title}: ${n} step${n === 1 ? "" : "s"} verified${took ? ` in ${took}` : ""}${rec.attempt > 1 ? ` (attempt ${rec.attempt})` : ""}${rec.fixupDone ? ", after a fix-up pass" : ""}.${pushed} Next: ${next.id} ${next.title}.`, priority: "default" });
     }
-    if (!feature) await g.sayEvent("stepVerified", { title: `AutoClaude: ${step.id} verified`, message: `${step.id} ${step.title} passed its checks (attempt ${c.attempt}) and is committed. Next: ${next.id} ${next.title}.`, priority: "low" });
+    if (!feature) await g.sayEvent("stepVerified", { title: `AutoClaude: ${step.id} verified`, message: `${step.id} ${step.title} passed its checks (attempt ${rec.attempt}) and is committed. Next: ${next.id} ${next.title}.`, priority: "low" });
   }
   return await advance(g, base, { step, parsed, next, sha, phaseEnd, closedFeature: phaseEnd, feature, scope: c.scope });
 }
@@ -845,10 +1184,12 @@ async function close(g, st, c) {
 // A step that passed (or was built) but could not be committed stops the run: carrying on would
 // pile later steps onto an unrecorded one (seen live: git was not on the run window's PATH, and
 // the last step was reported verified and the plan complete with nothing committed).
-// `autoclaude resume` commits the pending steps before the session restarts.
-async function commitFailed(g, base, step, next, commitError) {
+// `autoclaude resume` commits the pending steps, with the message kept here, before the session
+// restarts.
+async function commitFailed(g, base, step, next, commitError, message = null) {
   const { root, cli, ev, events, say } = g;
-  save(g, { ...base, uncommitted: [...(base.uncommitted || []), step.id], currentStep: next ? next.id : null, status: STATUS.paused, pauseReason: "commit-failed", stepStartedAt: null });
+  const uncommittedMessages = { ...(base.uncommittedMessages || {}), ...(message ? { [step.id]: message } : {}) };
+  save(g, { ...base, closing: null, uncommitted: [...(base.uncommitted || []), step.id], uncommittedMessages, currentStep: next ? next.id : null, status: STATUS.paused, pauseReason: "commit-failed", stepStartedAt: null });
   stopDevServer({ root });
   ev("paused", { reason: "commit-failed" });
   const why = commitError.split(/\r?\n/)[0].slice(0, 300);
@@ -924,7 +1265,7 @@ async function advance(g, base, { step, parsed, next, sha, phaseEnd, closedFeatu
   ev("advanced", { next: next.id });
   const short = sha ? ` (${sha.slice(0, 7)})` : "";
   const done = built
-    ? `${step.id} built and committed${short}; Phase ${phase.num} is verified as a whole when its last step is ready, so run only the tests for what you change`
+    ? `${step.id} built and committed${short}; Phase ${phase.num} is verified as a whole when ${closerText(parsed, phase.num)} is ready, so run only the tests for what you change`
     : feature && phase ? `Phase ${phase.num} (${phase.title}) verified and committed${short}` : `${step.id} verified and committed${short}`;
   return block(`${owner.text}${done}. Next: ${next.id} ${next.title}. When every Accept line holds, rewrite ${config.docs.continueHere} and run \`${cli} ready ${next.id}\`.\n\n${stepText(parsed, next)}`, events);
 }
@@ -958,49 +1299,85 @@ async function finishPlan(g, state, parsed) {
   return block(`${owner.text}${why}. Check that its Accept lines hold, rewrite ${config.docs.continueHere}, then run \`${cli} ready ${step.id}\`.\n\n${stepText(rp, step)}`, events);
 }
 
+const HANDBACK_MESSAGE = "autoclaude: hand-back\n\nHANDOFF.md, written when the plan completed: what was built, what is left for the owner, secrets, open findings, decisions for review, push state and the machine footprint.\n";
+
 // Plan complete: clean up the run's machine footprint, write the hand-back (P8.5), commit and
-// push it, and send the completion alert.
+// push it, send the completion alert, and only then mark the run complete. Each stage records
+// its result in state.completing, so a stop that has too little time left (the last feature's
+// verification used most of it) hands the rest to the next stop, and a gate killed on the way
+// is finished by the next one.
 async function complete(g, state, parsed) {
   const { root, config, env, deps, ev, events, say } = g;
-  const done = { ...state, status: STATUS.complete, currentStep: null, pauseRequested: false, fixup: null, freshSession: false };
-  save(g, done);
-  stopDevServer({ root });
   const p = progress(parsed);
-  const started = state.startedAt ? Date.parse(state.startedAt) : null;
-  const mins = started ? Math.round((nowMs(deps) - started) / 60000) : null;
-  ev("complete", { done: p.done, total: p.total, mins });
-  logLine(root, `plan complete: ${p.done}/${p.total}`);
+  const first = !(state.completing && typeof state.completing === "object");
+  let c = first ? { at: nowIso(deps) } : { ...state.completing };
+  const base = { ...state, currentStep: null, pauseRequested: false, fixup: null, closing: null, freshSession: false };
+  if (first) {
+    save(g, { ...base, completing: c });
+    stopDevServer({ root });
+    logLine(root, `plan complete: ${p.done}/${p.total}; finishing the run`);
+  } else {
+    ev("complete-resumed");
+    logLine(root, "finishing the end of the run that an earlier stop began");
+  }
+  const record = (patch) => { c = { ...c, ...patch }; updateState(root, (s) => { s.completing = c; }); };
+  // A stop that already spent its time on the last verification leaves what does not fit to the
+  // next stop; a fresh stop always goes ahead.
+  const spent = g.clock() - g.startedMs > 30000;
+  const defer = (what) => {
+    ev("complete-deferred", { stage: what });
+    logLine(root, `plan complete; ${what} is left to the next stop (${Math.round(timeLeft(g) / 1000)} s left in this one)`);
+    return block(`The plan is complete, and the gate is finishing the run (${what}) but this stop is out of time. End your turn now and do nothing else; the next stop finishes it.`, events);
+  };
 
   // Either module may be missing (an older install, a test); the completion goes on without it.
-  let footprint = null;
-  const finish = "finishFootprint" in deps ? deps.finishFootprint : await lazyExport("./footprint.js", "finishFootprint");
-  if (finish) {
-    try { footprint = await finish(root, { remove: true, config }); } catch (e) { logLine(root, `footprint cleanup failed: ${e && e.message ? e.message : e}`); }
+  if (!c.footprintDone) {
+    const finish = "finishFootprint" in deps ? deps.finishFootprint : await lazyExport("./footprint.js", "finishFootprint");
+    let footprint = null;
+    if (finish) {
+      if (spent && timeLeft(g) < FOOTPRINT_MIN_MS + HANDBACK_MS) return defer("the machine clean-up and the hand-back");
+      const deadline = Date.now() + Math.max(30000, timeLeft(g) - HANDBACK_MS);
+      try { footprint = await finish(root, { remove: true, config, deadline }); } catch (e) { logLine(root, `footprint cleanup failed: ${e && e.message ? e.message : e}`); }
+    }
+    record({ footprintDone: true, footprint });
   }
-  let handoff = null;
-  const write = "writeHandoff" in deps ? deps.writeHandoff : await lazyExport("./handoff.js", "writeHandoff");
-  if (write) {
-    try { handoff = await write({ root, config, state: done, parsed, footprint, env }); } catch (e) { logLine(root, `hand-back failed: ${e && e.message ? e.message : e}`); }
-    if (handoff && !handoff.path && handoff.error) logLine(root, `hand-back failed: ${handoff.error}`);
+  if (!c.handoffDone) {
+    const write = "writeHandoff" in deps ? deps.writeHandoff : await lazyExport("./handoff.js", "writeHandoff");
+    let handoff = null;
+    if (write) {
+      if (spent && timeLeft(g) < HANDBACK_MS) return defer("the hand-back");
+      try { handoff = await write({ root, config, state: { ...base, status: STATUS.complete }, parsed, footprint: c.footprint || null, env }); } catch (e) { logLine(root, `hand-back failed: ${e && e.message ? e.message : e}`); }
+      if (handoff && !handoff.path && handoff.error) logLine(root, `hand-back failed: ${handoff.error}`);
+    }
+    record({ handoffDone: true, handoff: handoff ? { path: handoff.path || null, summary: handoff.summary || null } : null });
   }
   // The hand-back goes on the run branch with the rest, and out with a last push.
-  let pushState = done.pushState;
-  if (handoff && handoff.path && config.git.commitEachStep) {
-    const c = await git.commitAll(root, `autoclaude: hand-back\n\nHANDOFF.md, written when the plan completed: what was built, what is left for the owner, secrets, open findings, decisions for review, push state and the machine footprint.\n`, { env });
-    if (!c.ok) logLine(root, `hand-back commit failed: ${String(c.stderr || "").trim()}`);
-    else if (c.committed && config.git.push) {
-      pushState = await pushNow(g, done, null);
-      save(g, { ...done, pushState });
+  const handoff = c.handoff;
+  if (!c.committed) {
+    let pushWanted = false;
+    if (handoff && handoff.path && config.git.commitEachStep) {
+      const r = await git.commitAll(root, HANDBACK_MESSAGE, { env });
+      if (!r.ok) logLine(root, `hand-back commit failed: ${String(r.stderr || "").trim()}`);
+      else pushWanted = !!(r.committed && config.git.push);
     }
+    record({ committed: true, pushWanted });
   }
-  ev("handoff", { path: handoff && handoff.path ? handoff.path : null, footprint: !!footprint });
+  let pushState = c.pushed ? c.pushState : base.pushState;
+  if (c.pushWanted && !c.pushed) {
+    pushState = await pushNow(g, { ...base, pushState }, null);
+    record({ pushed: true, pushState });
+  }
+  ev("handoff", { path: handoff && handoff.path ? handoff.path : null, footprint: !!c.footprint });
 
+  const started = state.startedAt ? Date.parse(state.startedAt) : null;
+  const mins = started ? Math.round((nowMs(deps) - started) / 60000) : null;
+  const done = { ...base, status: STATUS.complete, completing: null, pushState };
   let summary = `${p.done}/${p.total} steps verified${mins !== null ? ` in ${mins} min` : ""}.`;
   try {
     const usage = readUsage({ staleAfterMin: config.usage.staleAfterMin, now: nowMs(deps) });
     // The hand-back's push state predates its own commit and push; the alert gives the last one.
     const latest = handoff && handoff.summary ? { ...handoff, summary: { ...handoff.summary, push: pushState } } : handoff;
-    summary = buildSummary({ root, config, state: { ...done, pushState }, parsed, usage: usage.stale ? null : usage, now: nowMs(deps), handoff: latest });
+    summary = buildSummary({ root, config, state: done, parsed, usage: usage.stale ? null : usage, now: nowMs(deps), handoff: latest });
   } catch {}
   const lines = [summary];
   // The summary builder may already state these; say them once.
@@ -1008,6 +1385,10 @@ async function complete(g, state, parsed) {
   const handoffRel = handoff && handoff.path ? path.relative(root, path.resolve(root, handoff.path)).split(path.sep).join("/") : null;
   const branch = (await git.currentBranch(root, { env })) || "?";
   lines.push(`Branch ${branch}.${handoffRel && !summary.includes(handoffRel) ? ` Read ${handoffRel} first.` : ""} Review the commits, ${config.docs.decisions} and ${config.docs.blockers} before merging.`);
+  // The alert before the state: a gate killed between the two sends it again, never not at all.
   await say({ title: `AutoClaude: plan complete (${planSlug(parsed)})`, message: lines.join("\n"), priority: "default" });
+  save(g, done);
+  ev("complete", { done: p.done, total: p.total, mins });
+  logLine(root, `run complete: ${p.done}/${p.total}`);
   return allow(events);
 }

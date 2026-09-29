@@ -2,6 +2,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
 import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { buildArgs, interpret, runHeadless, hitTurnLimit, wrapUpArgs, runWithWrapUp, WRAP_UP_PROMPT, agentBody, buildDeciderPrompt, validDecision, runDecider, DECIDER_SCHEMA, DECIDER_TIMEOUT_MS } from "../../plugins/autoclaude/lib/headless.js";
 
 const fake = fileURLToPath(new URL("../fixtures/fake-claude.mjs", import.meta.url));
@@ -46,6 +48,20 @@ test("runHeadless sends the prompt on stdin, sets AUTOCLAUDE_ROLE and parses the
   assert.equal(r.structured.role, "tester");
   assert.deepEqual(r.structured.args, ["-p", "--x"]);
   assert.equal(r.costUsd, 0.012);
+});
+
+// An npm install of Claude Code is a claude.cmd, which Node will not spawn without a shell
+// (a synchronous EINVAL); every checker and `autoclaude decide` failed as infra with it.
+test("runHeadless runs a .cmd claude (an npm install) through cmd.exe, arguments and stdin intact", { skip: process.platform !== "win32" && "Windows only" }, async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "autoclaude headless "));
+  const shim = path.join(dir, "claude.cmd");
+  fs.writeFileSync(shim, `@"${process.execPath}" "${fake}" %*\r\n`);
+  const args = ["-p", "--json-schema", '{"type":"object","properties":{"a b":{"type":"string"}}}', "--mcp-config", path.join(dir, "mcp.json"), "a & b | c (d) ^e <f> 100%", "trail\\"];
+  const r = await runHeadless({ prompt: "check the page", args, bin: shim, env: { ...process.env, FAKE_CLAUDE_MODE: "ok" }, role: "tester", timeoutMs: 20000 });
+  assert.equal(r.ok, true, r.error);
+  assert.equal(r.structured.prompt, "check the page");
+  assert.equal(r.structured.role, "tester");
+  assert.deepEqual(r.structured.args, args);
 });
 
 test("runHeadless finds the JSON line among other output", async () => {

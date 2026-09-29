@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { buildSummary, progressEntries, parseDecisions, runDecisions, ownerReviewDecisions, parseTableRows, isOpenStatus, unresolvedRows, afterRunSection, afterRunItems, pushLine } from "../../plugins/autoclaude/lib/summary.js";
+import { buildSummary, progressEntries, parseDecisions, runDecisions, ownerReviewDecisions, decisionsMark, decisionsAtStart, parseTableRows, isOpenStatus, unresolvedRows, afterRunSection, afterRunItems, pushLine, pushStatus } from "../../plugins/autoclaude/lib/summary.js";
 import { preflight, checkRunnable, playwrightBrowsersDir, formatPreflight, checkRequirements } from "../../plugins/autoclaude/lib/preflight.js";
 import { recordRunEnv } from "../../plugins/autoclaude/lib/checks.js";
 import { mergeConfig } from "../../plugins/autoclaude/lib/config.js";
@@ -99,6 +99,58 @@ test("parseDecisions: headings, fields, owner review; fenced examples are not en
   assert.deepEqual(runDecisions(answered, { sinceDate: "2026-09-28" }).map((x) => x.id), ["D-004", "D-005"]);
 });
 
+// A second run the same day as the first: every entry carries the same date, so only the
+// decisions log's position at the run's start tells the two runs apart.
+const SAME_DAY = `# DECISIONS
+
+## D-001 (2026-09-28, planning) Postgres 16
+- By: owner
+
+## D-002 (2026-09-28, S1.1) First run: open port 8080 on the LAN
+- By: decider
+- Owner review: yes
+
+## N-001 (2026-09-28, S1.2) First run's note
+- Note: bigger buttons
+- Done: S1.2
+
+## D-003 (2026-09-28, planning) Plan extended with Phase 2
+- By: owner
+
+## D-004 (2026-09-28, S2.1) Second run: keep the default theme
+- By: decider
+
+## N-002 (2026-09-28, S2.1) Second run's note
+- Note: rename the page
+- Done: S2.1
+`;
+
+test("decisionsMark and a second run the same day: only entries logged after the run's start count", () => {
+  assert.deepEqual(decisionsMark(SAME_DAY), { D: 4, N: 2 });
+  assert.deepEqual(decisionsMark(""), { D: 0, N: 0 });
+  assert.deepEqual(decisionsMark(DECISIONS), { D: 5, N: 1 }, "the fenced entry-format example is not an entry");
+  const e = parseDecisions(SAME_DAY);
+  const since = { D: 3, N: 1 };
+  assert.deepEqual(runDecisions(e, { since, sinceDate: "2026-09-28" }).map((x) => x.id), ["D-004"]);
+  assert.deepEqual(ownerReviewDecisions(e, { since, sinceDate: "2026-09-28" }).map((x) => x.id), []);
+  assert.deepEqual(runDecisions(e, { sinceDate: "2026-09-28" }).map((x) => x.id), ["D-002", "D-004"], "by date alone the first run's count too");
+
+  const root = tmp("autoclaude-sum-sameday-");
+  fs.mkdirSync(path.join(root, "docs"));
+  fs.writeFileSync(path.join(root, "docs", "DECISIONS.md"), SAME_DAY);
+  const parsed = parsePlan("# P\n\n## Phase 2: B\n- [x] **S2.1** One\n  - Accept: a\n");
+  const state = { status: "complete", startedAt: "2026-09-28T15:00:00Z", decisionsAtStart: since };
+  const text = buildSummary({ root, config: mergeConfig({}), state, parsed, now: Date.parse("2026-09-28T17:00:00Z") });
+  assert.match(text, /Decisions the run made: 1, owner notes handled: 1\./);
+  assert.doesNotMatch(text, /For your review|D-002/, "the first run's owner-review decision was in its own hand-back");
+  // A mark for decisions only: notes go by date.
+  assert.match(buildSummary({ root, config: mergeConfig({}), state: { ...state, decisionsAtStart: { D: 3 } }, parsed }), /Decisions the run made: 1, owner notes handled: 2\./);
+  // No mark and no base commit to read one from: the run's start date decides, as before.
+  const byDate = { ...state, decisionsAtStart: null, baseCommit: null };
+  assert.deepEqual(decisionsAtStart({ root, config: mergeConfig({}), state: byDate }), null);
+  assert.match(buildSummary({ root, config: mergeConfig({}), state: byDate, parsed }), /Decisions the run made: 2, owner notes handled: 2\./);
+});
+
 test("parseTableRows and unresolvedRows: headers, escaped pipes, closed statuses, rows left for the owner", () => {
   const rows = parseTableRows("| Date | Severity | File | Issue | Fix | Status |\n|---|---|---|---|---|---|\n| 2026-09-27 | low | a.js:1 | uses a \\| b | fix | open |\n\ntext\n| 2026-09-28 | x | y |\n", ["date", "a", "b"]);
   assert.deepEqual(rows.map((r) => [r.cells.date, r.cells.issue || r.cells.b, r.status]), [["2026-09-27", "uses a | b", "open"], ["2026-09-28", "y", "y"]]);
@@ -133,6 +185,9 @@ test("pushLine: off, not yet, pushed, skipped, failed with what is missing", () 
   assert.equal(pushLine({ branch: "autoclaude/shop", remote: "origin", ok: true, at: "2026-09-28T10:15:00Z" }, on), "Push: autoclaude/shop and its tags are on origin (2026-09-28 10:15 UTC).");
   assert.equal(pushLine({ branch: "b", ok: false, skipped: true, error: "no remote named origin" }, on), "Push: skipped: no remote named origin. Nothing is on the remote from this run.");
   assert.equal(pushLine({ branch: "b", remote: "origin", ok: false, at: "2026-09-28T10:15:00Z", error: "ssh: connect to host github.com port 22: timed out\nfatal", unpushedCommits: 3, unpushedTags: ["ac-phase-2"] }, on), "Push FAILED for b (2026-09-28 10:15 UTC): ssh: connect to host github.com port 22: timed out. Not on the remote: 3 commits and 1 tag (ac-phase-2).");
+  // The same sentence without its label, for HANDOFF.md to qualify.
+  assert.equal(pushStatus({ branch: "b", ok: false, error: "rejected", unpushedCommits: 1 }, on), "FAILED for b: rejected. Not on the remote: 1 commit.");
+  assert.equal(pushStatus({ branch: "b", remote: "origin", ok: true }, on), "b and its tags are on origin.");
 });
 
 test("buildSummary (complete): only the run's decisions, owner-review decisions and open items with the top few, what is left, the push state", () => {

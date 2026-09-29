@@ -19,13 +19,18 @@ export function tailLines(text, n = TAIL_LINES) {
   return clean.split("\n").slice(-n).join("\n");
 }
 
+// A check is not started with less than this left before the deadline.
+export const MIN_CHECK_MS = 10000;
+
 // Runs `checks` ({ name, command, timeoutSec?, needsDevServer? }) in order and stops at the
 // first failure. Resolves to { ok, results, failed }: results in the original order (checks
 // after the failure are included with skipped: true), failed is the failing result or null.
 // Never throws for a failing command; a spawn error becomes a failed result with a reason.
 // onProgress(result) is called after every check that was attempted (not for skipped ones).
+// deadlineMs (epoch ms; the gate's, so the checks cannot outlive the Stop hook) caps every
+// check's timeout; a check stopped by it, or not started for lack of time, has outOfTime: true.
 export async function runChecks(checks, options = {}) {
-  const { cwd = process.cwd(), env = process.env, devServerReady = false, onProgress = null } = options;
+  const { cwd = process.cwd(), env = process.env, devServerReady = false, onProgress = null, deadlineMs = Infinity, now = Date.now, minMs = MIN_CHECK_MS } = options;
   const results = [];
   let failed = null;
   for (const check of Array.isArray(checks) ? checks : []) {
@@ -33,9 +38,12 @@ export async function runChecks(checks, options = {}) {
       results.push(makeResult(check, { skipped: true }));
       continue;
     }
+    const left = deadlineMs - now();
     const result = check.needsDevServer && !devServerReady
       ? makeResult(check, { reason: "dev server not available" })
-      : await runOne(check, { cwd, env });
+      : left < minMs
+        ? makeResult(check, { reason: "no time left before the gate's deadline", outOfTime: true })
+        : await runOne(check, { cwd, env, leftMs: left });
     results.push(result);
     if (onProgress) onProgress(result);
     if (!result.ok) failed = result;
@@ -43,22 +51,27 @@ export async function runChecks(checks, options = {}) {
   return { ok: failed === null, results, failed };
 }
 
-// Runs one check through the shell with its timeout. Resolves to a result, never rejects.
-async function runOne(check, { cwd, env }) {
+// Runs one check through the shell with its timeout, or what is left before the deadline when
+// that is shorter. Resolves to a result, never rejects.
+async function runOne(check, { cwd, env, leftMs = Infinity }) {
   const timeoutSec = Number(check.timeoutSec) > 0 ? Number(check.timeoutSec) : DEFAULT_CHECK_TIMEOUT_SEC;
+  const timeoutMs = Math.min(timeoutSec * 1000, leftMs);
+  const capped = timeoutMs < timeoutSec * 1000;
   let r;
   try {
-    r = await runCommand(check.command, { cwd, env, timeoutMs: timeoutSec * 1000 });
+    r = await runCommand(check.command, { cwd, env, timeoutMs });
   } catch (e) {
     return makeResult(check, { reason: `could not start: ${e && e.message ? e.message : String(e)}` });
   }
   const passed = r.code === 0 && !r.timedOut;
-  const reason = passed ? null : r.timedOut ? `timed out after ${timeoutSec} s` : `exit code ${r.code === null ? "none" : r.code}`;
+  const outOfTime = !passed && r.timedOut && capped;
+  const reason = passed ? null : outOfTime ? `stopped at the gate's deadline after ${Math.round(timeoutMs / 1000)} s (its own timeoutSec is ${timeoutSec})` : r.timedOut ? `timed out after ${timeoutSec} s` : `exit code ${r.code === null ? "none" : r.code}`;
   return makeResult(check, {
     ran: true,
     ok: passed,
     code: r.code,
     timedOut: r.timedOut,
+    outOfTime,
     durationMs: r.durationMs,
     stdout: r.stdout,
     stderr: r.stderr,
@@ -75,6 +88,7 @@ function makeResult(check, fields = {}) {
     ok: false,
     code: null,
     timedOut: false,
+    outOfTime: false,
     durationMs: 0,
     stdout: "",
     stderr: "",

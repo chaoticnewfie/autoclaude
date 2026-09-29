@@ -8,9 +8,8 @@
 // Node built-ins only.
 import fs from "node:fs";
 import path from "node:path";
-import { spawn } from "node:child_process";
 import { homeDir, isWindows } from "./paths.js";
-import { findOnPath, killTree } from "./proc.js";
+import { findOnPath, killTree, spawnClaude } from "./proc.js";
 
 // The native Claude Code install, then whatever `claude` is on PATH. AUTOCLAUDE_CLAUDE_BIN wins.
 export function claudeBinary(env = process.env) {
@@ -77,7 +76,8 @@ export function runHeadless({ prompt, args, cwd, env = process.env, role = "revi
     if (!exe) return done(interpret({ spawnError: "the claude CLI was not found; install Claude Code natively (https://claude.ai/install.ps1 on Windows)", durationMs: 0 }));
     let child;
     try {
-      child = spawn(exe, [...binArgs, ...args], { cwd, env: { ...env, AUTOCLAUDE_ROLE: role }, stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
+      // An npm claude.cmd cannot be spawned directly (EINVAL); spawnClaude runs it through cmd.exe.
+      child = spawnClaude(exe, [...binArgs, ...args], { cwd, env: { ...env, AUTOCLAUDE_ROLE: role }, stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
     } catch (e) {
       return done(interpret({ spawnError: e.message, durationMs: Date.now() - started }));
     }

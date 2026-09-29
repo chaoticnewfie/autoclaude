@@ -102,6 +102,48 @@ test("commitAll never stages secrets/, even when the project does not ignore it"
   assert.deepEqual((await status(root, opts)).entries.map((e) => e.path).sort(), ["secrets/api-key", "secrets/db-password"]);
 });
 
+test("commitAll leaves out secrets/ that was staged beforehand, nested files in it too", async () => {
+  const root = await makeRepo();
+  const write = (rel, text) => { fs.mkdirSync(path.dirname(path.join(root, rel)), { recursive: true }); fs.writeFileSync(path.join(root, rel), text); };
+  write("secrets/db.env", "PGPASSWORD=hunter2\n");
+  write("secrets/tls/deep/server.key", "key\n");
+  write("src/x.js", "x\n");
+  // The builder staged everything itself, before the gate commits (the guard allows git add).
+  await sh("git add -A", root);
+  const c = await commitAll(root, "first", opts);
+  assert.equal(c.ok, true, c.stderr);
+  assert.equal(c.committed, true);
+  assert.equal(await sh("git ls-files", root), "src/x.js");
+  assert.equal(await sh("git diff --cached --name-only", root), "", "the secrets are unstaged, not left for the next commit");
+  // Only a staged secret changed: nothing to commit.
+  write("secrets/db.env", "PGPASSWORD=changed\n");
+  await sh("git add -A", root);
+  assert.deepEqual(await commitAll(root, "only a secret", opts), { ok: true, committed: false, sha: c.sha, stderr: "" });
+});
+
+test("commitAll leaves out the secrets folder under another case of its name (the same folder on Windows)", async () => {
+  const other = await makeRepo();
+  fs.mkdirSync(path.join(other, "Secrets"));
+  fs.writeFileSync(path.join(other, "Secrets", "api.key"), "k\n");
+  fs.writeFileSync(path.join(other, "b.txt"), "b\n");
+  await sh("git add -A", other);
+  fs.mkdirSync(path.join(other, "SECRETS"), { recursive: true });
+  fs.writeFileSync(path.join(other, "SECRETS", "later.key"), "k\n");
+  const cased = await commitAll(other, "cased", opts);
+  assert.equal(cased.ok, true, cased.stderr);
+  assert.equal(await sh("git ls-files", other), "b.txt");
+});
+
+test("commitAll still commits a secrets folder deeper in the tree, which may be source code", async () => {
+  const root = await makeRepo();
+  fs.mkdirSync(path.join(root, "src", "secrets"), { recursive: true });
+  fs.writeFileSync(path.join(root, "src", "secrets", "vault.js"), "export const vault = {};\n");
+  fs.writeFileSync(path.join(root, "a.txt"), "a\n");
+  const c = await commitAll(root, "first", opts);
+  assert.equal(c.ok, true, c.stderr);
+  assert.deepEqual((await sh("git ls-files", root)).split(/\r?\n/), ["a.txt", "src/secrets/vault.js"]);
+});
+
 test("commitAll uses the AutoClaude identity only when no user.name is configured", async () => {
   const root = await makeRepo({ identity: false });
   const globalConfig = path.join(tmpDir(), "gitconfig");

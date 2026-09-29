@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { EventEmitter } from "node:events";
-import { decide, childEnv, launchArgs, supervise, builderSettings, launchOptions } from "../../plugins/autoclaude/lib/supervisor.js";
+import { decide, childEnv, launchArgs, supervise, builderSettings, launchOptions, spawnClaude, cmdShimLine, cmdShimArg } from "../../plugins/autoclaude/lib/supervisor.js";
 import { mergeConfig } from "../../plugins/autoclaude/lib/config.js";
 import { saveState, loadState, defaultState } from "../../plugins/autoclaude/lib/state.js";
 
@@ -414,4 +414,57 @@ test("supervise: the optional morning summary goes out once a day, at low priori
   assert.equal(morning[0].priority, "low");
   assert.match(morning[0].message, /Steps: 0\/1 verified/);
   assert.match(fs.readFileSync(path.join(root, ".autoclaude", "logs", "supervisor.log"), "utf8"), /sent the morning summary/);
+});
+
+// ---------- claude from an npm install (a .cmd shim) ----------
+
+test("spawnClaude: a .cmd or .bat runs through cmd.exe with every argument escaped; a native claude is spawned as it is", () => {
+  const calls = [];
+  const spawnFn = (cmd, args, opts) => { calls.push({ cmd, args, opts }); return {}; };
+  const args = ["--settings", "{\"a\":\"b & c\"}", "/autoclaude:start"];
+  spawnClaude("C:\\Users\\me\\AppData\\Roaming\\npm\\claude.cmd", args, { cwd: "x" }, { windows: true, spawnFn });
+  assert.equal(calls[0].cmd, "cmd.exe");
+  assert.deepEqual(calls[0].args.slice(0, 3), ["/d", "/s", "/c"]);
+  assert.equal(calls[0].args[3], cmdShimLine("C:\\Users\\me\\AppData\\Roaming\\npm\\claude.cmd", args));
+  assert.deepEqual([calls[0].opts.cwd, calls[0].opts.windowsVerbatimArguments], ["x", true]);
+  // Quoted for the program, then every cmd metacharacter escaped twice (the shim's %* is parsed again).
+  assert.equal(cmdShimArg("b & c"), "^^^\"b^^^ ^^^&^^^ c^^^\"");
+  assert.equal(cmdShimArg("a\\"), "^^^\"a\\\\^^^\"", "a trailing backslash is doubled so it does not escape the quote");
+  spawnClaude("C:\\Users\\me\\.local\\bin\\claude.exe", args, {}, { windows: true, spawnFn });
+  spawnClaude("/usr/local/bin/claude.cmd", args, {}, { windows: false, spawnFn });
+  assert.deepEqual(calls.slice(1).map((c) => [c.cmd, c.args]), [["C:\\Users\\me\\.local\\bin\\claude.exe", args], ["/usr/local/bin/claude.cmd", args]]);
+});
+
+test("supervise: claude resolved to an npm claude.cmd starts, and gets its arguments exactly, the permissions JSON included", { skip: process.platform !== "win32" && "a .cmd shim is Windows-only" }, async () => {
+  const root = fakeProject("idle");
+  fs.writeFileSync(path.join(root, "autoclaude.config.json"), JSON.stringify({ version: 1, permissions: { allow: ["Bash(npm run *)"], environment: ["the db (10.0.0.9) & its 50% | ^ \"quoted\" host"] }, supervisor: { pollSec: 60, idleRelaunchMin: 15, stallMin: 45, resumeGraceMin: 2, rateLimitGraceMin: 10, maxRecoveries: 2 } }));
+  // An npm-style shim in a folder with a space: it hands %* to node, like npm's claude.cmd.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "autoclaude npm "));
+  const out = path.join(dir, "argv.json");
+  fs.writeFileSync(path.join(dir, "cli.js"), `require("fs").writeFileSync(${JSON.stringify(out)}, JSON.stringify(process.argv.slice(2)));`);
+  const shim = path.join(dir, "claude.cmd");
+  fs.writeFileSync(shim, `@ECHO off\r\nSETLOCAL\r\n"${process.execPath}" "${path.join(dir, "cli.js")}" %*\r\n`);
+  const env = { PATH: process.env.PATH || process.env.Path, CLAUDE_CONFIG_DIR: fs.mkdtempSync(path.join(os.tmpdir(), "autoclaude-sup-cfg-")), AUTOCLAUDE_CLAUDE_BIN: shim };
+  const sleep = async () => { for (let i = 0; i < 200 && !fs.existsSync(out); i++) await new Promise((r) => setTimeout(r, 50)); };
+  const r = await supervise({ root, env, say: async () => {}, sleep, maxLoops: 0, newSessionId: () => "sess-9", console: { log() {} } });
+  assert.equal(r.exit, "done");
+  const settings = JSON.stringify({ permissions: { allow: ["Bash(npm run *)"] }, autoMode: { environment: ["$defaults", "the db (10.0.0.9) & its 50% | ^ \"quoted\" host"] } });
+  assert.deepEqual(JSON.parse(fs.readFileSync(out, "utf8")), ["--session-id", "sess-9", "--model", "opus", "--settings", settings, "--permission-mode", "auto", "/autoclaude:start"]);
+});
+
+test("supervise: a claude that cannot be started at all does not crash the supervisor; the stuck pause says why", async () => {
+  const root = fakeProject("running", { builderSessionId: "b-1" });
+  const sent = [];
+  let clock = T;
+  const r = await supervise({
+    root, env: { PATH: process.env.PATH, CLAUDE_CONFIG_DIR: fs.mkdtempSync(path.join(os.tmpdir(), "autoclaude-sup-cfg-")) },
+    // What Node does with a .cmd and no shell: a synchronous throw.
+    spawnChild: () => { throw Object.assign(new Error("spawn EINVAL"), { code: "EINVAL" }); },
+    agentStatus: () => null, say: async (m) => { sent.push(m); }, now: () => clock, sleep: async (ms) => { clock += ms; }, maxLoops: 4, kill: () => true, newSessionId: () => "s", console: { log() {} }
+  });
+  assert.equal(r.exit, "done");
+  const s = loadState(root);
+  assert.deepEqual([s.status, s.pauseReason], ["paused", "stuck"]);
+  assert.match(sent[0].message, /claude could not start: spawn EINVAL/);
+  assert.match(fs.readFileSync(path.join(root, ".autoclaude", "logs", "supervisor.log"), "utf8"), /claude could not start: spawn EINVAL/);
 });

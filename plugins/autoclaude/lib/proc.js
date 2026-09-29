@@ -115,3 +115,30 @@ export function openConsoleWindow({ title, cwd, program, args = [], logFile = nu
   child.unref();
   return { method: "background", pid: child.pid, command: [program, ...args].join(" ") };
 }
+
+// cmd.exe metacharacters, escaped with a caret after quoting so a line cmd parses hands them on
+// unchanged (the approach of the cross-spawn package).
+const CMD_META = /([()\][%!^"`<>&|;, *?])/g;
+
+// One argument on a cmd.exe line that runs a batch file: quoted for the program's own parser
+// (backslashes before a quote and at the end doubled), then every metacharacter escaped twice,
+// because a batch shim (npm's claude.cmd) hands its arguments to cmd once more through %*.
+export function cmdShimArg(arg) {
+  const quoted = `"${String(arg).replace(/(\\*)"/g, '$1$1\\"').replace(/(\\*)$/, "$1$1")}"`;
+  return quoted.replace(CMD_META, "^$1").replace(CMD_META, "^$1");
+}
+
+// The /c line that runs `exe` (a .cmd or .bat) with `args`, for cmd.exe /d /s /c.
+export function cmdShimLine(exe, args = []) {
+  return `"${[String(exe).replace(CMD_META, "^$1"), ...args.map(cmdShimArg)].join(" ")}"`;
+}
+
+// Starts claude. Node refuses to spawn a .cmd or .bat without a shell (since the 2024 fix for
+// CVE-2024-27980; a synchronous EINVAL), and an npm install of Claude Code is exactly that, so
+// one runs through cmd.exe with every argument escaped. `spawnFn` is for tests.
+export function spawnClaude(exe, args, opts = {}, { windows = isWindows, spawnFn = spawn } = {}) {
+  if (windows && /\.(cmd|bat)$/i.test(String(exe || ""))) {
+    return spawnFn("cmd.exe", ["/d", "/s", "/c", cmdShimLine(exe, args)], { ...opts, windowsVerbatimArguments: true });
+  }
+  return spawnFn(exe, args, opts);
+}
