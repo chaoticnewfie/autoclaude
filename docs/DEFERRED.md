@@ -270,3 +270,27 @@ resolution; decode base64 UTF-16LE after `-EncodedCommand`; resolve `make <targe
 `npm run`; add `.env*` to the footprint's secret scan.
 **No rework.** The parser already records per-command words, quoting, groups and nested code, and
 `ruleTexts` builds the list of texts a rule is tested against.
+
+## 22. Small things the practice run showed
+
+**What.**
+- The fix-up passes took 16.5 of the practice run's 64 minutes (7 and 9.5 min) for 11
+  non-blocking findings, 2 of which were handed to the owner anyway. A setting could limit the
+  pass to findings of a given severity, or turn it off (findings then go straight to the owner).
+- The settings page rewrites the project's `autoclaude.config.json` with its own formatting, so
+  a one-key change shows as a 43-line diff; and a change saved during a run is committed with the
+  run's next step commit (the file is tracked).
+- The footprint's notes between start and end give each Docker call 20 s; on this machine
+  `docker ps -a` took 48 s, so every note was skipped (the end cleanup still worked from compose
+  labels).
+- The completion alert's "Attempts: 10 for 7 steps (4 passed first time)" counts built steps and
+  fix-up passes as attempts; per feature ("Phase 1 in 2 attempts, Phase 2 first time") reads
+  better in phase mode.
+**Why it waits.** None of them is wrong or unsafe; each is a tuning choice for Scott at
+CHECKPOINT 8 or after the DB project's next part (P9.1), where the fix-up cost can be measured
+on real work.
+**Trigger.** CHECKPOINT 8, or P9.1's review.
+**Path.** A `fixup.minSeverity` setting (`low` default, `medium`, `high`, `off`); keep the
+file's own formatting by patching only the changed keys; notes get `min(60 s, what the gate can
+spare)`; the summary counts attempts per feature when `gate.verifyAt` is "phase".
+**No rework.** Each is local to one module (gate.js, configpage.js, footprint.js, summary.js).

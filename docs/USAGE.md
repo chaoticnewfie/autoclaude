@@ -589,7 +589,8 @@ minutes. Saving writes the same files described here; editing them by hand works
 **While a run is going,** only settings that do not change how a step is built or checked can be
 changed: `notify.*`, `usage.*`, `review.pauseAt`, `supervisor.*`, `git.push`, `git.tagPhaseEnds`
 and `footprint.*`. The page locks the rest, and the computer defaults a running project uses,
-until the run is paused. The supervisor rereads the settings at every launch.
+until the run is paused. The supervisor rereads the settings at every launch. A change to the
+project's file saved during a run is committed with the run's next step commit.
 
 These are the built-in defaults:
 

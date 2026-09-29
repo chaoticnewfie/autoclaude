@@ -351,3 +351,12 @@ One entry per working session: what was done, what was committed. Append only.
   remaining best-effort gaps are DEFERRED 21. Full suite: 467 tests, 466 pass, 1 skipped.
 - The practice project now excludes this repo's CLAUDE.md through claudeMdExcludes (checked:
   a session there loads only the user CLAUDE.md). P8.2 to P8.7 ticked.
+- 0.10.2 pushed; test/live/gh-install.live.mjs 10/10 on it; this machine updated in place from
+  0.9.4 to 0.10.2. P8.8 ticked.
+- P8.9 practice run, done headless by Claude: planning in 13 turns (11 rounds, about 40 min),
+  then 7 steps in 2 features in 64 minutes, each feature verified once with a fix-up pass,
+  pushes per feature, a fresh builder for feature 2, HANDOFF.md, the settings page changing an
+  alert switch mid-run (and refusing gate.verifyAt), Docker cleanup that removed a planted tied
+  volume and left a planted untied one. Found: a Playwright MCP connect timeout counted as a
+  failed attempt (fixed, D52), headless init applying its own recommendations (fixed), and
+  four small tuning items (DEFERRED 22). 0.10.3. P8.1 and P8.9 ticked; CHECKPOINT 8 is next.

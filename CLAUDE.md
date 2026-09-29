@@ -14,10 +14,11 @@ what order lives in [PLAN.md](PLAN.md). Where things are right now lives in
 
 ## Status, in one line
 
-Phase 7 in progress (2026-09-27): the plan skill, README and USAGE are done and reviewed (P7.1,
-P7.2), version 0.9.4 installs and runs from GitHub, and an onboarding rehearsal by link reached
-the preflight. 268 tests pass. Next: P7.3, Scott's blind all-day rehearsal on his DB project;
-this machine has no AutoClaude installed on purpose. Never open the DB project (D37).
+Phase 8 done (2026-09-29): per-feature verification, full-scope planning, the settings page,
+alerts per event, HANDOFF.md and Docker cleanup are built, verified by two review workflows, and
+proven by a practice run Claude did itself (7 steps in 64 min). Version 0.10.3 is on GitHub and
+installed on this machine from there. 468 tests pass. Next: CHECKPOINT 8 with Scott, then P9.1,
+his run of the DB project's next part (the DB project may be read for reviews, never edited).
 
 ## Definition of done: every prompt, no exceptions
 

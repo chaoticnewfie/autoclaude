@@ -779,3 +779,22 @@ lines on the footprint and on counting decisions.
   create and push a repository). The remaining gaps are DEFERRED 21.
 - **Windows details:** an npm `claude.cmd` is started through cmd.exe with escaped arguments; a
   check starting with `bash` that would reach WSL's launcher fails the preflight.
+
+### D52 What the practice run changed (2026-09-29)
+
+**Decision.** From the P8.9 practice run on 0.10.2 (0.10.3):
+- A browser checker with no working browser returns `browserUnavailable: true` (a new required
+  verdict field) and the gate treats that run as "could not run": retried once, then an infra
+  pause, never a failed attempt. The checkers' MCP servers get 120 s to start (`MCP_TIMEOUT`,
+  `MCP_CONNECT_TIMEOUT_MS`) unless the owner set their own.
+- The init skill, when headless, asks its two setup questions as text and waits, like the plan
+  skill, instead of applying its recommendations.
+
+**Why.** In the practice run the tester's Playwright MCP timed out on connect; the tester marked
+all 9 Accept lines FAIL with "not checked", and the gate counted it as the feature's first
+attempt and sent the builder a failure report about working code. Three such timeouts would have
+paused the run as `step-failed`, blaming the code. Headless init applied "add a Playwright
+scaffold" on its own, which planning then had to undo.
+
+**Rejected.** Inferring "no browser" from the evidence text (fragile wording); a longer default
+without the flag (a checker that never connects would still fail the feature).
