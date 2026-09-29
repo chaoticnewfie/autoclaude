@@ -798,3 +798,17 @@ scaffold" on its own, which planning then had to undo.
 
 **Rejected.** Inferring "no browser" from the evidence text (fragile wording); a longer default
 without the flag (a checker that never connects would still fail the feature).
+
+### D53 CHECKPOINT 8: keep it as it is (2026-09-29)
+
+**Decision.** Scott accepted every choice the build and review agents made (D50 to D52),
+including no "Phase N verified" alert for the last feature, HANDOFF.md committed and pushed, a
+plain `git push` allowed when pushing is on, and Docker cleanup only of what is provably the
+project's. The fix-up pass stays as it is (DEFERRED 22 stays deferred). Next is P9.1: a second
+all-day run on the DB project on 0.10.3, which he watches in person.
+
+**Why.** Scott: "All of those decisions are good with me, and I think I want to keep everything
+as is, and do another test run on the db project all day today so I'm able to pop in and look at
+everything running."
+
+**Rejected.** A `fixup.minSeverity` setting now (DEFERRED 22), until a real run measures it.

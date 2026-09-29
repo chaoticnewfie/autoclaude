@@ -360,3 +360,7 @@ One entry per working session: what was done, what was committed. Append only.
   volume and left a planted untied one. Found: a Playwright MCP connect timeout counted as a
   failed attempt (fixed, D52), headless init applying its own recommendations (fixed), and
   four small tuning items (DEFERRED 22). 0.10.3. P8.1 and P8.9 ticked; CHECKPOINT 8 is next.
+- CHECKPOINT 8 held: Scott accepted D50 to D52 and keeps the fix-up pass (D53). He runs the DB
+  project's next part today (P9.1). Checked the DB project read-only: the Phase A run branch is
+  28 commits ahead of main and not merged; its config (from 0.9.4) already pushes; its old deny
+  rules block ssh, pve and qm; AUTOCLAUDE.md is the 0.9.4 copy; no watchdog is installed.

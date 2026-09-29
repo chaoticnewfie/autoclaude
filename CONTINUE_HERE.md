@@ -17,7 +17,7 @@ Playwright connect timeout counted as a failed attempt) is fixed in 0.10.3 (D52)
 
 ## The exact next step
 
-CHECKPOINT 8: show Scott the practice run's HANDOFF.md (`spikes/out/todo-live/HANDOFF.md`), the
+CHECKPOINT 8 was held (D53). Now P9.1, Scott runs the DB project; before that: show Scott the practice run's HANDOFF.md (`spikes/out/todo-live/HANDOFF.md`), the
 alerts on Discord, the settings page (`autoclaude config` in that folder), and the time per
 feature against the rehearsal. Ask him about DEFERRED 22 (the fix-up pass cost 16.5 of 64 min;
 a `fixup.minSeverity` setting?) and the D50 and D51 choices. Then Phase 9: P9.1 is Scott's run of
