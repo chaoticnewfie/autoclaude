@@ -17,11 +17,12 @@ Playwright connect timeout counted as a failed attempt) is fixed in 0.10.3 (D52)
 
 ## The exact next step
 
-CHECKPOINT 8 was held (D53). Now P9.1, Scott runs the DB project; before that: show Scott the practice run's HANDOFF.md (`spikes/out/todo-live/HANDOFF.md`), the
-alerts on Discord, the settings page (`autoclaude config` in that folder), and the time per
-feature against the rehearsal. Ask him about DEFERRED 22 (the fix-up pass cost 16.5 of 64 min;
-a `fixup.minSeverity` setting?) and the D50 and D51 choices. Then Phase 9: P9.1 is Scott's run of
-the DB project's next part on 0.10.x.
+CHECKPOINT 8 was held (D53): everything stays as it is. Now P9.1: Scott plans and runs the DB
+project's next part (create the new VM and work there) on 0.10.3, watching in person. Before his
+planning: he decides whether to merge the Phase A run branch into main first; he refreshes
+AUTOCLAUDE.md (delete it, `autoclaude init`); the scope round must drop the old deny rules that
+block ssh, pve and qm; `autoclaude watchdog --install`. After the run, review it the way P7.3 was
+reviewed and turn every issue into a fix or a DEFERRED entry.
 
 ## Notes for whoever continues
 
@@ -42,5 +43,5 @@ the DB project's next part on 0.10.x.
 ## Decisions Scott still owns
 
 - Whether the project template ships the fuller docs set as stubs (default: core files only).
-- The build and verification choices in D50 to D52, for review at CHECKPOINT 8.
-- DEFERRED 22: limit or switch off the fix-up pass; the other small practice-run items.
+- Whether to merge the DB project's Phase A run branch before planning the next part.
+- DEFERRED 22 (fix-up pass cost and small items): deferred until a real run measures them.
