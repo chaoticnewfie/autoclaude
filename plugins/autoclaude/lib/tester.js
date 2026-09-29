@@ -43,10 +43,21 @@ export const VERDICT_SCHEMA = {
     },
     consoleErrors: { type: "array", items: { type: "string" } },
     testConcerns: { type: "array", items: { type: "string" } },
-    notes: { type: "string" }
+    notes: { type: "string" },
+    // The checker had no working browser (Playwright MCP missing or not connecting): nothing was
+    // checked, so it is "could not run", never a failed attempt (practice run, 2026-09-29).
+    browserUnavailable: { type: "boolean" }
   },
-  required: ["verdict", "criteria", "bugs", "consoleErrors", "testConcerns", "notes"]
+  required: ["verdict", "criteria", "bugs", "consoleErrors", "testConcerns", "notes", "browserUnavailable"]
 };
+
+// Claude Code gives an MCP server this long to start unless the owner set their own. npx can
+// need more than the default the first time or on a busy machine: in the practice run the
+// tester's Playwright MCP timed out on connect and the tester checked nothing.
+export const MCP_START_MS = "120000";
+export function checkerEnv(env) {
+  return { ...env, MCP_TIMEOUT: env.MCP_TIMEOUT || MCP_START_MS, MCP_CONNECT_TIMEOUT_MS: env.MCP_CONNECT_TIMEOUT_MS || MCP_START_MS };
+}
 
 // Playwright MCP tools, plus read-only file tools. Nothing that edits or runs commands.
 export const ALLOWED_TOOLS = ["mcp__playwright", "Read", "Glob", "Grep"];
@@ -340,12 +351,16 @@ export async function runBrowserCheck({ kind = "tester", root, config, step = nu
     if (tries > 0 && remaining < Math.max(MIN_RETRY_MS, firstBudget * 0.5)) { errors.push("no time left for a retry before the gate's own timeout"); break; }
     tries++;
     const timeoutMs = Math.max(30000, Math.min(timeoutSec * 1000, remaining));
-    result = await runWithWrapUp(run, { prompt, args, cwd: shotsDir, env, role: kind, timeoutMs, deadlineMs });
+    result = await runWithWrapUp(run, { prompt, args, cwd: shotsDir, env: checkerEnv(env), role: kind, timeoutMs, deadlineMs });
     cut = !result.ok && !!result.timedOut && timeoutMs < timeoutSec * 1000;
     totalMs += result.durationMs || 0;
     if (typeof result.costUsd === "number") cost += result.costUsd;
     if (result.ok) {
       evaluation = evaluateVerdict(kind, result.structured);
+      if (evaluation.valid && result.structured.browserUnavailable === true) {
+        const why = String(result.structured.notes || "").trim().slice(0, 300);
+        evaluation = { valid: false, reason: `it had no working browser${why ? `: ${why}` : ""}` };
+      }
       if (evaluation.valid) break;
       errors.push(evaluation.reason);
       result = { ...result, ok: false };

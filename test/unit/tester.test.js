@@ -27,7 +27,7 @@ const config = mergeConfig({ devServer: { command: "npm run dev", url: "http://1
 const good = { verdict: "pass", criteria: [{ text: "each item shows a price", result: "pass", evidence: "saw $5.00 on all three" }], bugs: [{ severity: "low", title: "price misaligned", repro: "open /things", expected: "aligned", actual: "2px off" }], consoleErrors: [], testConcerns: ["test for zero price was removed"], notes: "fine" };
 
 test("the verdict schema requires every field and the tools are read-only", () => {
-  assert.deepEqual(VERDICT_SCHEMA.required, ["verdict", "criteria", "bugs", "consoleErrors", "testConcerns", "notes"]);
+  assert.deepEqual(VERDICT_SCHEMA.required, ["verdict", "criteria", "bugs", "consoleErrors", "testConcerns", "notes", "browserUnavailable"]);
   assert.deepEqual(ALLOWED_TOOLS, ["mcp__playwright", "Read", "Glob", "Grep"]);
 });
 
@@ -144,6 +144,24 @@ test("runBrowserCheck: one infra failure is retried; two are reported as infra",
   ({ r, calls } = await check([ok({ ...good, criteria: [] })]));
   assert.equal(r.status, "infra", "an answer with no criteria is not a verdict");
   assert.match(r.failed, /no criteria/);
+});
+
+test("runBrowserCheck: a checker with no working browser could not run: retried, then infra, never a failed attempt; MCP servers get time to start", async () => {
+  // The practice run (2026-09-29): Playwright MCP timed out on connect, and the tester failed
+  // every Accept line with "not checked", which counted against the feature.
+  const noBrowser = { ...good, verdict: "fail", criteria: [{ text: "each item shows a price", result: "fail", evidence: "Not checked: Playwright MCP failed to connect (CONNECT_TIMEOUT)" }], browserUnavailable: true, notes: "Playwright MCP failed to connect (CONNECT_TIMEOUT)" };
+  let { r, calls } = await check([ok(noBrowser), ok(good)]);
+  assert.deepEqual([r.status, calls.length], ["passed", 2]);
+  ({ r, calls } = await check([ok(noBrowser), ok(noBrowser)]));
+  assert.deepEqual([r.status, calls.length], ["infra", 2]);
+  assert.match(r.failed, /could not run \(2 tries\): it had no working browser: Playwright MCP failed to connect/);
+  assert.equal(calls[0].env.MCP_TIMEOUT, "120000");
+  assert.equal(calls[0].env.MCP_CONNECT_TIMEOUT_MS, "120000");
+  ({ calls } = await check([ok(good)], { env: { ...process.env, MCP_TIMEOUT: "300000" } }));
+  assert.equal(calls[0].env.MCP_TIMEOUT, "300000", "the owner's own setting wins");
+  // browserUnavailable false (or absent, from an older checker) is an ordinary verdict.
+  ({ r } = await check([ok({ ...good, browserUnavailable: false })]));
+  assert.equal(r.status, "passed");
 });
 
 test("runBrowserCheck: a checker that runs out of turns is asked for its answer, and the prompt states the budget", async () => {

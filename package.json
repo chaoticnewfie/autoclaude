@@ -1,6 +1,6 @@
 {
   "name": "autoclaude-repo",
-  "version": "0.10.2",
+  "version": "0.10.3",
   "private": true,
   "description": "Development scripts for the AutoClaude plugin repo. The plugin itself lives in plugins/autoclaude and has no dependencies.",
   "type": "module",

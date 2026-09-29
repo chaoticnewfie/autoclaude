@@ -425,7 +425,7 @@ async function cmdRun(args, io) {
   }
   io.out(`autoclaude: ${continuing ? "continuing the finished plan with its new steps" : fresh ? "starting the run" : `bringing back the ${state.status} run`} in a new window, ${title} (${r.method}).`);
   io.out("  Watch:  the window, or `autoclaude status` from any terminal. Leave the window open; an RDP disconnect is fine, logging off is not.");
-  io.out("  Stop:   `autoclaude pause` (after the current step is verified) or `autoclaude pause --now`.");
+  io.out("  Stop:   `autoclaude pause` (after the current step is committed) or `autoclaude pause --now`.");
   io.out("  Notes:  `autoclaude note \"...\"` any time; they reach Claude at the next step or resume.");
   return 0;
 }

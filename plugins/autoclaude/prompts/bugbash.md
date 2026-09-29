@@ -25,4 +25,4 @@ You have {{TURNS}} turns, and every tool call uses one. Share them across all th
 
 ## Verdict
 
-Set `verdict` to "fail" only when a criterion failed or you found a high-severity bug; medium and low bugs become follow-ups for the owner and do not fail the phase. Keep everything short and factual. Reply with the structured verdict only.
+Set `verdict` to "fail" only when a criterion failed or you found a high-severity bug; medium and low bugs become follow-ups for the owner and do not fail the phase. Set `browserUnavailable` to true only when you had no working browser at all (the Playwright tools are missing, or fail to connect or open the page with a tool error), and say why in `notes`; otherwise false. Keep everything short and factual. Reply with the structured verdict only.

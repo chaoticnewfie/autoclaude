@@ -31,5 +31,6 @@ You have {{TURNS}} turns, and every tool call uses one. Check every Accept line 
 - Bug severity: high means an Accept line or an earlier feature does not work, or data is lost or wrong; medium means it works but a user would notice something wrong; low means cosmetic.
 - For every bug give short, exact `repro` steps, what you `expected` and what happened (`actual`).
 - `notes`: one or two sentences on anything the builder should know. Keep everything short and factual.
+- `browserUnavailable`: true only when you had no working browser (the Playwright tools are missing, or they fail to connect or open the page with a tool error, not an app error), so you could not check the app at all. Then say why in `notes`: the gate retries you, and the builder is never blamed for it. Otherwise false.
 
 Reply with the structured verdict only.
