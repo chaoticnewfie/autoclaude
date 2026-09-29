@@ -734,3 +734,48 @@ settings, a background decider, verifying mid-feature, and so on), rejected for 
 given with each.
 
 **Rejected.** Recorded per line above.
+
+### D51 What the Phase 8 verification changed (2026-09-29)
+
+A four-lens verification of the committed Phase 8 code (the per-feature gate, the Accept lines,
+safety, Windows live-readiness) confirmed 29 defects; two fix rounds (0.10.1, 0.10.2) and their
+own skeptic checks followed. Choices made, each between real alternatives. Supersedes the D50
+lines on the footprint and on counting decisions.
+
+- **Docker cleanup needs proof, not timing.** An object is removed only when it was not in the
+  start record, Docker dates its creation after the start, the same engine answers at the end
+  (engine id, name and OS), and it is tied to this project: its compose folder is in the
+  project, it bind-mounts a project folder, it carries a compose project name the project
+  declares, or (volumes, networks) a tied container uses it. A volume tie also carries the
+  volume's creation time and labels, so a later volume of the same name is not taken for it.
+  Docker's predefined networks are never considered. Anything else new is reported as "not tied
+  to this project" and left alone. Why: Scott's rule is "clean up what it created, report the
+  rest", and time alone cannot show who created something; a context switch could otherwise
+  wipe another engine. Rejected: removing whatever appeared during the run (the 0.10.0 code).
+- **Run decisions are counted by number, not date.** The highest D-### and N-### at run start
+  (state.decisionsAtStart, or the log at the run's base commit) mark where the run's own
+  entries begin. Rejected: dates (two runs in a day mix) and entry counts (break on insertions).
+- **Out of time is its own pause reason.** A verification cut off by the hook, a check or
+  checker stopped at the gate's deadline, or a passed feature whose commit was cut off twice
+  with the files changed each time: the second time pauses `out-of-time` with a high alert
+  naming the levers. It is never an attempt. Checks are capped by the gate's deadline; the
+  checkers share what is left, each leaving half a fair share for every checker after it.
+  Rejected: counting these as infra failures (blames Playwright and the CLI, the wrong
+  diagnosis) and strict proportional shares (cut the tester even when everything would fit).
+- **Close and completion are resumable.** The pass is recorded in state before the commit; a
+  stop cut off in the commit, tag, push or hand-back is finished by the next stop, once. The run
+  is marked complete only after HANDOFF.md is committed. A resumed close whose files changed
+  after the checks is verified again, except when only CONTINUE_HERE.md changed. Rejected:
+  committing the recorded tree with plumbing (bypasses the project's hooks).
+- **The fix-up pass closes only with an outcome for every finding** (fixed, or "left for the
+  owner: <why>"); a row the builder deleted is put back as left for the owner.
+- **Phase tags from an earlier run** keep their name; this run tags
+  `ac-phase-<n>-<7 characters of its start commit>`.
+- **The guard, with pushes on:** a plain push is allowed; every force form, remote deletes and
+  prunes, and git settings that change what a push does are denied, as are edits to this
+  computer's AutoClaude settings and Claude Code's settings.json. A recursive delete must name a
+  target the guard can place; guard.deny also sees inline code and container commands. Git
+  reads (tag listings, config reads) pass. Rejected: denying every builder push (a plan may
+  create and push a repository). The remaining gaps are DEFERRED 21.
+- **Windows details:** an npm `claude.cmd` is started through cmd.exe with escaped arguments; a
+  check starting with `bash` that would reach WSL's launcher fails the preflight.

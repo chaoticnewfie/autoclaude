@@ -224,7 +224,10 @@ defaults and the planning questions.
 ## 20. Docker images in the run's footprint
 
 **What.** Record the Docker images present at run start, and at completion report (or remove)
-images the run pulled or built that nothing uses.
+images the run pulled or built that nothing uses. Also: anonymous volumes of test containers
+that are created and removed inside one check run (the rehearsal's 33 volumes were of this
+kind) can be tied to the project only through Docker's short event log, so they are usually
+reported, not removed; a `docker events` stream held open while the checks run would tie them.
 **Why it waits.** The footprint (P8.5) covers containers, volumes and networks, which is what the
 rehearsal leaked (33 volumes). Images are large but shared and cached on purpose; removing one a
 later project needs costs a slow pull, and telling "pulled by this run" from "pulled by the owner
@@ -237,17 +240,33 @@ not list at start.
 
 ## 21. Tool guard blind spots
 
-**What.** Close the gaps the Phase 8 guard rewrite left, each only if a run hits it: a
-`guard.deny` pattern that spans two commands of a pipe (rules now match one command at a time);
-PowerShell `-EncodedCommand` (not decoded); make targets and scripts run from inside other
-programs (invisible, as before); secrets written outside `secrets/`, such as a root `.env`
-(not tracked by the footprint).
-**Why it waits.** The guard is best-effort by design (docs/USAGE.md section 12); the account the
-run uses is the real boundary, and planning now pre-approves exactly what the plan allows. None
-of these was seen in the rehearsal, while the rehearsal's 13 false positives were real.
+**What.** Gaps the Phase 8 verification found in the tool guard and deliberately left, each to
+close only if a run hits it (the rest were fixed in 0.10.1 and 0.10.2):
+- a shell script fed to a container's shell through stdin (heredoc, pipe, `<`), and Perl's
+  `system qw(...)` or `system @list`;
+- recursive deletes inside inline code (`node -e` with rmSync, Python's shutil.rmtree, Perl)
+  are checked only against the protected files, not against the project and temp boundary;
+- wrappers the guard does not know (busybox, stdbuf, flock, setsid, ionice, doas, winpty,
+  chroot) hide the command after them;
+- a variable set by a form the guard does not read (`+=`, arrays, `read`, `printf -v`, `eval`,
+  `Set-Variable`, `foreach`) keeps its old value; targets handed to `rm` at run time (`"$@"`,
+  `xargs sh -c`, `find -exec sh -c`); `cd -`, `popd`, `Pop-Location`;
+- links and junctions inside the project are judged by name, not by where they lead (only
+  temp-folder paths are resolved);
+- path-building forms around `defaults.json` and `notify.json`; push settings set outside
+  `git config` and `-c` (for example in a config file the builder writes);
+  `git config --rename-section` into `alias.*` or `remote.*`;
+- PowerShell `-EncodedCommand`; make targets; secrets written outside `secrets/`, such as a
+  root `.env` (not tracked by the footprint);
+- a false positive: `git tag --sort -v:refname` with a space (`--sort=-v:refname` passes).
+
+**Why it waits.** The guard is best-effort by design (docs/USAGE.md section 12). The account the
+run uses and Claude Code's auto mode are the real boundary, and planning pre-approves exactly
+what the plan allows. None of these was seen in the rehearsal, while its 13 false positives were
+real and cost time; every extra rule risks new ones.
 **Trigger.** A denial log or review that shows one of them happening.
-**Path.** Per gap: a pipe-aware rule mode (`"scope": "line"`); decode base64 UTF-16LE after
-`-EncodedCommand` or `-enc`; resolve `make <target>` like `npm run`; add `.env*` to the
-footprint's secret scan.
-**No rework.** `ruleTexts` in the guard already builds the list of texts a rule is tested
-against, and the footprint already scans one folder for secrets.
+**Path.** Per gap, in `scripts/tool-guard.js`: extend `ruleTexts` and the recursive-delete target
+resolution; decode base64 UTF-16LE after `-EncodedCommand`; resolve `make <target>` like
+`npm run`; add `.env*` to the footprint's secret scan.
+**No rework.** The parser already records per-command words, quoting, groups and nested code, and
+`ruleTexts` builds the list of texts a rule is tested against.

@@ -54,7 +54,7 @@ Contents:
 
 | What | Install (Windows) | Install (macOS / Linux) | Check |
 |---|---|---|---|
-| Claude Code, native install | `irm https://claude.ai/install.ps1 \| iex` in PowerShell | `curl -fsSL https://claude.ai/install.sh \| bash` | `claude --version` |
+| Claude Code, native install (an npm install works too) | `irm https://claude.ai/install.ps1 \| iex` in PowerShell | `curl -fsSL https://claude.ai/install.sh \| bash` | `claude --version` |
 | Node.js 24 or newer | `winget install OpenJS.NodeJS` | your package manager, or nodejs.org | `node --version` |
 | git | `winget install Git.Git` (Git for Windows, which Claude Code also needs) | your package manager | `git --version` |
 | GitHub CLI (one way to reach the private repo) | `winget install GitHub.cli` | `brew install gh`, or your package manager | `gh --version` |
@@ -531,6 +531,7 @@ in and run `autoclaude run` in the project, or let the watchdog do it.
 | `security` | The last attempt failed on a security finding at or above `security.blockOn`; the step is marked `[!]` | Read the findings in the latest report (`SECURITY-FINDINGS.md` holds only non-blocking ones), decide, `autoclaude resume` |
 | `stuck` | The builder stopped making progress | Look at the run window, `.autoclaude/logs/supervisor.log` and `.autoclaude/logs/gate.log`, then `autoclaude resume` |
 | `infra` | The browser tester, the bug bash or the security reviewer could not run twice (usually Playwright or the `claude` command) | Fix the named tool, `autoclaude resume` |
+| `out-of-time` | A feature's verification did not fit in one gate run twice: the checks plus the checkers take longer than the hook allows (`gate.timeoutSec`, at most 30 minutes). Also when a passed feature's commit was cut off twice (for example by a slow pre-commit hook) and the files changed each time | Split the phase into smaller features, make the checks faster (keep each `timeoutSec` well below `gate.timeoutSec`), lower `tester.maxTurns`, or turn off `bugBash.atPhaseEnd`; then `autoclaude resume` |
 | `commit-failed` | A step passed but git could not commit it; the work is safe in the working tree | Fix git (often: git not on the PATH the run started with), then `autoclaude resume`, which commits it first |
 | `weekly-limit` | Weekly usage reached `usage.weeklyPauseAtPct` (between steps), or 99% when a usage limit stopped the builder | Wait for the reset and `autoclaude resume`, or set `usage.autoResumeAfterWeeklyReset` |
 
@@ -547,9 +548,19 @@ The plan-complete message summarises the run. Then:
 2. Try the result yourself, and fine-tune it in normal sessions.
 3. Merge the branch the way your project merges. The run already pushed it (with `git.push`).
 
-At the end the run also cleans up after itself: Docker containers that have stopped, and volumes
-and networks nothing uses, are removed when the run created them. Nothing that existed before
-the run is ever removed. `footprint.docker: false` turns this off.
+At the end the run also cleans up after itself (`footprint.docker: false` turns this off). A
+stopped Docker container, or a volume or network nothing uses, is removed only when all of this
+holds: it was not there when the run started, Docker dates it after the start, the same Docker
+engine answers at the end as at the start, and it is tied to this project: its compose folder is
+in the project, it bind-mounts a folder of the project, it carries the project's compose project
+name, or (for a volume or network) a tied container uses it. Anything else new is listed in
+HANDOFF.md as left alone, because another project or you may have made it. Nothing that existed
+before the run is ever removed. Plans help by tearing test stacks down with
+`docker compose down -v` and using `docker run --rm`: an anonymous volume whose container is
+already gone can seldom be tied to the project, so it is only reported.
+
+HANDOFF.md is written just before its own commit and push, so its push lines describe the pushes
+before it; the completion alert reports the final push.
 
 The run window stays open with the builder idle, so you can ask it about the run. Closing it ends
 the supervisor.
@@ -627,15 +638,15 @@ These are the built-in defaults:
 | `bugBash.atPhaseEnd` | Run the bug bash when a feature with a UI step is verified |
 | `retries` | `maxAttemptsPerStep`: attempts before a feature (or a step, in "step" mode) pauses the run. `maxNoProgressStops`: stops in a row with no tool use and no new commit before the gate pauses as stuck. `maxMinutesPerStep` is accepted but not enforced yet |
 | `usage` | The weekly pause threshold between steps, whether to resume by itself after the weekly reset, and how old usage data may be before it is ignored |
-| `git.commitEachStep`, `git.tagPhaseEnds` | Commit every step (built, then verified) and tag each verified feature `ac-phase-<n>` |
+| `git.commitEachStep`, `git.tagPhaseEnds` | Commit every step (built, then verified) and tag each verified feature `ac-phase-<n>` (`ac-phase-<n>-<7 characters of the run's start commit>` when an earlier run already used that name) |
 | `git.push` | Push the run branch and its tag after each verified feature, and HANDOFF.md at the end. The builder may also push (never force-push). `false` keeps everything local |
-| `gate.timeoutSec` | The time budget for the browser tester, bug bash and security reviewer within one verification; at most 1800, which is Claude Code's limit for the hook that runs the gate. Each check has its own `timeoutSec` |
+| `gate.timeoutSec` | The time budget for one verification: the checks, then the browser tester, bug bash and security reviewer; at most 1800, which is Claude Code's limit for the hook that runs the gate. A check's own `timeoutSec` is cut to what is left. The checkers share the rest, so a later one is never starved; one stopped by the budget is "out of time", and twice in a row pauses the run (`out-of-time`, section 9) |
 | `gate.verifyAt` | `phase` (the default): verify once per feature, at its last step. `step`: verify every step on its own |
 | `notify.morningSummaryAt` | `"HH:MM"` local time for a daily summary, or `null` |
 | `notify.events` | The alerts you can switch (section 6); critical alerts are always sent |
 | `review.pauseAt` | `never`, `phase-end` or `every-step` |
 | `supervisor` | `pollSec` (seconds between checks), `idleRelaunchMin`, `stallMin`, `resumeGraceMin`, `rateLimitGraceMin` (minutes; section 8), and `maxRecoveries` (restarts without progress before a stuck pause) |
-| `footprint.docker` | Remove stopped Docker containers, and unused volumes and networks, that the run created, when the plan completes |
+| `footprint.docker` | At plan completion, remove the stopped Docker containers, and unused volumes and networks, that the run created and that are tied to this project (section 10) |
 | `guard.deny` | Extra commands the run may never execute (section 12): `{ "pattern": "<regular expression>", "reason": "<what to do instead>" }` |
 | `permissions.allow` | Claude Code permission rules the run is given, such as `"Bash(ssh myserver *)"`. Planning writes them from what you allowed; each one lets the builder do that without the auto-mode safety check stopping it |
 | `permissions.environment` | Plain-language lines telling auto mode which infrastructure is trusted for this run (for example "The Proxmox host pve at 192.168.1.10 is ours; creating VMs there is expected") |
@@ -655,9 +666,18 @@ AutoClaude:
 
 - denies questions to you (the builder decides, runs `autoclaude decide`, or stops with
   `blocked`)
-- denies edits to the plan, `autoclaude.config.json` and `.autoclaude/`; commits and tags by the
-  builder (the gate commits); pushing when `git.push` is false; force pushes; `git reset --hard`;
-  and recursive deletes outside the project folder and the temp folder
+- denies edits to the plan, `autoclaude.config.json` and `.autoclaude/`, and to this computer's
+  AutoClaude settings (`defaults.json`, `notify.json`) and Claude Code's `settings.json` in the
+  Claude config folder; commits and tags by the builder (the gate commits); `git reset --hard`
+- with `git.push` true, allows a plain `git push` (to a repository the plan creates, too) but
+  denies force pushes in every form (`--force`, `-f`, `--force-with-lease`, `--mirror`, a
+  `+ref`), deleting or pruning remote branches and tags (`--delete`, `--prune`, a `:ref`), and
+  setting git aliases or push settings on the command line or with `git config`; with
+  `git.push` false, denies every push
+- denies recursive deletes outside the project folder and the temp folder, and any recursive
+  delete whose target it cannot read as a plain path (a variable set by a command, a
+  substitution, a brace expansion, a broad wildcard); in the temp folder, links and junctions are
+  followed to where they really lead
 - denies every command matching a `guard.deny` rule
 - auto-denies any permission prompt, with guidance, so the session never sits waiting
 
@@ -669,11 +689,21 @@ and into `guard.deny` rules for what is off limits. Anything not allowed stays b
 mode's own safety checks. Planning also offers a snapshot of any existing machine before the run
 changes it, and asks before installing or pulling anything while planning.
 
+A recursive delete therefore has to name its target: `rm -rf dist`, `Remove-Item -Recurse -Force
+.\build`, `rm -rf "$TMPDIR/x"`, `d=$(mktemp -d); ...; rm -rf "$d"` and
+`$d = Join-Path $env:TEMP x; Remove-Item -Recurse -Force $d` pass, while
+`Get-ChildItem dist | Remove-Item -Recurse`, `rm -rf {dist,build}` and a folder computed by
+another command are refused with a message saying to name the path. Reading git state is fine:
+`git tag` listings and `git config <key>` reads pass; making or deleting tags and setting
+aliases or push settings do not.
+
 The shell rules cover the Bash and PowerShell tools. `guard.deny` rules are tested against each
 command a line runs (and against the script behind `npm run <name>`), not against its data: a
-heredoc body, a `grep` for a blocked name or a file being read does not trigger them. They are
-still best-effort: a script that does something forbidden inside it is not caught unless its own
-name is in `guard.deny`. Name every script, host and tool that reaches outside the project;
+heredoc body, a `grep` for a blocked name or a file being read does not trigger them. Commands
+started from inside other programs count as commands too: `bash -c`, `powershell -Command`,
+inline Perl, Ruby, PHP, Python or Node code that starts processes, `sed`'s `e` command, and a
+shell run inside a container. They are still best-effort: a script file that does something
+forbidden inside it is not caught unless its own name is in `guard.deny`. Name every script, host and tool that reaches outside the project;
 `autoclaude guard-test "<command>"` shows what a rule blocks.
 
 **Secrets.** Keep them out of the plan and the repository. A secret the run can generate itself
@@ -737,6 +767,7 @@ do not.
 | `FAIL trust` | Claude Code was never opened in this folder, or its first-run questions are unanswered | Run `claude` in the project once, answer, `/exit` |
 | `warn checks` | No checks configured; only the browser tester and the reviewers verify steps | Add checks (section 11) |
 | `FAIL checks` | A check's program is missing, its npm script does not exist, its `requires` command failed, or it needs a dev server that is not configured | Fix the command, install or start what it needs (for example Docker), or change the check |
+| `FAIL checks` (or `devServer.command`) naming WSL's bash | On Windows, a command starting with `bash` would run Windows' WSL launcher (`System32\bash.exe`), not Git Bash | Start the command with Git's bash by full path (`"C:/Program Files/Git/bin/bash.exe" script.sh`), or put Git's `bin` folder before System32 on PATH; start it with `wsl` if WSL is meant |
 | `FAIL playwright` | UI steps and a dev server are configured, but Chromium is not installed | `npx playwright install chromium` (`npx.cmd` in PowerShell) |
 | `FAIL dev server` | The dev server did not start or answer at `devServer.url` | Run `devServer.command` by hand; check the URL, `healthPath` and `startTimeoutSec` |
 | `warn dev server` | Not running yet, but the next step is `no-ui`; or no dev server is configured, so UI steps are not checked in a browser | Nothing, if that is expected |
@@ -761,7 +792,9 @@ do not.
 | A check passes in your terminal but fails in the gate (`spawn ... ENOENT`) | The run's PATH lacks a tool. Start the run from a terminal where it works; `autoclaude checks` uses the PATH the run recorded |
 | A setting cannot be changed on the settings page | It is locked while a run is going (section 11). Pause, change it, resume |
 | "Push failed" alert | The work is committed locally and the next verified feature pushes again. Check your git credentials or network; `git push` by hand works too |
-| Docker things left after a run | HANDOFF.md, "What the run left on this computer", lists them with the commands to remove them |
+| Docker things left after a run | HANDOFF.md, "What the run left on this computer", lists them: the ones tied to this project with the commands to remove them, and new ones it could not tie to the project, left alone on purpose |
+| `autoclaude start` takes minutes | Docker Desktop's engine was asleep (Resource Saver); recording the machine's Docker state waits up to 4 minutes for it to wake |
+| Paused as `out-of-time` | Section 9 |
 
 Logs: the project's `.autoclaude/logs/` for a run; `~/.claude/autoclaude/logs/` for the watchdog
 and machine-level alerts.

@@ -327,3 +327,27 @@ One entry per working session: what was done, what was committed. Append only.
   snapshot offer and pre-approved permissions, secrets into secrets/, a fix-up pass for findings,
   HANDOFF.md, Docker cleanup, per-event alerts, layered settings and a browser config page,
   version 0.10.0 after a practice run Claude does itself, 1.0 after the DB project's next part.
+
+## 2026-09-28 (Code VM) - Phase 8 built (0.10.0)
+
+- Six build agents, an integration agent and an adversarial reviewer built Phase 8 in one
+  workflow. Integration: 368 of 368 tests and 44 end-to-end interface checks with fakes (Docker,
+  notifier, push, decider, browser). The reviewer added test/scenarios/feature-gate.test.js and
+  fixed what it proved: a pause or note given during a verification was lost; a session ended
+  mid-verification left plan ticks and PROGRESS lines behind; a phase verified again broke the
+  next tag push; built steps no verification would reach could stay [~] at completion. The
+  session hosting the workflow ended before the reviewer reported; its edits were complete and
+  the full suite then ran 390 of 391 (the PowerShell file-lock test starting too slowly under
+  load, which now reports a skip in that case).
+- Docs for 0.10.0: INSTRUCTIONS.md and its template copy, docs/USAGE.md, README.md. D50 records
+  the build agents' choices; DEFERRED 20 (Docker images) and 21 (guard blind spots).
+- Pushed as f78f434 (code), 3355ad2 (docs), 7d9ab81 (practice helpers). A four-lens verification
+  workflow then checked the committed code before the practice run.
+- The verification workflow (37 agents) confirmed 29 defects, 3 of them high: the Docker cleanup
+  treated anything created during the run as the run's own, and would have removed another
+  project's volumes; it never checked it was talking to the same Docker engine. Two fix rounds
+  (0.10.1 fd083a0, then 0.10.2) and their skeptic checks followed; a cmd.exe redirect regression
+  and a cut-off-close loop from round 2 were fixed by hand. D51 records the choices; the guard's
+  remaining best-effort gaps are DEFERRED 21. Full suite: 467 tests, 466 pass, 1 skipped.
+- The practice project now excludes this repo's CLAUDE.md through claudeMdExcludes (checked:
+  a session there loads only the user CLAUDE.md). P8.2 to P8.7 ticked.

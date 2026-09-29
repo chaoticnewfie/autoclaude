@@ -177,6 +177,13 @@ this machine has no AutoClaude installed on purpose. Never open the DB project (
 - The PreToolUse, PostToolUse and Stop hooks of this plugin run in every session on the machine,
   including this one. They must stay silent and instant when no run is active, and the Stop hook
   imports its libraries lazily so a half-written library can never break someone's session.
+- A scratch project under this repo (spikes/out/...) also loads this repo's CLAUDE.md in every
+  session. `claudeMdExcludes` in the scratch project's `.claude/settings.json` (absolute paths or
+  globs, picomatch) keeps it out; `spikes/lib/prep-practice.mjs` writes it. Checked with a
+  headless session listing its loaded memory files: only `~/.claude/CLAUDE.md` remained.
+- Workflow agents that run the full suite in parallel make PowerShell start slowly enough (over
+  60 s) that the file-lock test cannot take its lock; it reports a skip then. Run one full suite
+  at a time.
 
 ## Documentation index
 
