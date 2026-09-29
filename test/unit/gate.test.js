@@ -60,3 +60,14 @@ test("openFixupFindings: a row is done when fixed or closed, or left for the own
   const open = openFixupFindings(root, [...findings, { source: "browser tester", severity: "low", text: "older run", doc: "docs/BLOCKERS.md", row: null }]);
   assert.deepEqual(open.map((f) => [f.text, f.status]), [["finding 3", "left for the owner"], ["finding 4", "open"], ["finding 5", null]]);
 });
+
+test("openFixupFindings finds a row whose text the builder added a note to, and never takes one finding's row for another's", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "autoclaude-fixup-"));
+  fs.mkdirSync(path.join(root, "docs"));
+  const row = (what, status) => `| 2026-09-28 | browser tester | S1.3 | ${what} | Claude | ${status} |`;
+  // Finding 2's text starts with finding 1's; the builder noted the fix in finding 1's row.
+  const filed = [row("low: a.", "open"), row("low: a. Actual: b.", "open")];
+  fs.writeFileSync(path.join(root, "docs", "BLOCKERS.md"), `# BLOCKERS\n\n${row("low: a. Fixed in app.js.", "fixed")}\n${row("low: a. Actual: b.", "open")}\n`);
+  const findings = filed.map((r, i) => ({ source: "browser tester", severity: "low", text: `finding ${i + 1}`, doc: "docs/BLOCKERS.md", row: r }));
+  assert.deepEqual(openFixupFindings(root, findings).map((f) => [f.text, f.status]), [["finding 2", "open"]]);
+});

@@ -22,7 +22,7 @@ const compose = (project, dir) => ({ "com.docker.compose.project": project, "com
 
 // A fake Docker: a mutable world and the commands AutoClaude sends it. Nothing reaches the real
 // docker CLI. Containers: { id, name, image, state, status, volumes, networks (ids), labels, binds }.
-// Volumes are names, with labels in world.volumeLabels; networks { id, name, labels }. Events are
+// Volumes are names, with labels in world.volumeLabels; networks { id, name, labels, ingress }. Events are
 // Docker's JSON events; the fake returns those whose `time` lies between --since and --until.
 function fakeDocker(world) {
   world.engine = world.engine || { ID: "engine-a", Name: "docker-desktop", OSType: "linux", SystemTime: T0 };
@@ -67,7 +67,7 @@ function fakeDocker(world) {
     let m;
     if ((m = cmd.match(/^docker container inspect --format "\{\{json \.\}\}" (.+)$/))) return inspect(m[1].split(" "), (id) => world.containers.find((c) => c.id === id), inspectOf);
     if ((m = cmd.match(/^docker volume inspect --format "\{\{json \.\}\}" (.+)$/))) return inspect(m[1].split(" "), (v) => (world.volumes.includes(v) ? v : null), (v) => ({ Name: v, Driver: "local", CreatedAt: v in world.volumeCreated ? world.volumeCreated[v] : NEW, Labels: world.volumeLabels[v] || null }));
-    if ((m = cmd.match(/^docker network inspect --format "\{\{json \.\}\}" (.+)$/))) return inspect(m[1].split(" "), (id) => world.networks.find((n) => n.id === id), (n) => ({ Id: n.id, Name: n.name, Created: born(n), Labels: n.labels || {} }));
+    if ((m = cmd.match(/^docker network inspect --format "\{\{json \.\}\}" (.+)$/))) return inspect(m[1].split(" "), (id) => world.networks.find((n) => n.id === id), (n) => ({ Id: n.id, Name: n.name, Created: born(n), Labels: n.labels || {}, Ingress: !!n.ingress }));
     if ((m = cmd.match(/^docker events --since (\d+) --until (\d+) --filter type=container --filter type=volume --filter type=network --filter event=create --filter event=mount --filter event=connect --format "\{\{json \.\}\}"$/))) {
       return ok(world.events.filter((e) => e.time >= Number(m[1]) && e.time <= Number(m[2])).map((e) => JSON.stringify(e)).join("\n"));
     }
@@ -312,13 +312,124 @@ test("a note's tie that rests on a compose name unties when another folder turns
   );
   assert.equal((await noteFootprint(root, { run: fake.run })).ok, true);
   const seen = JSON.parse(fs.readFileSync(seenFile(root), "utf8"));
-  assert.deepEqual([seen.volumes.shop_cache, seen.volumes.shop_data], [{ why: "shop-old-1 uses it", via: "shop" }, { why: "shop-db-1 uses it" }], "the folder's tie replaces the name's");
+  assert.deepEqual([seen.volumes.shop_cache, seen.volumes.shop_data], [{ why: "shop-old-1 uses it", via: "shop", created: NEW, labels: {} }, { why: "shop-db-1 uses it", created: NEW, labels: {} }], "the folder's tie replaces the name's");
   // Both go (`docker compose down`), and a container of another folder's "shop" project appears.
   world.containers = world.containers.filter((c) => !["shop-old-1", "shop-db-1"].includes(c.name));
   world.containers.push({ id: hex("d"), name: "shop-web-1", image: "nginx", state: "running", labels: compose("shop", tmp()) });
   const r = await finishFootprint(root, { run: fake.run, config: ON });
   assert.deepEqual(r.removed.map((x) => [x.name, x.attributedBy]), [["shop_data", "shop-db-1 uses it"]]);
   assert.deepEqual(r.unattributed.map((x) => x.name), ["shop-web-1", "shop_cache"]);
+});
+
+test("a volume's tie is to the one volume the run saw: another made later under the same name is reported, never removed", async () => {
+  const runs = { "com.docker.compose.project": "proj", "com.docker.compose.volume": "pgdata" };
+  // The run's stack uses a plainly named volume, pgdata, seen by a note or only in Docker's events
+  // (a container that came and went between looks). The run's teardown (`down -v`) removes the
+  // container and the volume; `again` then makes a pgdata once more, which is unused at the end.
+  const scenario = async ({ note = true, byEvents = false, again }) => {
+    const root = tmp();
+    const world = BASE();
+    const fake = fakeDocker(world);
+    await recordFootprintStart(root, { run: fake.run });
+    const db = { id: hex("b"), name: "proj-db-1", image: "postgres:16", state: "running", volumes: ["pgdata"], labels: compose("proj", root) };
+    world.volumes.push("pgdata");
+    world.volumeLabels.pgdata = runs;
+    if (byEvents) {
+      world.events.push(
+        { Type: "container", Action: "create", Actor: { ID: db.id, Attributes: { ...db.labels, name: db.name } }, time: secs(NEW) },
+        { Type: "volume", Action: "mount", Actor: { ID: "pgdata", Attributes: { container: db.id } }, time: secs(NEW) + 1 }
+      );
+    } else world.containers.push(db);
+    at(world, "2026-09-28T11:00:00Z");
+    const noted = note ? await noteFootprint(root, { run: fake.run }) : null;
+    world.containers = world.containers.filter((c) => c.id !== db.id);
+    world.volumes = world.volumes.filter((v) => v !== "pgdata");
+    await again(world, root, () => noteFootprint(root, { run: fake.run }));
+    at(world, "2026-09-28T12:00:00Z");
+    fake.calls.length = 0;
+    return { root, world, calls: fake.calls, noted, r: await finishFootprint(root, { run: fake.run, config: ON }) };
+  };
+  // A pgdata made again with this date and these labels: by another project or the owner
+  // (`docker run --rm -v pgdata:...`), or the very volume the run used when both match.
+  const remade = (created, labels = null) => async (world) => { world.volumes.push("pgdata"); world.volumeCreated.pgdata = created; world.volumeLabels.pgdata = labels; };
+  const left = (s) => { assert.ok(s.world.volumes.includes("pgdata")); assert.deepEqual(removals(s.calls), [], "nothing is removed"); };
+
+  // The review's case: the note's tie was to the run's pgdata; the one at the end is another's.
+  let s = await scenario({ again: remade("2026-09-28T11:40:00Z") });
+  assert.deepEqual(s.noted, { ok: true, containers: 1, volumes: 1, networks: 0 });
+  assert.deepEqual(JSON.parse(fs.readFileSync(seenFile(s.root), "utf8")).volumes.pgdata, { why: "proj-db-1 uses it", created: NEW, labels: runs }, "the tie says which volume");
+  assert.deepEqual(s.r.removed, []);
+  assert.deepEqual(s.r.unattributed.map((x) => [x.kind, x.name, x.reason]), [["volume", "pgdata", `new since the run started, but the volume the run noted under this name (proj-db-1 uses it) was another one: Docker made that one ${NEW}, this one 2026-09-28T11:40:00Z; it may be another project's or yours, so the run left it alone`]]);
+  left(s);
+
+  // Made again within the same second, but without the run's labels: still another volume.
+  s = await scenario({ again: remade(NEW) });
+  assert.deepEqual([s.r.removed, s.r.unattributed.map((x) => x.name)], [[], ["pgdata"]]);
+  assert.match(s.r.unattributed[0].reason, /\(proj-db-1 uses it\) was another one: their labels differ;/);
+  left(s);
+
+  // No note, only the events: a mount before Docker made this pgdata was of another volume.
+  s = await scenario({ note: false, byEvents: true, again: remade("2026-09-28T11:40:00Z") });
+  assert.deepEqual([s.r.removed, s.r.unattributed.map((x) => [x.name, x.reason])], [[], [["pgdata", "new since the run started, but nothing ties it to this project; it may be another project's or yours, so the run left it alone"]]]);
+  left(s);
+
+  // The volume the run used, still there (same date, same labels): it goes, by the events' tie.
+  s = await scenario({ note: false, byEvents: true, again: remade(NEW, runs) });
+  assert.deepEqual(s.r.removed.map((x) => [x.name, x.attributedBy]), [["pgdata", "proj-db-1 used it"]]);
+
+  // The run makes its pgdata again in a later step and a note sees it: that tie replaces the old one.
+  s = await scenario({
+    again: async (world, root, note) => {
+      await remade("2026-09-28T11:30:00Z", runs)(world);
+      world.containers.push({ id: hex("c"), name: "proj-db-1", image: "postgres:16", state: "running", volumes: ["pgdata"], labels: compose("proj", root) });
+      at(world, "2026-09-28T11:45:00Z");
+      await note();
+      world.containers = world.containers.filter((c) => c.id !== hex("c")); // `down` keeps the named volume
+    }
+  });
+  assert.deepEqual(s.r.removed.map((x) => [x.name, x.attributedBy]), [["pgdata", "proj-db-1 uses it"]]);
+  assert.equal(JSON.parse(fs.readFileSync(seenFile(s.root), "utf8")).volumes.pgdata.created, "2026-09-28T11:30:00Z");
+});
+
+test("Docker's own networks are never the run's: the default one made again by an engine restart, nat on a Windows engine, a swarm's ingress", async () => {
+  for (const os of ["linux", "windows"]) {
+    const dflt = os === "linux" ? "bridge" : "nat";
+    const root = tmp();
+    const world = BASE();
+    world.engine = { ID: "engine-a", Name: "docker-desktop", OSType: os, SystemTime: T0 };
+    world.networks = [{ id: hex("1"), name: dflt, created: OLD }, { id: hex("2"), name: "none", created: OLD }];
+    // The owner's cache, running on the default network since before the run.
+    world.containers.push({ id: hex("d"), name: "owners-cache", image: "redis", state: "running", networks: [hex("1")], created: OLD });
+    const fake = fakeDocker(world);
+    await recordFootprintStart(root, { run: fake.run });
+
+    // Resource Saver stopped the idle engine and the next docker call woke it: Docker made its
+    // default network again, with a new id and date, and the owner's cache came back on it.
+    world.networks[0] = { id: hex("e"), name: dflt, created: "2026-09-28T10:20:00Z" };
+    world.containers.find((c) => c.name === "owners-cache").networks = [hex("e")];
+    // On a Linux engine nat is a name like any other: a network the run makes under it is the run's.
+    const nat = os === "linux" ? [{ id: hex("9"), name: "nat" }] : [];
+    world.networks.push(...nat);
+    // The run's lint container (a bind mount of the project), stopped, on the default network; a
+    // container of the run's that came and went, connected to it; and a swarm the owner started.
+    world.containers.push({ id: hex("c"), name: "lint-run", image: "node:24", state: "exited", networks: [hex("e"), ...nat.map((n) => n.id)], binds: [path.join(root, "src")] });
+    world.events.push(
+      { Type: "container", Action: "create", Actor: { ID: hex("b"), Attributes: { ...compose("proj", root), name: "proj-web-1" } }, time: secs(NEW) },
+      { Type: "network", Action: "connect", Actor: { ID: hex("e"), Attributes: { container: hex("b"), name: dflt, type: dflt } }, time: secs(NEW) + 1 }
+    );
+    world.networks.push({ id: hex("7"), name: "ingress", ingress: true });
+
+    at(world, "2026-09-28T11:00:00Z");
+    assert.equal((await noteFootprint(root, { run: fake.run })).ok, true);
+    assert.deepEqual(Object.keys(JSON.parse(fs.readFileSync(seenFile(root), "utf8")).networks), nat.map((n) => n.id), `${os}: nothing is noted of Docker's own networks`);
+    at(world, "2026-09-28T12:00:00Z");
+    fake.calls.length = 0;
+    const r = await finishFootprint(root, { run: fake.run, config: ON });
+    assert.deepEqual(r.removed.map((x) => [x.kind, x.name]), [["container", "lint-run"], ...nat.map((n) => ["network", n.name])], os);
+    assert.deepEqual([r.kept, r.unattributed, r.goneSinceStart, r.errors], [[], [], [], []], `${os}: Docker's own networks are not reported at all`);
+    assert.ok(!fake.calls.some((c) => c.startsWith("docker network rm") && !nat.some((n) => c.endsWith(n.id))), `${os}: no removal of Docker's own networks`);
+    assert.equal(footprintLine(r), `removed ${1 + nat.length} unused Docker object${nat.length ? "s" : ""} the run created`);
+  }
 });
 
 test("a bind mount from the project ties a plain container; a compose folder elsewhere wins over a mount; a mount of a parent folder ties nothing", async () => {
@@ -441,8 +552,12 @@ test("a new run clears the last run's record and notes before its slow snapshot;
   fs.writeFileSync(seenFile(root), JSON.stringify({ startAt: "2026-01-01T00:00:00.000Z", engine: "engine-a", containers: {}, volumes: { stale_vol: { why: "old-1 uses it" } }, networks: {}, projects: [], contested: [] }));
   let r = await finishFootprint(root, { run: fake.run, config: ON });
   assert.deepEqual([r.removed, r.unattributed.map((x) => x.name)], [[], ["stale_vol"]]);
-  // The same notes for this run do tie it.
+  // This run's note without the volume's date (as 0.10.1 wrote them) does not say which volume it saw.
   fs.writeFileSync(seenFile(root), JSON.stringify({ startAt: start.at, engine: "engine-a", containers: {}, volumes: { stale_vol: { why: "old-1 uses it" } }, networks: {}, projects: [], contested: [] }));
+  r = await finishFootprint(root, { run: fake.run, config: ON });
+  assert.deepEqual([r.removed, r.unattributed.map((x) => x.reason)], [[], ["new since the run started, but the volume the run noted under this name (old-1 uses it) cannot be shown to be this one: the note does not say when Docker made it; it may be another project's or yours, so the run left it alone"]]);
+  // The same notes for this run, with the volume's date, do tie it.
+  fs.writeFileSync(seenFile(root), JSON.stringify({ startAt: start.at, engine: "engine-a", containers: {}, volumes: { stale_vol: { why: "old-1 uses it", created: NEW } }, networks: {}, projects: [], contested: [] }));
   r = await finishFootprint(root, { run: fake.run, config: ON });
   assert.deepEqual(r.removed.map((x) => x.name), ["stale_vol"]);
 });

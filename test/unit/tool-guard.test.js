@@ -193,6 +193,43 @@ test("pushes that delete or force remote refs are denied whatever the remote, in
   }
 });
 
+test("git commands that only read pass: git tag listings and git config <key>; making, deleting and setting stay denied", () => {
+  for (const ctx of [win, nix]) {
+    for (const c of [
+      "git tag", "git tag -l", "git tag --list 'v*'", "git tag -n", "git tag -n5 -l", "git tag --contains HEAD", "git tag --points-at HEAD", "git tag --merged main",
+      "git tag --sort=-v:refname", "git tag -v v1", "git config push.default", "git config alias.st", "git config remote.origin.push", "git config --global push.default",
+      "git config --get-all remote.origin.push", "git config get alias.p"
+    ]) assert.equal(sh(ctx, c), null, c);
+    for (const c of ["git tag v1", "git tag v1 HEAD~1", "git tag -a v1 -m 'release'", "git tag -f v1", "git tag -d v1", "git tag --delete v1", "git tag --del v1", "git -C . tag -s v1"]) {
+      assert.match(sh(ctx, c), /gate commits/, c);
+    }
+    for (const c of ["git config push.default matching", "git config alias.st 'push -f'", "git config --add remote.origin.push '+refs/heads/*:refs/heads/*'"]) {
+      assert.match(sh(ctx, c), /Changing git aliases or push settings/, c);
+    }
+  }
+  assert.equal(ps(win, "git tag -l; git config alias.st"), null);
+});
+
+test("a wrapper's options and timeout's duration do not hide the command behind them", () => {
+  for (const ctx of [win, nix]) {
+    for (const c of ["timeout 5 rm -rf /", "timeout -k 5 30 rm -rf ../other", "nice -n 5 rm -rf /", "sudo -u root rm -rf /", "env -u HOME rm -rf ../other", "env -S 'rm -rf /'"]) {
+      assert.match(sh(ctx, c), RECURSIVE, c);
+    }
+    assert.match(sh(ctx, "timeout 30 git push origin main"), /Pushing is off/);
+    assert.match(sh(pushOn(ctx), "timeout 30 git push --force"), /Force pushes/);
+    for (const c of ["timeout 60 npm test", "nice -n 10 rm -rf dist", "env NODE_ENV=test rm -rf dist", "sudo -u root rm -rf dist"]) assert.equal(sh(ctx, c), null, c);
+  }
+});
+
+test("bash's own escapes and quoting: .\\. is .., $'...' and $\"...\" are not taken as plain text", () => {
+  for (const ctx of [win, nix]) {
+    // bash reads sub/.\. as sub/.., which is the project itself.
+    for (const c of ["rm -rf sub/.\\.", "rm -rf a/b/.\\./.\\./.\\.", "rm -rf ..\\/other", "rm -rf $\"..\"", "rm -rf $'..'"]) assert.match(sh(ctx, c), RECURSIVE, c);
+    assert.match(sh(ctx, "echo x > PLAN\\.md"), PLAN);
+    assert.equal(sh(ctx, "grep -c $'\\r$' notes.txt"), null);
+  }
+});
+
 test("this computer's AutoClaude defaults, notify settings and Claude Code user settings are read-only during a run", () => {
   const cfg = path.join(os.homedir(), ".claude-test");
   const m = { ...ctx, configDir: cfg };
@@ -337,4 +374,15 @@ test("writesTo keeps working for callers that match a path fragment", () => {
   assert.equal(writesTo("rm -rf .autoclaude", ".autoclaude/"), true);
   assert.equal(writesTo("cat PLAN.md > copy.md", "PLAN.md"), false);
   assert.equal(writesTo("Set-Content -Path PLAN.md -Value x", "PLAN.md", "powershell"), true);
+});
+
+test("cmd: ; , and = end a redirect's file name, so a bash-style ; cannot hide a plan write", () => {
+  for (const line of ['cmd /c "type nul > PLAN.md;"', 'cmd /c "echo x > PLAN.md; echo y"', 'cmd /c "echo x>PLAN.md;"', 'cmd /c "echo x > PLAN.md,"', 'cmd /c "echo x > PLAN.md="']) {
+    assert.match(ps(win, line), PLAN, line);
+    assert.match(sh(win, line), PLAN, line);
+  }
+  assert.match(ps(win, 'cmd /c "echo x > autoclaude.config.json;"'), CONFIG);
+  // Ordinary cmd lines with ; , = in their arguments still pass.
+  assert.equal(ps(win, 'cmd /c "echo a;b > out.txt"'), null);
+  assert.equal(ps(win, 'cmd /c "set X=1 & echo %X% > notes.txt"'), null);
 });

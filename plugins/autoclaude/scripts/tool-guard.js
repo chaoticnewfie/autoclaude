@@ -6,7 +6,8 @@
 //   - Bash and PowerShell commands that would write, delete or move those files, push while
 //     pushing is off, force-push or delete remote refs, change git aliases or push settings,
 //     hard-reset, commit or tag, or delete recursively outside the project and the temp folder
-//     are denied. A plain push is fine while git.push is on.
+//     (or where the guard cannot tell) are denied. A plain push is fine while git.push is on,
+//     and so are git commands that only read (git tag -l, git config <key>).
 //   - The project's guard.deny rules are tested against each command the line runs, not its
 //     data (P8.4, see ruleTexts): the rehearsal's false positives were heredoc bodies, greps
 //     and a read-only linter naming a forbidden script. Commands run from inside other programs
@@ -126,7 +127,7 @@ function decideShell(cmd, shell, { root, config, cwd, cli, tempDirs, cfgDir, rea
       if (!config.git.push) return "Pushing is off for this run (git.push is false in autoclaude.config.json). The owner pushes after review.";
     }
     if (g.sub === "reset" && g.args.includes("--hard")) return "git reset --hard is not allowed during an AutoClaude run. Undo your own changes file by file instead (edit them back, or `git restore <file>`).";
-    if (g.sub === "commit" || g.sub === "tag") return "The gate commits and tags after each verified step. Do not commit yourself; run `autoclaude ready <step>` when the step is done.";
+    if (g.sub === "commit" || (g.sub === "tag" && !tagReadOnly(g.args))) return "The gate commits and tags after each verified step. Do not commit yourself; run `autoclaude ready <step>` when the step is done.";
     // git clean -x also removes ignored files, and .autoclaude/ is ignored.
     if (g.sub === "clean" && g.args.some((a) => /^-[a-zA-Z]*x/i.test(a))) {
       const ops = operands(g.args, { takesValue: [/^(-e|--exclude)$/] });
@@ -138,13 +139,17 @@ function decideShell(cmd, shell, { root, config, cwd, cli, tempDirs, cfgDir, rea
   }
 
   for (const d of fx.recursive) {
-    const abs = where(d);
+    // A target the guard cannot place is not inside the project: it comes from a command or a
+    // variable, a pipe or xargs, brackets or a brace expansion, or a wildcard before a `..` (or
+    // in a folder cd went to), which can match a link that leads anywhere.
+    const abs = !wildBeforeUp(d) && where(d);
     if (abs && (contains(P, root, abs) || (d.rootOk && same(abs, root)))) continue;
     // Scratch folders under the OS temp folder are the builder's own (the rehearsal's mktemp -d),
     // judged by where the path really leads: a link or junction in the temp folder that points
     // elsewhere, or a `..` after one, is not in the temp folder.
     const phys = abs && whereReal(d);
     if (phys && inTemp(P, phys, tempsNow().map((t) => real(P, t)), real(P, root), same)) continue;
+    if (!abs) return "Recursive deletes outside the project are not allowed during an AutoClaude run, and the guard cannot tell where this one's target is: it comes from a command or a variable, a pipe, xargs, brackets, a brace expansion or a wildcard before `..`. Name the path literally, inside the project folder or the temp folder (`rm -rf dist`, `Remove-Item -Recurse -Force .\\build`).";
     return "Recursive deletes outside the project (or of the whole project) are not allowed during an AutoClaude run. Delete only paths inside the project folder, or inside the temp folder.";
   }
 
@@ -219,7 +224,7 @@ const GIT_TRICK = /^(alias\..|remote\..+\.(push|mirror)$|push\.default$|include\
 const GIT_TRICK_TEXT = /(^|[\s'"=])(alias\.[\w-]|remote\.\S+\.(push|mirror)\b|push\.default\b|include\.path\b|includeif\.)/i;
 
 // The setting a git command sets that GIT_TRICK names (through -c, --config-env or git config),
-// or null. Reading, listing and unsetting are fine.
+// or null. Reading (git config <key> with no value included), listing and unsetting are fine.
 function gitSettingTrick(g) {
   for (const kv of g.configs) {
     const k = String(kv).split("=")[0].trim();
@@ -227,8 +232,44 @@ function gitSettingTrick(g) {
   }
   if (g.sub !== "config") return null;
   const ops = operands(g.args, { takesValue: [/^(-f|--file|--blob|--type|--default|--comment|--value|--url)$/] });
-  const reads = g.args.some((a) => /^(--get\S*|-l|--list|--unset\S*|--remove-section)$/.test(a)) || /^(get|list|unset|remove-section)$/.test(ops[0] || "");
+  const reads = g.args.some((a) => /^(--get\S*|-l|--list|--unset\S*|--remove-section)$/.test(a)) || /^(get|list|unset|remove-section)$/.test(ops[0] || "") || ops.length === 1;
   return reads ? null : ops.find((o) => GIT_TRICK.test(o)) || null;
+}
+
+// git tag that only lists or verifies: no tag name (git tag, git tag --sort=-v:refname), or
+// -l/--list, -n, --contains, --no-contains, --points-at, --merged, --no-merged or -v/--verify.
+// -d/--delete, and a name with anything else, make or delete a tag. Git takes a prefix of a long
+// option; one that fits both kinds is ambiguous, and git stops.
+const TAG_LISTS = ["list", "contains", "no-contains", "points-at", "merged", "no-merged", "verify"];
+const TAG_VALUED = /^(-[mFu]|--(message|file|local-user|cleanup|sort|format|trailer))$/;
+function tagReadOnly(args) {
+  let lists = false;
+  let names = 0;
+  let options = true;
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (options && a === "--") { options = false; continue; }
+    if (options && /^--./.test(a)) {
+      const name = a.slice(2).split("=")[0].toLowerCase();
+      if ("delete".startsWith(name)) return false;
+      if (TAG_LISTS.some((o) => o.startsWith(name))) lists = true;
+      if (TAG_VALUED.test(a)) i++;
+      continue;
+    }
+    if (options && /^-./.test(a)) {
+      // A cluster of short flags: -n takes the rest of the word as its number, -m/-F/-u a value.
+      for (let k = 1; k < a.length; k++) {
+        const f = a[k];
+        if (f === "d") return false;
+        if (f === "l" || f === "v" || f === "n") lists = true;
+        if (f === "n") break;
+        if ("mFu".includes(f)) { if (k === a.length - 1) i++; break; }
+      }
+      continue;
+    }
+    names++;
+  }
+  return lists || names === 0;
 }
 
 function gitTrickMessage(setting) {
@@ -262,11 +303,16 @@ export function writesTo(cmd, target, shell = "bash") {
 
 // ---- Reading a command line (best effort, readable over complete) --------------------------
 
-// Splits a command line into simple commands, each { words, redirects, inputs, heredocs, pipe }.
-// Separators are ; & | and newlines, plus ( ) { } so subshells and script blocks are looked at
-// too; the bodies of $(...), `...` and <(...) are read as commands of their own. Quotes group a
-// word and are removed. Backslashes stay literal (Windows paths), except that bash escapes a
-// space, a quote or a backtick with one; PowerShell escapes with a backtick and cmd with a caret.
+// Splits a command line into simple commands, each { words, quoted, redirects, inputs, heredocs,
+// pipe }. Separators are ; (not in cmd.exe) & | and newlines, plus ( ) { } so subshells and
+// script blocks are looked at too; the bodies of $(...), `...` and <(...) are read as commands of their own. A
+// command whose words run straight into a bracket is `open`: more of its arguments are in there
+// (PowerShell's (...), @(...) and { }, a bash brace expansion). Quotes group a word and are
+// removed; `quoted` tells, word by word, whether one had a quote or an escape. Backslashes stay
+// literal (Windows paths), except that bash escapes a space, a quote, a backtick, a dot or a
+// slash with one (so `.\.` is `..`, as bash reads it); PowerShell escapes with a backtick and cmd
+// with a caret. bash's $"..." is a double-quoted string; its $'...' keeps the `$'` in the word,
+// since the escapes in it can spell anything.
 // `>`, `>>`, `2>`, `*>` and `&>` make the next word a redirect target, `2>&1` writes nothing, `<`
 // names an input file, and a `#` that starts a word starts a comment. Heredoc bodies and
 // here-strings are data: they land in `heredocs` ({ delim, quoted, body }), never in the
@@ -283,6 +329,7 @@ export function parseCommandLine(cmd, shell = "bash") {
   const nested = [];
   const waiting = []; // heredocs whose body starts at the next newline
   let words = [];
+  let marks = []; // `quoted` for each word
   let redirects = [];
   let inputs = [];
   let docs = [];
@@ -304,7 +351,7 @@ export function parseCommandLine(cmd, shell = "bash") {
       waiting.push(doc);
       docs.push(doc);
     } else if (pending === "string") docs.push({ delim: null, quoted: true, body: word });
-    else words.push(word);
+    else { words.push(word); marks.push(quoted); }
     pending = null;
     word = null;
     quoted = false;
@@ -313,11 +360,12 @@ export function parseCommandLine(cmd, shell = "bash") {
     endWord();
     pending = null;
     if (words.length || redirects.length || inputs.length || docs.length) {
-      commands.push({ words, redirects, inputs, heredocs: docs, pipe: piped, sep, scope: `/${groups.map((g) => `${g}/`).join("")}` });
+      commands.push({ words, quoted: marks, redirects, inputs, heredocs: docs, pipe: piped, sep, scope: `/${groups.map((g) => `${g}/`).join("")}` });
       piped = false;
       ended = true;
     }
     words = [];
+    marks = [];
     redirects = [];
     inputs = [];
     docs = [];
@@ -353,6 +401,10 @@ export function parseCommandLine(cmd, shell = "bash") {
       i = j;
       continue;
     }
+    if (bash && !quote && c === "$" && (next === "'" || next === '"')) {
+      if (next === "'") word = (word ?? "") + "$'";
+      continue;
+    }
     // Process substitution <(...) and >(...): the word stands for a file, the body is a command.
     if (bash && !quote && (c === "<" || c === ">") && next === "(") {
       let depth = 0;
@@ -382,7 +434,7 @@ export function parseCommandLine(cmd, shell = "bash") {
     if (c === "'" || c === '"') { quote = c; word = word ?? ""; quoted = true; continue; }
     if (c === escape && next !== undefined) {
       if (next === "\n" || next === "\r") { endWord(); i += next === "\r" && s[i + 2] === "\n" ? 2 : 1; continue; } // line continuation
-      if (shell !== "bash" || /[\s'"`]/.test(next)) { word = (word ?? "") + next; quoted = true; i++; continue; }
+      if (shell !== "bash" || /[\s'"`./]/.test(next)) { word = (word ?? "") + next; quoted = true; i++; continue; }
     }
     if (word === null && c === "#") { while (i + 1 < s.length && s[i + 1] !== "\n") i++; continue; }
     if (c === ">") {
@@ -429,9 +481,18 @@ export function parseCommandLine(cmd, shell = "bash") {
       continue;
     }
     if (c === "&" && next === "&") { i++; separator("&&"); continue; }
-    if (c === "(" || c === "{") { separator(c); groups.push(++groupCount); continue; }
+    if (c === "(" || c === "{") {
+      endCommand();
+      if (ended) commands[commands.length - 1].open = true;
+      separator(c);
+      groups.push(++groupCount);
+      continue;
+    }
     if (c === ")" || c === "}") { separator(c); groups.pop(); continue; }
-    if (c === ";" || c === "&") { separator(c); continue; }
+    // cmd reads ; , = inside a command as argument delimiters, and they end a redirect's file name:
+    // `type nul > PLAN.md;` writes PLAN.md.
+    if (shell === "cmd" && (pending === "out" || pending === "in") && word !== null && (c === ";" || c === "," || c === "=")) { endWord(); continue; }
+    if ((c === ";" && shell !== "cmd") || c === "&") { separator(c); continue; } // cmd reads ; inside a command
     if (/\s/.test(c)) { endWord(); continue; }
     word = (word ?? "") + c;
   }
@@ -488,16 +549,20 @@ const DOTNET_WRITERS = /\[(?:System\.)?IO\.(?:File|Directory)\]::(?:WriteAll\w*|
 // recursive: [{ path, dirs }], writes: [{ path, dirs, tree }], code: [text] }. A write with tree
 // set (a delete or a move) also counts when it takes a protected path along with a folder.
 // Variables set earlier on the line (d=$(mktemp -d), S=C:/x, $d = Join-Path $env:TEMP x) are
-// expanded into later paths; see walk for the ones set conditionally.
+// expanded into later paths; one set from a command's output is unknown (see valueOf), and see
+// walk for the ones set conditionally. A recursive delete whose targets the line does not show
+// (piped in, from xargs, in brackets, splatted) has the unknown target UNKNOWN_VALUE.
 export function shellEffects(cmd, shell = "bash") {
   const out = { git: [], recursive: [], writes: [], code: [] };
-  walk(parseCommandLine(cmd, shell), { dirs: [], sdirs: [], vars: new Map(), sure: new Map() }, 0, out);
+  walk(parseCommandLine(cmd, shell), { dirs: [], sdirs: [], vars: new Map(), sure: new Map(), shell }, 0, out);
   for (const m of String(cmd || "").matchAll(DOTNET_WRITERS)) out.writes.push({ path: m[1].trim(), dirs: [], tree: true });
   return out;
 }
 
 // A cd whose target is not sure: the paths after it cannot be placed.
 const UNKNOWN_DIR = "${cd}";
+// A value or a target the guard cannot know. No variable can expand into it or out of it.
+const UNKNOWN_VALUE = "${?}";
 
 // Variables and cd: `vars` and `dirs` hold what was set last, which a write is checked against.
 // `sure` and `sdirs` keep only what holds whatever ran, for recursive deletes: a value set after
@@ -544,26 +609,32 @@ function walk(commands, ctx, depth, out) {
       continue;
     }
     const cw = c.words.slice(lead);
-    const set = assignment(cw, vars);
+    const how = { paths: true, quoted: (c.quoted || []).slice(lead) };
+    const set = assignment(cw, vars, how);
     const names = new Map();
-    assignment(cw, names);
+    assignment(cw, names, how);
     if (names.size) {
       if (c.sep === "||") for (const n of names.keys()) sure.delete(n);
       else {
-        assignment(cw, sure);
+        assignment(cw, sure, how);
         if (partial) hold({ names: [...names.keys()] });
       }
     }
     if (set === true) continue;
     const run = Array.isArray(set) ? set : cw;
-    const words = splitOptions(stripWrappers(run.map((w) => expandVars(w, vars))));
+    const lw = stripWrappers(run.map((w) => expandVars(w, vars)));
+    const words = splitOptions(lw.words);
     if (!words.length) continue;
     const name = commandName(words[0]);
     const args = words.slice(1);
     // The same words with only the sure values in them.
-    const sargs = splitOptions(stripWrappers(run.map((w) => expandVars(w, sure)))).slice(1);
-    const add = (p, tree = false) => out.writes.push({ path: p, dirs, tree });
-    const nest = (text, sh) => walk(parseCommandLine(text, sh), { dirs, sdirs, vars: new Map(vars), sure: new Map(sure) }, depth + 1, out);
+    const ls = stripWrappers(run.map((w) => expandVars(w, sure)));
+    const sargs = splitOptions(ls.words).slice(1);
+    // env -C and sudo -D run the command somewhere the paths cannot be placed from.
+    const here = lw.moved ? [...dirs, UNKNOWN_DIR] : dirs;
+    const shere = ls.moved ? [...sdirs, UNKNOWN_DIR] : sdirs;
+    const add = (p, tree = false) => out.writes.push({ path: p, dirs: here, tree });
+    const nest = (text, sh) => walk(parseCommandLine(text, sh), { dirs, sdirs, vars: new Map(vars), sure: new Map(sure), shell: sh }, depth + 1, out);
 
     if (CD.has(name)) {
       const d = operands(args)[0];
@@ -574,13 +645,23 @@ function walk(commands, ctx, depth, out) {
         if (c.sep !== "||" && partial) hold({ cwd: true });
       }
     } else if (name === "git") {
-      gitEffect(args, dirs, out);
+      gitEffect(args, here, out);
     } else if (DELETE.has(name)) {
       const cmdStyle = CMD_STYLE.has(name);
       const opts = { takesValue: PS_VALUE, slashSwitches: cmdStyle };
-      const recursive = args.some(isRecursiveFlag) || (cmdStyle && args.some((a) => /^\/\/?s$/i.test(a)));
-      for (const t of operands(args, opts)) add(t, true);
-      if (recursive) for (const t of operands(sargs, opts)) out.recursive.push({ path: t, dirs: sdirs });
+      // PowerShell reads `a, b` and `a,b` as a list of paths (cmd.exe splits at , ; and = too),
+      // and @p passes splatted parameters (Recurse among them, perhaps).
+      const ps = ctx.shell === "powershell";
+      const splat = ps && args.some((a) => a.startsWith("@"));
+      const list = ps ? /,/ : ctx.shell === "cmd" ? /[,;=]/ : null;
+      const targets = (ts) => (list ? ts.flatMap((t) => t.split(list)).filter(Boolean) : ts);
+      const recursive = splat || args.some(isRecursiveFlag) || (cmdStyle && args.some((a) => /^\/\/?s$/i.test(a)));
+      for (const t of targets(operands(args, opts))) add(t, true);
+      if (recursive) {
+        // Targets the line does not show: piped into Remove-Item, added by xargs, in brackets.
+        if (splat || c.open || ls.fed || (ps && c.pipe)) out.recursive.push({ path: UNKNOWN_VALUE, dirs: shere });
+        for (const t of targets(operands(sargs, opts))) out.recursive.push({ path: t, dirs: shere });
+      }
     } else if (MOVE.has(name)) {
       for (const t of operands(args, { takesValue: PS_VALUE, slashSwitches: CMD_STYLE.has(name) })) add(t, true);
     } else if (COPY.has(name)) {
@@ -607,7 +688,7 @@ function walk(commands, ctx, depth, out) {
       const filtered = args.some((a) => /^-(i?name|i?path|i?wholename|i?regex|type|newer|mtime|mmin|size|empty)$/.test(a));
       if (deletes) {
         if (!filtered) for (const t of starts(args)) add(t, true);
-        for (const t of starts(sargs)) out.recursive.push({ path: t, dirs: sdirs, rootOk: filtered });
+        for (const t of starts(sargs)) out.recursive.push({ path: t, dirs: shere, rootOk: filtered });
       }
     } else if (CODE_RUNNERS.has(name)) {
       if (CODE_WRITERS.test(words.join(" "))) out.code.push(words.join(" "));
@@ -717,16 +798,47 @@ function splitOptions(words) {
   return out;
 }
 
-// sudo, env, xargs, FOO=bar and friends in front of the real command.
+// The wrappers' options that take the next word as their value, and the ones that run the
+// command in another folder (env -C, sudo -D) or another root (sudo -R).
+const WRAPPER_VALUED = {
+  sudo: /^(-[ugCDhprtUTR]|--(user|group|close-from|chdir|host|prompt|role|type|other-user|command-timeout|chroot))$/,
+  env: /^(-u|--unset|-C|--chdir)$/,
+  nice: /^(-n|--adjustment)$/,
+  xargs: /^(-[adEILnPs]|--(arg-file|delimiter|eof|replace|max-lines|max-args|max-procs|max-chars|process-slot-var))$/,
+  time: /^(-f|--format|-o|--output)$/,
+  exec: /^-a$/,
+  timeout: /^(-s|-k|--signal|--kill-after)$/
+};
+const WRAPPER_MOVES = { env: /^(-C|--chdir)(=|$)/, sudo: /^(-D|--chdir|-R|--chroot)(=|$)/ };
+
+// sudo, env, xargs, timeout 30, FOO=bar and friends in front of the real command: { words, fed,
+// moved }. An option's value is skipped (sudo -u root, nice -n 5, xargs -n 1), and env -S splits
+// its string into the command's words. fed: xargs adds arguments it reads from its input; moved:
+// the command runs somewhere else (WRAPPER_MOVES).
 function stripWrappers(words) {
+  const w = [...words];
   let i = 0;
-  while (i < words.length) {
-    if (/^[A-Za-z_]\w*=/.test(words[i])) { i++; continue; }
-    if (!WRAPPERS.has(commandName(words[i]))) break;
+  let fed = false;
+  let moved = false;
+  while (i < w.length) {
+    if (/^[A-Za-z_]\w*=/.test(w[i])) { i++; continue; }
+    const n = commandName(w[i]);
+    if (n !== "timeout" && !WRAPPERS.has(n)) break;
     i++;
-    while (i < words.length && words[i].startsWith("-")) i++;
+    if (n === "xargs") fed = true;
+    while (i < w.length && w[i].startsWith("-")) {
+      const a = w[i++];
+      if (WRAPPER_MOVES[n]?.test(a)) moved = true;
+      if (n === "env" && /^(-S|--split-string)(=|$)/.test(a)) {
+        const v = a.includes("=") ? a.slice(a.indexOf("=") + 1) : w[i++];
+        w.splice(i, 0, ...String(v ?? "").split(/\s+/).filter(Boolean));
+        break;
+      }
+      if (WRAPPER_VALUED[n]?.test(a)) i++;
+    }
+    if (n === "timeout") i++; // the duration
   }
-  return words.slice(i);
+  return { words: w.slice(i), fed, moved };
 }
 
 function commandName(word) {
@@ -737,40 +849,55 @@ function commandName(word) {
 
 // A variable assignment. Records the value in `vars` (names in lower case) and returns true when
 // nothing runs (NAME=value, $name = "text"), the words that still run for PowerShell's
-// `$x = <command>`, or null when the command is not a bare assignment (export X=1 is recorded
-// but still runs, since it changes the environment of what follows).
-function assignment(words, vars) {
+// `$x = <command>` (a bare word there is a command: $d = Get-Location), or null when the command
+// is not a bare assignment (export X=1 is recorded but still runs, since it changes the
+// environment of what follows). `quoted` is the parser's, word by word; with `paths` a value the
+// guard cannot know as a path is recorded as UNKNOWN_VALUE (see valueOf).
+function assignment(words, vars, { paths = false, quoted = [] } = {}) {
   if (!words.length) return null;
   const ps = /^\$([A-Za-z_]\w*)$/.exec(words[0]);
+  // PowerShell: one quoted string or one variable is a value; anything else is computed.
+  const computed = (ws, q) => ws.length !== 1 || !(q[0] || ws[0].startsWith("$"));
   if (ps && words[1] === "=") {
     const rhs = words.slice(2);
-    vars.set(ps[1].toLowerCase(), valueOf(rhs.map((w) => expandVars(w, vars))));
-    return rhs.length > 1 ? rhs : true;
+    const made = computed(rhs, quoted.slice(2));
+    vars.set(ps[1].toLowerCase(), valueOf(rhs.map((w) => expandVars(w, vars)), { computed: made, paths }));
+    return rhs.length > 1 || (made && rhs.length === 1 && !/^[[\d@(+-]/.test(rhs[0])) ? rhs : true;
   }
   const one = /^\$([A-Za-z_]\w*)=(.+)$/.exec(words[0]);
-  if (one && words.length === 1) { vars.set(one[1].toLowerCase(), valueOf([expandVars(one[2], vars)])); return true; }
+  if (one && words.length === 1) { vars.set(one[1].toLowerCase(), valueOf([expandVars(one[2], vars)], { computed: computed([one[2]], quoted), paths })); return true; }
   const lead = /^(export|local|declare|typeset|readonly)$/.test(words[0]) ? 1 : 0;
   const pairs = words.slice(lead).filter((w) => !/^[-+]/.test(w));
   if (!pairs.length || !pairs.every((w) => /^[A-Za-z_]\w*=/.test(w))) return null;
   for (const w of pairs) {
     const k = w.indexOf("=");
-    vars.set(w.slice(0, k).toLowerCase(), valueOf([expandVars(w.slice(k + 1), vars)]));
+    vars.set(w.slice(0, k).toLowerCase(), valueOf([expandVars(w.slice(k + 1), vars)], { paths }));
   }
   return lead ? null : true;
 }
 
 // A value as a path: $(mktemp ...) becomes a path in the temp folder (or the -p folder), and
-// PowerShell's GetTempPath() and Join-Path $env:TEMP x become $env:TEMP paths.
-function valueOf(ws) {
+// PowerShell's GetTempPath() and Join-Path $env:TEMP x become $env:TEMP paths. With `paths`, any
+// other value made by a command is UNKNOWN_VALUE: a command substitution ($(...), `...`) and a
+// `computed` PowerShell right-hand side (a command, if/switch/try, an expression). So is one that
+// names the working folder ($PWD, $(pwd)): the shell fixes it here, and a cd before the delete
+// would move where the guard places it.
+function valueOf(ws, { computed = false, paths = false } = {}) {
   const v = ws.join(" ");
   const mk = /^(?:\$\(|`)\s*mktemp\b([^)`]*)[)`]$/.exec(v);
   if (mk) return mktempPath(mk[1].trim().split(/\s+/).filter(Boolean).map((a) => a.replace(/^["']|["']$/g, "")));
   if (/^\[(System\.)?IO\.Path\]::GetTempPath$/i.test(v)) return "$env:TEMP";
+  let value = v;
   if (/^join-path$/i.test(ws[0] || "")) {
+    // PowerShell 7 joins every child path it is given: Join-Path $env:TEMP x ..\..
     const ops = operands(ws.slice(1));
-    if (ops.length >= 2) return `${ops[0]}\\${ops[1]}`;
+    if (ops.length >= 2) value = ops.join("\\");
+    else if (paths) return UNKNOWN_VALUE;
+  } else if (paths && computed) {
+    return UNKNOWN_VALUE;
   }
-  return v;
+  if (paths && /`|\$\(|\$\{?PWD\b/i.test(value)) return UNKNOWN_VALUE;
+  return value;
 }
 
 function mktempPath(args) {
@@ -867,7 +994,7 @@ function collectTexts(commands, st, vars, out) {
   };
   for (let k = 0; k < commands.length; k++) {
     const c = commands[k];
-    const set = assignment(c.words, vars);
+    const set = assignment(c.words, vars, { quoted: c.quoted || [] });
     if (set === true) continue;
     const words = (Array.isArray(set) ? set : c.words).map((w) => expandVars(w, vars));
     const rest = unwrap(words);
@@ -1136,7 +1263,7 @@ function pathApi(root) {
 }
 
 // A path word as the shell would see it, made absolute against `from`, or null when it depends on
-// a variable that cannot be known here (a relative path with no known `from` included). Git
+// something that cannot be known here (a relative path with no known `from` included). Git
 // Bash's /c/... is C:\...; ~, $HOME, $env:USERPROFILE, $PWD and $(pwd) are expanded.
 export function resolveTarget(word, from, P = path) {
   const s = splitTarget(word, from, P);
@@ -1153,7 +1280,10 @@ function splitTarget(word, from, P) {
   if (here && !known) return null;
   const start = home ? os.homedir() : here ? from : null;
   if (start !== null) t = t.slice((home || here)[0].length);
-  if (/\$[\w{(:]|%\w+%/.test(t)) return null;
+  // Left to the shell: a variable, a command substitution ($(...), `...`, bash's $'...'), %NAME%,
+  // ~user, ~+ and ~-, and a PowerShell provider path or a drive named by more than a letter
+  // (FileSystem::C:\, HKCU:\, a New-PSDrive name).
+  if (/\$[\w{(:']|%\w+%|`|::/.test(t) || (start === null && /^~|^[^\\/:]{2,}:/.test(t))) return null;
   if (start !== null) return { start, rest: `.${t}` };
   if (P === path.win32) {
     const m = /^\/(?:cygdrive\/|mnt\/)?([A-Za-z])(?=\/|$)/.exec(t);
@@ -1261,6 +1391,17 @@ function inTemp(P, abs, temps, root, same) {
 function broadGlob(name) {
   if (!/[*?[]/.test(name)) return false;
   return name.replace(/\[[^\]]*\]?|[*?]/g, "").replace(/[^A-Za-z0-9]/g, "").length < 3;
+}
+
+// A recursive delete's target with a wildcard in a folder name before a `..`, or after a cd to a
+// wildcard folder: one of the matches may be a link or junction, and the `..` then leads out of
+// wherever it points.
+function wildBeforeUp(item) {
+  const wild = (w) => /[*?[]/.test(w);
+  if (item.dirs.some(wild)) return true;
+  const names = String(item.path).split(/[\\/]+/);
+  const k = names.findIndex(wild);
+  return k >= 0 && names.slice(k + 1).includes("..");
 }
 
 // True when `child` is strictly inside `parent`.

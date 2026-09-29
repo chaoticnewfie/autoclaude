@@ -46,13 +46,17 @@ export function defaultState() {
     // only, then closes the feature.
     fixup: null,
     // A verified step or feature on its way into a commit: { verifyId, stepId, scope, attempt,
-    // timings, findings, report, feature, phaseEnd, fixupDone, headBefore, pid, at }. Recorded
-    // with the ticks before the verification's snapshot goes, so a gate cut off during the
-    // commit, the tag or the push is finished by the next stop instead of verified again.
+    // timings, findings, report, feature, phaseEnd, fixupDone, headBefore, tree, undo, pid, at }.
+    // Recorded with the ticks before the verification's snapshot goes, so a gate cut off during
+    // the commit, the tag or the push is finished by the next stop instead of verified again.
+    // tree is the verified tree (git write-tree); a next stop that finds other files verifies
+    // again instead, taking the verification out with undo ({ ticked, markers, added,
+    // progressCreated, rows }; none after a fix-up pass, which goes back to that pass).
     closing: null,
     // The plan is complete and the gate is finishing the run (machine footprint, hand-back,
     // its commit and push, the alert): { at, footprintDone, footprint, handoffDone, handoff,
-    // committed, pushed, pushState }. The run is marked complete only once that is done.
+    // headBefore, committed, pushWanted, pushed, pushState }. The run is marked complete only
+    // once that is done.
     completing: null,
     // Set by the gate after a verified feature when a supervisor is live; the supervisor ends the
     // builder, clears it, and starts a fresh session for the next feature.

@@ -88,19 +88,36 @@ export function undoCutVerification(root, config, { unlessGateRunning = false, s
       return null;
     }
   }
+  const ids = undoVerification(root, config, snap);
+  removeIfExists(file);
+  let count = 0;
+  if (!own && snap.step && loadState(root).status === STATUS.running) {
+    const st = updateState(root, (s) => { s.outOfTime = { ...(s.outOfTime || {}), [snap.step]: ((s.outOfTime || {})[snap.step] || 0) + 1 }; });
+    count = st.outOfTime[snap.step];
+  }
+  return { step: snap.step || null, ids, fixup: !!snap.fixup, count };
+}
+
+// Takes out what a verification wrote: its ticks, its PROGRESS lines and its findings rows, and
+// nothing else. `snap` is a snapshot as above, or the undo record of a verified close (lib/gate.js
+// state.closing.undo), which lists the ticked steps' earlier markers in `markers` instead of
+// keeping the plan, and says in `progressCreated` whether the verification created PROGRESS.md.
+// Returns the ids of the steps it unticked.
+export function undoVerification(root, config, snap) {
   const ids = [];
-  if (typeof snap.plan === "string") {
+  const markers = snap.markers && typeof snap.markers === "object" ? snap.markers : null;
+  if (typeof snap.plan === "string" || markers) {
     const planFile = path.join(root, config.plan);
     let text = readText(planFile, null);
     if (text !== null) {
-      const before = parsePlan(snap.plan);
+      const before = typeof snap.plan === "string" ? parsePlan(snap.plan) : null;
       const now = parsePlan(text);
       // A snapshot that does not list its ticks: every step it did not have as done.
-      const wrote = Array.isArray(snap.ticked) ? snap.ticked : before.steps.filter((s) => s.marker !== MARKERS.done).map((s) => s.id);
+      const wrote = Array.isArray(snap.ticked) ? snap.ticked : before ? before.steps.filter((s) => s.marker !== MARKERS.done).map((s) => s.id) : Object.keys(markers);
       for (const id of wrote) {
         const cur = stepById(now, id);
-        const old = stepById(before, id);
-        if (cur && old && cur.marker === MARKERS.done && old.marker !== MARKERS.done) { text = setMarker(text, id, old.marker); ids.push(id); }
+        const old = before ? (stepById(before, id) || {}).marker : markers[id];
+        if (cur && typeof old === "string" && cur.marker === MARKERS.done && old !== MARKERS.done) { text = setMarker(text, id, old); ids.push(id); }
       }
       if (ids.length) writeFileAtomic(planFile, text);
     }
@@ -116,7 +133,8 @@ export function undoCutVerification(root, config, { unlessGateRunning = false, s
       next = snap.progress;
     }
     // The verification created the file: it goes again.
-    if (next === "" && (snap.progress === null || snap.progress === undefined)) removeIfExists(progressFile);
+    const created = typeof snap.progressCreated === "boolean" ? snap.progressCreated : snap.progress === null || snap.progress === undefined;
+    if (next === "" && created) removeIfExists(progressFile);
     else if (next !== cur) writeFileAtomic(progressFile, next);
   }
   // The findings rows it filed, the last copy of each; a file it created goes when nothing else
@@ -131,13 +149,7 @@ export function undoCutVerification(root, config, { unlessGateRunning = false, s
     if (r.created && next.trim() === "") removeIfExists(f);
     else writeFileAtomic(f, next);
   }
-  removeIfExists(file);
-  let count = 0;
-  if (!own && snap.step && loadState(root).status === STATUS.running) {
-    const st = updateState(root, (s) => { s.outOfTime = { ...(s.outOfTime || {}), [snap.step]: ((s.outOfTime || {})[snap.step] || 0) + 1 }; });
-    count = st.outOfTime[snap.step];
-  }
-  return { step: snap.step || null, ids, fixup: !!snap.fixup, count };
+  return ids;
 }
 
 // The commit a tag points at, or null.
@@ -146,21 +158,43 @@ async function tagCommit(root, name, env) {
   return r.ok ? r.stdout.trim() || null : null;
 }
 
-// The tag a verified phase gets: ac-phase-<n>, unless that tag marks Phase <n> of another plan
-// (the plan at the tagged commit has another title; a new plan whose numbering starts again):
-// then ac-phase-<n>-<plan slug>, so the new plan's phases are tagged too. Returns { name, sha
-// (the commit an existing tag of that name points at, else null), other (the other plan's slug,
-// when the plain name was taken by it), plain }.
-export async function phaseTag(root, config, parsed, num, { env } = {}) {
+// Whether `sha` is a commit of this run: on HEAD's history, and not on that of the commit the
+// run started from.
+async function madeByThisRun(root, sha, base, env) {
+  const before = await git.git(root, ["merge-base", "--is-ancestor", sha, base], { env });
+  if (before.ok) return false;
+  const since = await git.git(root, ["merge-base", "--is-ancestor", sha, "HEAD"], { env });
+  return since.ok;
+}
+
+// The tag a verified phase gets: ac-phase-<n>, unless that tag was made before this run (an
+// earlier run's, or a new plan's Phase <n> meeting the last plan's: every plan gets the same
+// title, so the title cannot tell them apart). Then this run's is ac-phase-<n>-<the first seven
+// characters of `base`>, the commit the run started from (state.baseCommit). A phase verified
+// again in this run finds its first tag. Without a base (a state from an older version) the
+// plan's title is all there is to go on: another title at the tagged commit gives
+// ac-phase-<n>-<plan slug>. Returns { name, sha (the commit an existing tag of that name points
+// at, else null), other (whose the plain name is, when it is not this run's), plain }.
+export async function phaseTag(root, config, parsed, num, { env, base = null } = {}) {
   const plain = `ac-phase-${num}`;
   const at = await tagCommit(root, plain, env);
   if (!at) return { name: plain, sha: null, other: null, plain };
-  const slug = planSlug(parsed);
-  const theirs = await git.showFile(root, plain, config.plan, { env });
-  const other = theirs === null ? null : planSlug(parsePlan(theirs));
-  if (other === slug) return { name: plain, sha: at, other: null, plain };
-  const name = `${plain}-${slug}`;
-  return { name, sha: await tagCommit(root, name, env), other: other || "another plan", plain };
+  let other;
+  let suffix;
+  if (typeof base === "string" && base.trim()) {
+    if (await madeByThisRun(root, at, base.trim(), env)) return { name: plain, sha: at, other: null, plain };
+    other = "an earlier run";
+    suffix = base.trim().slice(0, 7);
+  } else {
+    const slug = planSlug(parsed);
+    const theirs = await git.showFile(root, plain, config.plan, { env });
+    const their = theirs === null ? null : planSlug(parsePlan(theirs));
+    if (their === slug) return { name: plain, sha: at, other: null, plain };
+    other = their || "another plan";
+    suffix = slug;
+  }
+  const name = `${plain}-${suffix}`;
+  return { name, sha: await tagCommit(root, name, env), other, plain };
 }
 
 // The message `autoclaude resume` commits pending steps with: the gate's own message (its
@@ -191,7 +225,7 @@ export async function commitPending(project, state, { env } = {}) {
   for (const id of ids) {
     const s = parsed.steps.find((x) => x.id === id);
     if (!s || !s.phase || s.marker !== MARKERS.done || !isPhaseEnd(parsed, id) || cfgGit.tagPhaseEnds === false) continue;
-    const t = await phaseTag(project.root, project.config, parsed, s.phase.num, { env });
+    const t = await phaseTag(project.root, project.config, parsed, s.phase.num, { env, base: state.baseCommit });
     // As in the gate: with pushes on, a phase verified before keeps its first tag.
     if (t.sha && cfgGit.push) continue;
     if ((await git.tag(project.root, t.name, { force: true, env })).ok) tags.push(t.name);
@@ -286,7 +320,9 @@ export function resumeRun(project, state, extra = {}, { env = process.env } = {}
     if (!underWay) { s.phaseBaseCommit = null; s.phaseStartedAt = null; }
     if (id) {
       s.attempts = { ...s.attempts, [id]: 0 }; s.infraFailures = { ...(s.infraFailures || {}), [id]: 0 };
-      s.outOfTime = { ...(s.outOfTime || {}), [id]: 0 };
+      // Also the cut-off-close counts lib/gate.js keeps under "close:<id>": the one that paused
+      // may belong to a later step of the feature than the current one.
+      s.outOfTime = Object.fromEntries(Object.entries({ ...(s.outOfTime || {}), [id]: 0 }).filter(([k]) => !k.startsWith("close:")));
     }
     Object.assign(s, extra);
   });

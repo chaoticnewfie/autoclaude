@@ -6,7 +6,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
-import { undoCutVerification, pendingVerifyFile, gateRunning, liveOtherGate, pendingCommitMessage } from "../../plugins/autoclaude/lib/resume.js";
+import { undoCutVerification, undoVerification, pendingVerifyFile, gateRunning, liveOtherGate, pendingCommitMessage } from "../../plugins/autoclaude/lib/resume.js";
 import { mergeConfig } from "../../plugins/autoclaude/lib/config.js";
 import { loadState, saveState, defaultState } from "../../plugins/autoclaude/lib/state.js";
 
@@ -74,6 +74,29 @@ test("undoCutVerification takes the findings rows out too, and removes a finding
   undoCutVerification(root, config);
   assert.equal(fs.readFileSync(blockers, "utf8"), "# BLOCKERS\n\n| a | b |\n|---|---|\n| owner | row |\n");
   assert.equal(fs.existsSync(path.join(root, "docs", "SECURITY-FINDINGS.md")), false);
+});
+
+test("undoVerification takes out a verified close from its undo record: the earlier markers, the PROGRESS lines, a PROGRESS file it created, its rows", () => {
+  let root = project();
+  fs.rmSync(pendingVerifyFile(root));
+  const planFile = path.join(root, "PLAN.md");
+  const row = "| 2026-09-28 | browser tester | S1.2 | medium: x. | Claude | open |\n";
+  const blockers = path.join(root, "docs", "BLOCKERS.md");
+  fs.mkdirSync(path.dirname(blockers), { recursive: true });
+  fs.writeFileSync(blockers, row);
+  const added = "- 2026-09-28 S1.1 One (attempt 1)\n- 2026-09-28 S1.2 Two (attempt 1)\n";
+  const undo = { ticked: ["S1.1", "S1.2"], markers: { "S1.1": "~", "S1.2": " " }, added, progressCreated: false, rows: [{ file: "docs/BLOCKERS.md", text: row, created: true }] };
+  assert.deepEqual(undoVerification(root, config, undo), ["S1.1", "S1.2"]);
+  assert.equal(fs.readFileSync(planFile, "utf8"), PLAN);
+  assert.equal(fs.readFileSync(path.join(root, "PROGRESS.md"), "utf8"), "# Progress\n");
+  assert.equal(fs.existsSync(blockers), false);
+  // PROGRESS.md was there before, empty: it stays. One the verification created goes.
+  root = project({ progress: "" });
+  undoVerification(root, config, { ...undo, rows: [] });
+  assert.equal(fs.readFileSync(path.join(root, "PROGRESS.md"), "utf8"), "");
+  root = project({ progress: "" });
+  undoVerification(root, config, { ...undo, rows: [], progressCreated: true });
+  assert.equal(fs.existsSync(path.join(root, "PROGRESS.md")), false);
 });
 
 test("a snapshot whose outcome the run state already records is only removed; a cut-off while running counts as out of time", () => {

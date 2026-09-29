@@ -17,6 +17,7 @@
 // verified commit under way (state.closing) or the end of the run (state.completing) is
 // finished.
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
 import { findProjectRoot, projectPaths, pluginRoot } from "./paths.js";
@@ -25,7 +26,7 @@ import { loadState, saveState, updateState, STATUS } from "./state.js";
 import { loadConfig, MAX_GATE_TIMEOUT_SEC } from "./config.js";
 import { parsePlan, stepById, nextStep, firstUnfinished, isPhaseEnd, isFeatureEnd, isFinished, setMarker, stepText, progress, planSlug, reopenUnverified, MARKERS } from "./plan.js";
 import { readText, writeFileAtomic, writeJsonAtomic, appendLine, ensureDir } from "./fsatomic.js";
-import { pendingVerifyFile, undoCutVerification, liveOtherGate, heldByLiveGate, phaseTag } from "./resume.js";
+import { pendingVerifyFile, undoCutVerification, undoVerification, liveOtherGate, heldByLiveGate, phaseTag } from "./resume.js";
 import { readReady, clearReady, readBlocked, clearBlocked, readHeartbeat } from "./protocol.js";
 import { runChecks } from "./checks.js";
 import { writeReport, checkFailureSection, summarize, fence } from "./report.js";
@@ -186,28 +187,69 @@ const ROW_KEY_CELLS = 4;
 
 // The fix-up findings whose rows have no outcome yet: neither closed ("fixed") nor handed over
 // ("left for the owner: <why>"), or no longer in their file at all. Each gets `status` (the
-// row's status, null when the row is gone). A finding recorded without its row (a fix-up pass
-// from an older version) is not checked.
+// row's status, null when the row is gone). A row is found by its first four cells as the gate
+// wrote them, else (the builder added a note to the text) by the first three with the text the
+// gate wrote still in the fourth. A finding recorded without its row (a fix-up pass from an
+// older version) is not checked.
 export function openFixupFindings(root, findings) {
   const docs = new Map();
-  const open = [];
-  for (const f of findings || []) {
-    if (!f || !f.row || !f.doc) continue;
-    if (!docs.has(f.doc)) docs.set(f.doc, { lines: (readText(path.join(root, f.doc), "") || "").split(/\r?\n/), used: new Set() });
-    const d = docs.get(f.doc);
-    const key = rowCells(f.row).slice(0, ROW_KEY_CELLS).join("\u0000");
-    let status = null;
-    for (let i = d.lines.length - 1; i >= 0; i--) {
-      if (d.used.has(i) || !/^\s*\|/.test(d.lines[i])) continue;
-      const cells = rowCells(d.lines[i]);
-      if (cells.slice(0, ROW_KEY_CELLS).join("\u0000") !== key) continue;
-      d.used.add(i);
-      status = cells[cells.length - 1] || "";
-      break;
+  const list = (findings || []).filter((f) => f && f.row && f.doc);
+  const found = new Map();
+  for (const exact of [true, false]) {
+    for (const f of list) {
+      if (found.has(f)) continue;
+      if (!docs.has(f.doc)) docs.set(f.doc, { lines: (readText(path.join(root, f.doc), "") || "").split(/\r?\n/), used: new Set() });
+      const d = docs.get(f.doc);
+      const want = rowCells(f.row);
+      const key = want.slice(0, exact ? ROW_KEY_CELLS : ROW_KEY_CELLS - 1).join("\u0000");
+      const text = want[ROW_KEY_CELLS - 1] || "";
+      if (!exact && !text) continue;
+      for (let i = d.lines.length - 1; i >= 0; i--) {
+        if (d.used.has(i) || !/^\s*\|/.test(d.lines[i])) continue;
+        const cells = rowCells(d.lines[i]);
+        if (cells.slice(0, exact ? ROW_KEY_CELLS : ROW_KEY_CELLS - 1).join("\u0000") !== key) continue;
+        if (!exact && !String(cells[ROW_KEY_CELLS - 1] || "").includes(text)) continue;
+        d.used.add(i);
+        found.set(f, cells[cells.length - 1] || "");
+        break;
+      }
     }
+  }
+  const open = [];
+  for (const f of list) {
+    const status = found.has(f) ? found.get(f) : null;
     if (status === null || (isOpenStatus(status) && !HANDED_OVER.test(status))) open.push({ ...f, status });
   }
   return open;
+}
+
+const ROW_PUT_BACK = "left for the owner: its row was deleted during the fix-up pass instead of given a status, so the gate put it back; check whether it was fixed";
+
+// Rows of fix-up findings that are gone from their files (the builder deleted the row instead of
+// setting its status): the gate wrote them, so it writes them back, handed to the owner (Status
+// "left for the owner: ...", and Owner "owner" in the blockers file). A deleted row can then
+// never hold a feature open, and the hand-back still lists the finding. Returns how many.
+function putBackRows(g, gone) {
+  const byDoc = new Map();
+  for (const f of gone) {
+    const cells = rowCells(f.row);
+    if (cells.length < 2) continue;
+    cells[cells.length - 1] = ROW_PUT_BACK;
+    const security = f.doc === g.config.docs.security;
+    if (!security && cells.length >= 6) cells[4] = "owner";
+    if (!byDoc.has(f.doc)) byDoc.set(f.doc, { header: security ? SECURITY_HEADER : BLOCKERS_HEADER, lines: [] });
+    byDoc.get(f.doc).lines.push(`| ${cells.join(" | ")} |`);
+  }
+  let n = 0;
+  for (const [doc, { header, lines }] of byDoc) {
+    const abs = path.join(g.root, doc);
+    const cur = readText(abs, null);
+    const lead = cur === null ? header : cur && !cur.endsWith("\n") ? "\n" : "";
+    ensureDir(path.dirname(abs));
+    fs.appendFileSync(abs, lead + lines.map((l) => `${l}\n`).join(""));
+    n += lines.length;
+  }
+  return n;
 }
 
 // Which Accept lines (and so which steps) a failed feature verification names: the tester's
@@ -565,6 +607,9 @@ export async function runGate(input, deps = {}) {
   if (state.closing && state.closing.stepId) {
     const r = await resumeClose(g, state, parsed);
     if (r) return r;
+    // Verified again instead (the files changed after its checks): the ticks may be out.
+    planText = readText(planFile, planText);
+    parsed = parsePlan(planText);
   }
   // The end of the run, cut off or out of time in an earlier stop: finished now.
   if (state.completing) {
@@ -957,9 +1002,16 @@ async function verify(g, state, step, parsed, planText, feature) {
   // The outcome is recorded (the ticks, and the commit to make) before the snapshot goes: a gate
   // cut off from here on, in a slow pre-commit hook, the tag or the push, leaves ticks the next
   // stop accepts and a commit it finishes, never ticks it reverts or a feature verified twice.
+  // With the tree that was verified, and how to take this verification out again, in case the
+  // files have changed by then.
+  const undo = {
+    ticked: toTick, markers: Object.fromEntries(toTick.map((id) => [id, stepById(parsed, id).marker])), added,
+    progressCreated: snap.progress === null, rows: filed.map(({ file, text, created }) => ({ file, text, created }))
+  };
   const closing = {
     verifyId: snap.id, stepId: step.id, scope: scopeIds, attempt, timings, findings: findings.length, report: report.relPath,
-    feature, phaseEnd, fixupDone: false, headBefore: config.git.commitEachStep ? await git.head(root, { env }) : null, pid: g.pid, at: new Date().toISOString()
+    feature, phaseEnd, fixupDone: false, headBefore: config.git.commitEachStep ? await git.head(root, { env }) : null,
+    tree: config.git.commitEachStep ? await stagedTree(g) : null, undo, pid: g.pid, at: new Date().toISOString()
   };
   updateState(root, (s) => { s.tickedByGate = [...new Set([...(s.tickedByGate || []), ...toTick])]; s.closing = closing; });
   clearPending(root);
@@ -974,8 +1026,18 @@ async function fixupReady(g, state, step, parsed) {
   const attempt = (state.attempts[step.id] || 0) + 1;
   const max = config.retries.maxAttemptsPerStep;
   // Each finding fixed, or left for the owner with a reason (D49). A ready without that is an
-  // attempt, so a pass that never records them cannot loop.
-  const open = openFixupFindings(root, fixup.findings);
+  // attempt, so a pass that never records them cannot loop. A row the builder deleted goes back,
+  // left for the owner, before anything is counted: nobody but the gate has its exact text.
+  let open = openFixupFindings(root, fixup.findings);
+  const gone = open.filter((f) => f.status === null);
+  let putBack = "";
+  if (gone.length) {
+    const n = putBackRows(g, gone);
+    ev("fixup-rows-restored", { step: step.id, rows: n });
+    logLine(root, `fix-up pass of Phase ${fixup.phase} at ${step.id}: ${n} findings row(s) deleted instead of given a status were put back, left for the owner: ${gone.map((f) => f.text).join("; ")}`);
+    putBack = `The row${n === 1 ? "" : "s"} of ${gone.map((f) => `"${f.text}"`).join(", ")} ${n === 1 ? "was" : "were"} deleted; I put ${n === 1 ? "it" : "them"} back, left for the owner. Never delete a findings row: set its Status instead.\n\n`;
+    open = openFixupFindings(root, fixup.findings);
+  }
   if (open.length) {
     const attempts = { ...state.attempts, [step.id]: attempt };
     const n = open.length;
@@ -998,7 +1060,7 @@ async function fixupReady(g, state, step, parsed) {
     }
     const owner = ownerInput(state, config);
     save(g, owner.mark({ ...state, attempts }));
-    return block(`${owner.text}The fix-up pass of Phase ${fixup.phase} is not finished (attempt ${attempt}/${max}): ${n} finding${n === 1 ? " still has" : "s still have"} no outcome. For each one, fix it and set its row's Status to "fixed", or set it to "left for the owner: <why, and what fixing it would take>". Then run \`${cli} ready ${step.id}\` again.\n\n${list}`, events);
+    return block(`${owner.text}${putBack}The fix-up pass of Phase ${fixup.phase} is not finished (attempt ${attempt}/${max}): ${n} finding${n === 1 ? " still has" : "s still have"} no outcome. For each one, fix it and set its row's Status to "fixed", or set it to "left for the owner: <why, and what fixing it would take>". Then run \`${cli} ready ${step.id}\` again.\n\n${list}`, events);
   }
   ev("verify", { step: step.id, attempt, fixup: true });
   logLine(root, `fix-up checks for Phase ${fixup.phase} at ${step.id}, attempt ${attempt}`);
@@ -1044,7 +1106,8 @@ async function fixupReady(g, state, step, parsed) {
   const closing = {
     verifyId: null, stepId: step.id, scope: scope.map((s) => s.id), attempt: fixup.attempt || 1, timings, findings: fixup.findings.length,
     report: [fixup.report, report.relPath].filter(Boolean).join(" and "), feature: true, phaseEnd: true, fixupDone: true,
-    headBefore: config.git.commitEachStep ? await git.head(root, { env: g.env }) : null, pid: g.pid, at: new Date().toISOString()
+    headBefore: config.git.commitEachStep ? await git.head(root, { env: g.env }) : null,
+    tree: config.git.commitEachStep ? await stagedTree(g) : null, pid: g.pid, at: new Date().toISOString()
   };
   updateState(root, (s) => { s.closing = closing; });
   clearPending(root);
@@ -1070,6 +1133,13 @@ async function resumeClose(g, state, parsed) {
     logLine(root, `the commit of ${rec.stepId} was cut off, and the step is no longer ticked; it is done again`);
     return null;
   }
+  // The files changed after the checks passed (the builder carried on, the owner edited during a
+  // pause): committing them now would record unchecked work as verified, so it is verified again.
+  // A change to CONTINUE_HERE.md alone is not: a relaunched builder rewrites it before its ready.
+  if (config.git.commitEachStep && rec.tree && !(await committedAt(g, rec, step))) {
+    const tree = await stagedTree(g);
+    if (tree && tree !== rec.tree && !(await onlyResumeFileChanged(g, rec.tree, tree))) return await verifyAgain(g, state, rec, step);
+  }
   clearReady(root);
   ev("close-resumed", { step: step.id });
   logLine(root, `the commit of ${rec.stepId} was cut off; finishing it`);
@@ -1077,10 +1147,100 @@ async function resumeClose(g, state, parsed) {
   return await close(g, { ...state }, { step, parsed, scope, closing: rec, resumed: true });
 }
 
+// A cut-off close whose tree is no longer the verified one. A close after a fix-up pass goes
+// back to that pass (the step and its phase stay ticked; the next ready runs the checks again).
+// Any other close takes out its ticks, PROGRESS lines and findings rows (state.closing.undo),
+// and the current step is the first unfinished one again (a resume during the pause had moved
+// it past the ticked step), so its ready verifies the step or the feature from the start. A
+// ready already waiting for that step is acted on in this stop (returns null, and the stop goes
+// on); otherwise the builder is told.
+// A passing verification resets the step's out-of-time count, so cut-off closes have their own
+// count (reset when a close commits): the second one pauses as out of time, with its alert,
+// instead of verifying again every night long.
+async function verifyAgain(g, state, rec, step) {
+  const { root, config, cli, ev, events } = g;
+  const fixupPass = !!(rec.fixupDone && state.fixup && state.fixup.stepId === step.id);
+  let undone = [];
+  if (!fixupPass) undone = undoVerification(root, config, rec.undo || { markers: { [step.id]: MARKERS.todo }, ticked: [step.id] });
+  const after = parsePlan(readText(g.planFile, "") || "");
+  const cur = fixupPass ? stepById(after, step.id) || step : firstUnfinished(after) || stepById(after, step.id) || step;
+  const key = closeCutoffKey(step.id);
+  const saved = updateState(root, (s) => {
+    s.closing = null;
+    s.tickedByGate = (s.tickedByGate || []).filter((id) => !undone.includes(id) || isFinished(stepById(after, id) || {}));
+    s.currentStep = cur.id;
+    s.outOfTime = { ...(s.outOfTime || {}), [key]: ((s.outOfTime || {})[key] || 0) + 1 };
+  });
+  Object.assign(state, { closing: null, tickedByGate: saved.tickedByGate, currentStep: cur.id, outOfTime: saved.outOfTime });
+  const phase = step.phase;
+  const what = rec.feature && phase ? `Phase ${phase.num} (${phase.title})` : step.id;
+  const cutoffs = saved.outOfTime[key];
+  if (cutoffs >= 2) {
+    ev("close-changed", { step: step.id, fixup: fixupPass, unticked: undone, cutoffs });
+    logLine(root, `the commit of ${step.id} was cut off ${cutoffs} times after its checks passed, and the files changed each time; pausing as out of time`);
+    return await pauseOutOfTime(g, saved, cur.id, `The commit of ${what} was cut off ${cutoffs} times after its verification passed (the hook's time limit), and the files had changed each time, so it would be verified again`);
+  }
+  ev("close-changed", { step: step.id, fixup: fixupPass, unticked: undone });
+  logLine(root, `the commit of ${step.id} was cut off, and the files changed after its checks passed; ${fixupPass ? "its fix-up checks run again" : `it is verified again${undone.length ? ` (unticked ${undone.join(", ")})` : ""}`}`);
+  const ready = readReady(root);
+  if (ready && (!ready.step || ready.step === cur.id)) return null;
+  const again = fixupPass
+    ? `the checks run again on the files as they are now before the feature closes`
+    : `it is verified again: its plan ticks and PROGRESS lines were taken out`;
+  return block(`${what} passed its verification, but its commit was cut off and the files changed after the checks passed, so ${again}. ${cur.id === step.id ? "" : `The current step is ${cur.id} (${cur.title}). `}When every Accept line holds, rewrite ${config.docs.continueHere} and run \`${cli} ready ${cur.id}\`.\n\n${stepText(after, cur)}`, events);
+}
+
+// The state.outOfTime key that counts a step's cut-off closes.
+export function closeCutoffKey(stepId) {
+  return `close:${stepId}`;
+}
+
+// True when two trees differ only in the resume file (docs.continueHere).
+async function onlyResumeFileChanged(g, fromTree, toTree) {
+  const r = await git.git(g.root, ["diff-tree", "-r", "--name-only", "--no-renames", fromTree, toTree], { env: g.env });
+  if (!r.ok) return false;
+  const changed = r.stdout.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+  const resumeFile = g.config.docs.continueHere.replace(/\\/g, "/").replace(/^\.\//, "");
+  return changed.length > 0 && changed.every((p) => p === resumeFile);
+}
+
 // The subject of a commit, or "".
 async function subjectOf(g, sha) {
   const r = await git.git(g.root, ["log", "-1", "--format=%s", sha], { env: g.env });
   return r.ok ? r.stdout.trim() : "";
+}
+
+// The commit a cut-off close made before the state recorded it (HEAD moved on from the
+// record's headBefore to a commit of this step), or null.
+async function committedAt(g, rec, step) {
+  const head = await git.head(g.root, { env: g.env });
+  return head && head !== rec.headBefore && (await subjectOf(g, head)).startsWith(`autoclaude(${step.id}): `) ? head : null;
+}
+
+// The tree a commit of the working tree would hold now: staged the way git.commitAll stages it
+// (everything but secrets/), then written with write-tree. A verified close records it, so a
+// close finished by a later stop can tell whether the files are still the verified ones. Staged
+// in a copy of the index (GIT_INDEX_FILE), so the real one is left as it was. null when git
+// cannot say.
+async function stagedTree(g) {
+  const where = await git.git(g.root, ["rev-parse", "--git-path", "index"], { env: g.env });
+  if (!where.ok || !where.stdout.trim()) return null;
+  const real = path.resolve(g.root, where.stdout.trim());
+  const copy = path.join(os.tmpdir(), `autoclaude-index-${process.pid}-${crypto.randomBytes(4).toString("hex")}`);
+  try {
+    if (fs.existsSync(real)) fs.copyFileSync(real, copy);
+    const opts = { env: { ...g.env, GIT_INDEX_FILE: copy } };
+    const add = await git.git(g.root, ["add", "-A", "--", ".", git.SECRETS_PATHSPEC], opts);
+    if (!add.ok) return null;
+    const unstage = await git.git(g.root, ["reset", "-q", "--", ":(top,icase)secrets"], opts);
+    if (!unstage.ok) return null;
+    const r = await git.git(g.root, ["write-tree"], opts);
+    return r.ok ? r.stdout.trim() || null : null;
+  } catch {
+    return null;
+  } finally {
+    try { fs.rmSync(copy, { force: true }); } catch {}
+  }
 }
 
 // A verified step or feature: commit with a body, tag a phase end, push, alert, move on.
@@ -1102,8 +1262,8 @@ async function close(g, st, c) {
       : `Verified ${step.id}, attempt ${rec.attempt}.`;
     message = await commitMessage(g, { subject: `autoclaude(${step.id}): ${step.title}`, lead, steps: c.scope, timings: rec.timings || [], findings: rec.findings || 0, report: rec.report });
     // A cut-off gate may have made the commit already, before the state recorded it.
-    const head = c.resumed ? await git.head(root, { env }) : null;
-    if (head && head !== rec.headBefore && (await subjectOf(g, head)).startsWith(`autoclaude(${step.id}): `)) {
+    const head = c.resumed ? await committedAt(g, rec, step) : null;
+    if (head) {
       sha = head;
       logLine(root, `${step.id} was committed (${head.slice(0, 7)}) before its gate was cut off; carrying on from that commit`);
     } else {
@@ -1119,8 +1279,8 @@ async function close(g, st, c) {
       } else sha = r.sha || null;
     }
     if (sha && phaseEnd && config.git.tagPhaseEnds && phase) {
-      const t = await phaseTag(root, config, parsed, phase.num, { env });
-      if (t.other) logLine(root, `${t.plain} marks Phase ${phase.num} of ${t.other}, not of this plan; this plan's Phase ${phase.num} is tagged ${t.name}`);
+      const t = await phaseTag(root, config, parsed, phase.num, { env, base: st.baseCommit });
+      if (t.other) logLine(root, `${t.plain} marks Phase ${phase.num} of ${t.other}, not of this run; this run's Phase ${phase.num} is tagged ${t.name}`);
       // Already on this very commit: a close that was cut off after its tag.
       if (t.sha && t.sha === sha) tagName = t.name;
       // A phase verified again (the owner reopened or added a step) keeps the tag of its first
@@ -1159,7 +1319,7 @@ async function close(g, st, c) {
   updateState(root, (s) => {
     s.tickedByGate = base.tickedByGate; s.fixup = null; s.closing = null; s.headAtLastGate = sha || s.headAtLastGate;
     s.attempts = { ...(s.attempts || {}), [step.id]: 0 };
-    s.outOfTime = { ...(s.outOfTime || {}), [step.id]: 0 };
+    s.outOfTime = { ...(s.outOfTime || {}), [step.id]: 0, [closeCutoffKey(step.id)]: 0 };
     if (featureDone) { s.phaseBaseCommit = null; s.phaseStartedAt = null; }
     if (pendingTag) {
       const prev = s.pushState || { branch: null, remote: null, unpushedCommits: null };
@@ -1299,7 +1459,8 @@ async function finishPlan(g, state, parsed) {
   return block(`${owner.text}${why}. Check that its Accept lines hold, rewrite ${config.docs.continueHere}, then run \`${cli} ready ${step.id}\`.\n\n${stepText(rp, step)}`, events);
 }
 
-const HANDBACK_MESSAGE = "autoclaude: hand-back\n\nHANDOFF.md, written when the plan completed: what was built, what is left for the owner, secrets, open findings, decisions for review, push state and the machine footprint.\n";
+const HANDBACK_SUBJECT = "autoclaude: hand-back";
+const HANDBACK_MESSAGE = `${HANDBACK_SUBJECT}\n\nHANDOFF.md, written when the plan completed: what was built, what is left for the owner, secrets, open findings, decisions for review, push state and the machine footprint.\n`;
 
 // Plan complete: clean up the run's machine footprint, write the hand-back (P8.5), commit and
 // push it, send the completion alert, and only then mark the run complete. Each stage records
@@ -1356,9 +1517,18 @@ async function complete(g, state, parsed) {
   if (!c.committed) {
     let pushWanted = false;
     if (handoff && handoff.path && config.git.commitEachStep) {
-      const r = await git.commitAll(root, HANDBACK_MESSAGE, { env });
-      if (!r.ok) logLine(root, `hand-back commit failed: ${String(r.stderr || "").trim()}`);
-      else pushWanted = !!(r.committed && config.git.push);
+      // HEAD before the commit is recorded first: a gate cut off after the commit landed and
+      // before the record below leaves a commit the next stop finds, and still pushes.
+      const head = await git.head(root, { env });
+      if (c.headBefore !== undefined && head && head !== c.headBefore && (await subjectOf(g, head)) === HANDBACK_SUBJECT) {
+        pushWanted = !!config.git.push;
+        logLine(root, `the hand-back was committed (${head.slice(0, 7)}) before its gate was cut off; carrying on from that commit`);
+      } else {
+        record({ headBefore: head });
+        const r = await git.commitAll(root, HANDBACK_MESSAGE, { env });
+        if (!r.ok) logLine(root, `hand-back commit failed: ${String(r.stderr || "").trim()}`);
+        else pushWanted = !!(r.committed && config.git.push);
+      }
     }
     record({ committed: true, pushWanted });
   }

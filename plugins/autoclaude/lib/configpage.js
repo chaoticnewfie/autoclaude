@@ -45,7 +45,7 @@ export const CRITICAL_ALERTS = Object.freeze([
 // multi, rows. Explanations are plain words for the owner; defaults come from DEFAULTS.
 const f = (p, section, type, label, help, extra = {}) => ({ path: p, section, type, label, help, ...extra });
 export const FIELDS = Object.freeze([
-  f("gate.verifyAt", "run", "enum", "When to verify", "phase: each step is committed as it is built, and the full verification (checks, browser tester, bug bash, security review) runs once when the feature's last step is ready. step: all of it after every step, which is slower.", { options: ["phase", "step"] }),
+  f("gate.verifyAt", "run", "enum", "When to verify", "phase: each step is committed as it is built, and the full verification (checks, browser tester, bug bash, security review) runs once when the step that closes the feature is ready. step: all of it after every step, which is slower.", { options: ["phase", "step"] }),
   f("review.pauseAt", "run", "enum", "Pause for your review", "phase-end: stop after each verified feature so you can look and leave notes; every-step: after every step; never: run to the end.", { options: ["never", "phase-end", "every-step"] }),
   f("retries.maxAttemptsPerStep", "run", "int", "Attempts before it pauses", "How many times a step, or a whole feature when verifying per feature, may fail verification before the run pauses and alerts you."),
   f("retries.maxNoProgressStops", "run", "int", "Stops without progress", "How many times in a row the session may stop without using a tool or committing before the run counts as stuck."),
@@ -66,7 +66,7 @@ export const FIELDS = Object.freeze([
   f("git.commitEachStep", "run", "bool", "Commit each step", "The gate commits every step it accepts on the run branch. Off: the work is left uncommitted for you."),
   f("git.push", "run", "bool", "Push after each feature", "Push the run branch and the feature's tag after each verified feature, retrying once. A failed push is alerted and listed in HANDOFF.md."),
   f("git.tagPhaseEnds", "run", "bool", "Tag each finished feature", "Tag the commit that completes a feature."),
-  f("footprint.docker", "run", "bool", "Clean up Docker at the end", "When the plan is complete, remove stopped containers, unused volumes and unused networks the run created. Anything else it created is listed in HANDOFF.md."),
+  f("footprint.docker", "run", "bool", "Clean up Docker at the end", "When the plan is complete, remove stopped containers, unused volumes and unused networks the run created for this project. Anything new it cannot tie to this project is left alone and listed in HANDOFF.md; nothing that was there before the run is touched."),
   f("gate.timeoutSec", "run", "int", "Verification time limit (seconds)", "How long one verification may take, at most 1800 (Claude Code's limit for the Stop hook).", { group: "Advanced" }),
   f("supervisor.pollSec", "run", "int", "Supervisor check interval (seconds)", "How often the supervisor looks at the builder session.", { group: "Advanced" }),
   f("supervisor.idleRelaunchMin", "run", "int", "Restart an idle session after (minutes)", "A builder session that sits waiting this long is restarted.", { group: "Advanced" }),

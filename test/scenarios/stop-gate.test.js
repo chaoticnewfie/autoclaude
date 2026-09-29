@@ -1107,6 +1107,126 @@ test("the pass is recorded before the commit: a gate cut off in the commit is fi
   assert.ok(treeClean(root));
 });
 
+test("a close cut off before its commit, with the files changed after the checks passed, is verified again instead of committed as verified", async () => {
+  const root = scratch();
+  const hook = path.join(root, ".git", "hooks", "pre-commit");
+  fs.writeFileSync(hook, "#!/bin/sh\ncp .autoclaude/state.json .autoclaude/state-at-commit.json\nexit 0\n");
+  fs.chmodSync(hook, 0o755);
+  writeReady(root, "S1.1");
+  let r = await gate(root);
+  assert.match(r.reason, /S1\.1 verified and committed/);
+  const atCommit = JSON.parse(fs.readFileSync(path.join(root, ".autoclaude", "state-at-commit.json"), "utf8"));
+  assert.match(atCommit.closing.tree, /^[0-9a-f]{40}$/, "the verified tree is recorded");
+  const lines = () => fs.readFileSync(path.join(root, "PROGRESS.md"), "utf8").split("S1.1 Clear completed todos (attempt 1)").length - 1;
+
+  // The hook's timeout in the commit; the relaunched builder changes a file before its next stop.
+  spawnSync("git", ["reset", "-q", "--soft", "HEAD~1"], { cwd: root, env });
+  saveState(root, atCommit);
+  fs.writeFileSync(path.join(root, "unverified.js"), "export const late = 1;\n");
+  r = await gate(root);
+  assert.equal(r.decision, "block", JSON.stringify(r.events));
+  assert.ok(r.events.some((e) => e.type === "close-changed"), JSON.stringify(r.events));
+  assert.equal(r.events.some((e) => e.type === "close-resumed" || e.type === "passed" || e.type === "integrity-reverted"), false, JSON.stringify(r.events));
+  assert.match(r.reason, /^S1\.1 passed its verification, but its commit was cut off and the files changed after the checks passed, so it is verified again: its plan ticks and PROGRESS lines were taken out\. .*run `.*ready S1\.1`/);
+  assert.equal(gitLog(root)[0], "fixture: verify per step", "nothing committed as verified");
+  assert.equal(stepById(planOf(root), "S1.1").marker, " ");
+  assert.equal(lines(), 0);
+  let s = loadState(root);
+  assert.deepEqual([s.closing, s.tickedByGate, s.currentStep], [null, [], "S1.1"]);
+
+  // Its ready verifies it again, with the new file, and only then commits.
+  writeReady(root, "S1.1");
+  r = await gate(root);
+  assert.ok(r.events.some((e) => e.type === "verify"), JSON.stringify(r.events));
+  assert.match(r.reason, /^S1\.1 verified and committed/);
+  assert.match(spawnSync("git", ["show", "--name-only", "--format=", "HEAD"], { cwd: root, encoding: "utf8", env }).stdout, /unverified\.js/);
+  assert.equal(gitLog(root).filter((l) => /^autoclaude\(S1\.1\)/.test(l)).length, 1);
+  assert.equal(lines(), 1);
+  s = loadState(root);
+  assert.deepEqual([s.closing, s.currentStep], [null, "S1.2"]);
+  assert.ok(treeClean(root));
+
+  // A change to CONTINUE_HERE.md alone (what a relaunched builder writes before its ready) is
+  // committed with the close, not verified again.
+  const root3 = scratch();
+  fs.writeFileSync(path.join(root3, ".git", "hooks", "pre-commit"), "#!/bin/sh\ncp .autoclaude/state.json .autoclaude/state-at-commit.json\nexit 0\n");
+  fs.chmodSync(path.join(root3, ".git", "hooks", "pre-commit"), 0o755);
+  writeReady(root3, "S1.1");
+  await gate(root3);
+  const cut3 = JSON.parse(fs.readFileSync(path.join(root3, ".autoclaude", "state-at-commit.json"), "utf8"));
+  spawnSync("git", ["reset", "-q", "--soft", "HEAD~1"], { cwd: root3, env });
+  saveState(root3, cut3);
+  fs.writeFileSync(path.join(root3, "CONTINUE_HERE.md"), "# Continue here\n\nS1.1 was handed in; its commit was cut off.\n");
+  r = await gate(root3);
+  assert.ok(r.events.some((e) => e.type === "close-resumed"), JSON.stringify(r.events));
+  assert.equal(r.events.some((e) => e.type === "close-changed" || e.type === "verify"), false, JSON.stringify(r.events));
+  assert.match(r.reason, /^S1\.1 verified and committed/);
+  assert.match(spawnSync("git", ["show", "--name-only", "--format=", "HEAD"], { cwd: root3, encoding: "utf8", env }).stdout, /CONTINUE_HERE\.md/);
+
+  // The same cut-off, then a pause in which the owner edits a file. The resume moves past the
+  // ticked S1.1; the first stop after it takes S1.1 back and makes it the current step again.
+  const root2 = scratch();
+  fs.writeFileSync(path.join(root2, ".git", "hooks", "pre-commit"), "#!/bin/sh\ncp .autoclaude/state.json .autoclaude/state-at-commit.json\nexit 0\n");
+  fs.chmodSync(path.join(root2, ".git", "hooks", "pre-commit"), 0o755);
+  writeReady(root2, "S1.1");
+  await gate(root2);
+  const cut = JSON.parse(fs.readFileSync(path.join(root2, ".autoclaude", "state-at-commit.json"), "utf8"));
+  spawnSync("git", ["reset", "-q", "--soft", "HEAD~1"], { cwd: root2, env });
+  saveState(root2, { ...cut, status: "paused", pauseReason: "review" });
+  fs.writeFileSync(path.join(root2, "owner-edit.js"), "export const owner = 1;\n");
+  const { resumeRun } = await import("../../plugins/autoclaude/lib/resume.js");
+  resumeRun(await projectOf(root2), loadState(root2));
+  assert.equal(loadState(root2).currentStep, "S1.2");
+  r = await gate(root2);
+  assert.equal(r.decision, "block", JSON.stringify(r.events));
+  assert.match(r.reason, /^S1\.1 passed its verification, but its commit was cut off and the files changed after the checks passed, so it is verified again/);
+  assert.match(r.reason, /run `.*ready S1\.1`/);
+  s = loadState(root2);
+  assert.deepEqual([s.closing, s.currentStep, stepById(planOf(root2), "S1.1").marker], [null, "S1.1", " "]);
+  writeReady(root2, "S1.1");
+  r = await gate(root2);
+  assert.match(r.reason, /^S1\.1 verified and committed/, JSON.stringify(r.events));
+  assert.match(spawnSync("git", ["show", "--name-only", "--format=", "HEAD"], { cwd: root2, encoding: "utf8", env }).stdout, /owner-edit\.js/);
+});
+
+test("a close cut off twice with the files changed each time pauses as out of time, with an alert, instead of verifying again all night", async () => {
+  const root = scratch();
+  fs.writeFileSync(path.join(root, ".git", "hooks", "pre-commit"), "#!/bin/sh\ncp .autoclaude/state.json .autoclaude/state-at-commit.json\nexit 0\n");
+  fs.chmodSync(path.join(root, ".git", "hooks", "pre-commit"), 0o755);
+  const cutOff = (n) => {
+    const at = JSON.parse(fs.readFileSync(path.join(root, ".autoclaude", "state-at-commit.json"), "utf8"));
+    spawnSync("git", ["reset", "-q", "--soft", "HEAD~1"], { cwd: root, env });
+    saveState(root, at);
+    fs.writeFileSync(path.join(root, `late-${n}.js`), `export const late = ${n};\n`);
+  };
+  writeReady(root, "S1.1");
+  let r = await gate(root);
+  assert.match(r.reason, /S1\.1 verified and committed/);
+  cutOff(1);
+  r = await gate(root);
+  assert.ok(r.events.some((e) => e.type === "close-changed"), JSON.stringify(r.events));
+  assert.equal(loadState(root).outOfTime["close:S1.1"], 1);
+  // Verified again and committed; that commit is cut off too, with another change after it.
+  writeReady(root, "S1.1");
+  r = await gate(root);
+  assert.match(r.reason, /S1\.1 verified and committed/);
+  cutOff(2);
+  const alerts = sent.length;
+  r = await gate(root);
+  assert.equal(r.decision, "allow", JSON.stringify(r.events));
+  const s = loadState(root);
+  assert.deepEqual([s.status, s.pauseReason], ["paused", "out-of-time"]);
+  assert.equal(sent.length, alerts + 1);
+  assert.equal(sent.at(-1).priority, "high");
+  assert.match(sent.at(-1).message, /cut off 2 times after its verification passed/);
+  assert.equal(gitLog(root).filter((l) => /^autoclaude\(S1\.1\)/.test(l)).length, 0, "nothing committed as verified");
+  // resume clears the count, and the next verification commits.
+  const { resumeRun } = await import("../../plugins/autoclaude/lib/resume.js");
+  const { loadConfig } = await import("../../plugins/autoclaude/lib/config.js");
+  resumeRun({ root, config: loadConfig(root).config }, loadState(root), {}, { env });
+  assert.equal(loadState(root).outOfTime["close:S1.1"], undefined);
+});
+
 test("a second gate while another is verifying stands down: it leaves that verification, its ticks and its snapshot alone", async () => {
   const root = scratchUi();
   const other = spawn(process.execPath, ["-e", "setTimeout(() => {}, 60000)"], { stdio: "ignore" });
@@ -1208,4 +1328,41 @@ test("the end of the run: a stop short of time hands it to the next stop, a gate
   assert.equal(loadState(root2).status, "complete");
   assert.equal(gitLog(root2)[0], "autoclaude: hand-back");
   assert.match(sent.at(-1).title, /plan complete/);
+});
+
+test("a hand-back committed just before its gate was cut off is still pushed, and the completion alert gives that push's own result", async () => {
+  const root = scratch("broken", PASS);
+  // The state as it was once the hand-back commit landed, before the gate recorded it.
+  const hook = path.join(root, ".git", "hooks", "post-commit");
+  fs.writeFileSync(hook, "#!/bin/sh\nif git log -1 --format=%s | grep -q '^autoclaude: hand-back'; then cp .autoclaude/state.json .autoclaude/state-at-handback.json; fi\nexit 0\n");
+  fs.chmodSync(hook, 0o755);
+  const writeHandoff = async (a) => {
+    const file = path.join(a.root, "HANDOFF.md");
+    fs.writeFileSync(file, "# Hand-back\n");
+    return { path: file, summary: { built: 1, ownerItems: [], secretsCreated: [], openFindings: 0, ownerReviewDecisions: [], runDecisions: 0, push: a.state.pushState, footprint: null } };
+  };
+  const pushes = [];
+  const pushRun = (result) => async (_root, opts) => { pushes.push(opts.tags); return { skipped: false, remote: "origin", branch: "main", unpushedTags: [], ...result }; };
+  writeReady(root, "S1.1");
+  let r = await gate(root, { writeHandoff, pushRun: pushRun({ ok: true, unpushedCommits: 0 }) });
+  assert.equal(r.decision, "allow", JSON.stringify(r.events));
+  assert.equal(gitLog(root)[0], "autoclaude: hand-back");
+  assert.equal(pushes.length, 2, "the step's push and the hand-back's");
+  const cut = JSON.parse(fs.readFileSync(path.join(root, ".autoclaude", "state-at-handback.json"), "utf8"));
+  assert.deepEqual([cut.status, cut.completing.handoffDone, !!cut.completing.committed, cut.pushState.ok], ["running", true, false, true]);
+
+  // The gate was cut off right there: the hand-back is committed, not pushed. The next stop
+  // pushes it, and this push fails.
+  saveState(root, cut);
+  const before = sent.length;
+  r = await gate(root, { writeHandoff, pushRun: pushRun({ ok: false, error: "the remote hung up", unpushedCommits: 1 }) });
+  assert.equal(r.decision, "allow", JSON.stringify(r.events));
+  assert.ok(r.events.some((e) => e.type === "complete-resumed"), JSON.stringify(r.events));
+  assert.equal(pushes.length, 3, "the hand-back commit goes out with a push");
+  assert.equal(gitLog(root).filter((l) => l === "autoclaude: hand-back").length, 1, "and is not made twice");
+  const s = loadState(root);
+  assert.deepEqual([s.status, s.pushState.ok, s.pushState.error], ["complete", false, "the remote hung up"]);
+  const alert = sent.slice(before).find((m) => /plan complete/.test(m.title));
+  assert.match(alert.message, /Push FAILED for main .*: the remote hung up\. Not on the remote: 1 commit\./);
+  assert.match(fs.readFileSync(path.join(root, ".autoclaude", "logs", "gate.log"), "utf8"), /the hand-back was committed \([0-9a-f]{7}\) before its gate was cut off/);
 });

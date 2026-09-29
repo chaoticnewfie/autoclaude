@@ -47,6 +47,18 @@ const LABEL = {
   configFiles: "com.docker.compose.project.config_files"
 };
 const COMPOSE_FILES = ["compose.yaml", "compose.yml", "docker-compose.yaml", "docker-compose.yml"];
+// Docker's own networks, by its own rule (IsPreDefinedNetwork, which `docker network ls --filter
+// type=builtin` applies): bridge, host and none on a Linux engine, nat and none on a Windows one.
+// Docker makes them itself, and makes the default one again with a new id at every engine start (a
+// Resource Saver wake is one), so they are never compared, noted, reported or removed. An engine
+// that does not say its OS gets both lists. A swarm's ingress network is left out the same way,
+// by the Ingress flag its inspect carries.
+const PREDEFINED_NETWORKS = { linux: ["bridge", "host", "none"], windows: ["nat", "none"] };
+
+function predefinedNetwork(name, os) {
+  const list = PREDEFINED_NETWORKS[String(os || "").toLowerCase()] || [...PREDEFINED_NETWORKS.linux, ...PREDEFINED_NETWORKS.windows];
+  return list.includes(String(name || ""));
+}
 
 export function startFile(root) {
   return path.join(projectPaths(root).runtimeDir, START_FILE);
@@ -208,6 +220,9 @@ export async function recordFootprintStart(root, { run = null, now = () => new D
 //   another folder also carries is contested and ties nothing.
 // - A volume or network used by a tied container (seen now, by an earlier note, or in Docker's
 //   recent events), or carrying one of the project's compose names.
+// - A volume's tie is to the one volume it saw (Docker's CreatedAt and labels), never to its name
+//   alone: a volume made later under a name the run used, by another project or the owner, is
+//   another volume.
 
 // A folder as Docker may report it (C:\x, C:/x, /mnt/c/x from WSL, /run/desktop/mnt/host/c/x or
 // /host_mnt/c/x from Docker Desktop) in one spelling, compared without case on Windows and macOS.
@@ -306,7 +321,7 @@ async function inspectContainers(run, ids, o, report) {
   return out;
 }
 
-// Volumes or networks by name or id: Map key -> { labels, created }.
+// Volumes or networks by name or id: Map key -> { labels, created, ingress }.
 async function inspectMeta(run, kind, keys, o) {
   const out = new Map();
   const safe = keys.filter((k) => SAFE_NAME.test(k));
@@ -314,13 +329,28 @@ async function inspectMeta(run, kind, keys, o) {
     const r = await exec(run, `docker ${kind} inspect --format "{{json .}}" ${safe.slice(i, i + INSPECT_BATCH).join(" ")}`, o);
     for (const x of jsonLines(r.stdout)) {
       const key = kind === "volume" ? String(x.Name || "") : String(x.Id || x.ID || "");
-      if (key) out.set(key, { labels: x.Labels || {}, created: String(x.CreatedAt || x.Created || "") });
+      if (key) out.set(key, { labels: x.Labels || {}, created: String(x.CreatedAt || x.Created || ""), ingress: x.Ingress === true });
     }
   }
   return out;
 }
 
 const secondsOf = (t) => { const ms = Date.parse(String(t || "")); return Number.isFinite(ms) ? Math.floor(ms / 1000) : null; };
+
+// Whether a volume's tie (or two inspects) is about the same volume: the same creation date and the
+// same labels, which Docker never changes on a volume. A tie that does not say when its volume was
+// made is about no volume in particular.
+const labelKey = (l) => JSON.stringify(Object.entries(l && typeof l === "object" ? l : {}).map(([k, v]) => [k, String(v)]).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)));
+const sameTime = (a, b) => { const x = Date.parse(String(a || "")), y = Date.parse(String(b || "")); return Number.isFinite(x) && Number.isFinite(y) ? x === y : a === b; };
+const sameVolume = (tie, m) => !!(tie && tie.created) && sameTime(tie.created, m && m.created) && labelKey(tie.labels) === labelKey(m && m.labels);
+
+// Why a volume's tie does not hold for the volume of that name now, for the report.
+function otherVolume(tie, m) {
+  const was = `the volume the run noted under this name (${tie.why})`;
+  if (!tie.created || !m.created) return `${was} cannot be shown to be this one: ${tie.created ? "Docker did not say when this one was made" : "the note does not say when Docker made it"}`;
+  if (!sameTime(tie.created, m.created)) return `${was} was another one: Docker made that one ${tie.created}, this one ${m.created}`;
+  return `${was} was another one: their labels differ`;
+}
 
 // Notes kept between start and end, or a fresh set. Notes of another run or engine are not this run's.
 function loadSeen(root, start) {
@@ -348,13 +378,15 @@ function hadSets(before) {
 // tied containers use, and the compose names learned or contested. A tie that rests on a compose
 // name records it (`via`), so a name contested later unties it. Docker keeps only its latest few
 // hundred events and forgets them when the engine restarts: they fill gaps, never prove anything
-// absent. Returns the current containers' judgements, Map id -> judgement.
-async function observe(run, { identity, had, seen, current, engineNow, o, report = null }) {
+// absent. `known` holds volumes already inspected (Map name -> { labels, created }). Returns the
+// current containers' judgements, Map id -> judgement.
+async function observe(run, { identity, had, seen, current, engineNow, o, report = null, known = new Map() }) {
   const details = await inspectContainers(run, current.map((c) => c.id), o, report);
   const judged = new Map();
   for (const [id, d] of details) judged.set(id, { ...judgeContainer(d.labels, d.binds, identity), name: d.name, created: d.created, volumes: d.volumes, networks: d.networks });
+  const os = engineNow && engineNow.os;
 
-  const uses = []; // [kind, key, containerId] from events
+  const uses = []; // [kind, key, containerId, when (epoch s)] from events
   const since = secondsOf(seen.eventsUntil);
   const until = secondsOf(engineNow && engineNow.time);
   if (since !== null && until !== null && until > since) {
@@ -367,8 +399,8 @@ async function observe(run, { identity, had, seen, current, engineNow, o, report
       if (!id) continue;
       // A container's labels come with its create event, so one removed since is still judged.
       if (e.Type === "container" && action === "create" && !judged.has(id)) judged.set(id, { ...judgeContainer(a, [], identity), name: String(a.name || ""), volumes: [], networks: [] });
-      else if (e.Type === "volume" && action === "mount" && a.container) uses.push(["volumes", id, String(a.container)]);
-      else if (e.Type === "network" && action === "connect" && a.container) uses.push(["networks", id, String(a.container)]);
+      else if (e.Type === "volume" && action === "mount" && a.container) uses.push(["volumes", id, String(a.container), Number(e.time)]);
+      else if (e.Type === "network" && action === "connect" && a.container && !predefinedNetwork(a.name, os)) uses.push(["networks", id, String(a.container), Number(e.time)]);
     }
     if (r.ok) seen.eventsUntil = engineNow.time;
   }
@@ -387,19 +419,43 @@ async function observe(run, { identity, had, seen, current, engineNow, o, report
   seen.contested = [...contested];
 
   const tag = (why, via) => (via ? { why, via } : { why });
-  // The first tie stands, except that one resting on no compose name replaces one that does.
-  const put = (kind, key, t) => { const cur = seen[kind][key]; if (!had[kind].has(key) && (!cur || (cur.via && !t.via))) seen[kind][key] = t; };
+  // The first tie stands, except that one resting on no compose name replaces one that does, and
+  // a tie to another volume of the same name (the run's own, removed and made again) gives way.
+  const put = (kind, key, t) => {
+    const cur = seen[kind][key];
+    if (!had[kind].has(key) && (!cur || (cur.via && !t.via) || (kind === "volumes" && "created" in t && !sameVolume(cur, t)))) seen[kind][key] = t;
+  };
+  const vols = []; // [name, tie, when it was used (epoch s), or null for now]
   for (const [id, j] of judged) {
     if (j.tied !== true) continue;
     put("containers", id, { name: j.name, ...tag(j.why, j.via) });
     const who = j.name || id.slice(0, 12);
-    for (const v of j.volumes) put("volumes", v, tag(`${who} uses it`, j.via));
-    for (const n of j.networks) if (n.id) put("networks", n.id, tag(`${who} uses it`, j.via));
+    for (const v of j.volumes) vols.push([v, tag(`${who} uses it`, j.via), null]);
+    for (const n of j.networks) if (n.id && !predefinedNetwork(n.name, os)) put("networks", n.id, tag(`${who} uses it`, j.via));
   }
-  for (const [kind, key, cid] of uses) {
+  for (const [kind, key, cid, when] of uses) {
     const j = judged.get(cid);
     const c = j && j.tied === true ? { name: j.name, via: j.via } : seen.containers[cid];
-    if (c) put(kind, key, tag(`${c.name || cid.slice(0, 12)} used it`, c.via));
+    if (!c) continue;
+    const t = tag(`${c.name || cid.slice(0, 12)} used it`, c.via);
+    if (kind === "volumes") vols.push([key, t, when]);
+    else put(kind, key, t);
+  }
+
+  // Each volume's tie records which volume it was, by Docker's CreatedAt and labels. A volume gone
+  // already cannot be told and is not noted; one Docker made after the use an event reports is
+  // another volume of that name. A name AutoClaude will not put in a command is never inspected:
+  // its tie says nothing of which volume, and it is only ever kept, never removed.
+  const fresh = vols.filter(([v]) => !had.volumes.has(v));
+  const ask = [...new Set(fresh.map(([v]) => v).filter((v) => SAFE_NAME.test(v) && !known.has(v)))];
+  const vmeta = ask.length ? new Map([...known, ...(await inspectMeta(run, "volume", ask, o))]) : known;
+  for (const [v, t, when] of fresh) {
+    if (!SAFE_NAME.test(v)) { put("volumes", v, t); continue; }
+    const m = vmeta.get(v);
+    if (!m) continue;
+    const born = secondsOf(m.created);
+    if (Number.isFinite(when) && born !== null && born > when) continue;
+    put("volumes", v, { ...t, created: m.created, labels: m.labels });
   }
   return { judged, names, contested };
 }
@@ -515,22 +571,27 @@ async function finish(root, { run, remove, config, deadline, wait }, report) {
     volumes: new Set(now.volumes.map((v) => v.name)),
     networks: new Set(now.networks.map((n) => n.id))
   };
+  // Docker's own networks are never compared: the default one's new id after an engine restart
+  // would read as one the run made, and its old id as one gone since the start.
+  const own = (n) => predefinedNetwork(n.name, now.engine.os || before.engine.os);
   if (comparable.containers) for (const c of before.containers || []) if (!nowIds.containers.has(c.id)) report.goneSinceStart.push({ kind: "container", id: c.id, name: c.name, image: c.image });
   if (comparable.volumes) for (const v of before.volumes || []) if (!nowIds.volumes.has(v.name)) report.goneSinceStart.push({ kind: "volume", id: v.name, name: v.name });
-  if (comparable.networks) for (const n of before.networks || []) if (!nowIds.networks.has(n.id)) report.goneSinceStart.push({ kind: "network", id: n.id, name: n.name });
+  if (comparable.networks) for (const n of before.networks || []) if (!nowIds.networks.has(n.id) && !own(n)) report.goneSinceStart.push({ kind: "network", id: n.id, name: n.name });
 
   const created = {
     containers: comparable.containers ? now.containers.filter((c) => !had.containers.has(c.id)).map((c) => ({ kind: "container", ...c })) : [],
     volumes: comparable.volumes ? now.volumes.filter((v) => !had.volumes.has(v.name)).map((v) => ({ kind: "volume", id: v.name, name: v.name, driver: v.driver })) : [],
-    networks: comparable.networks ? now.networks.filter((n) => !had.networks.has(n.id)).map((n) => ({ kind: "network", ...n })) : []
+    networks: comparable.networks ? now.networks.filter((n) => !had.networks.has(n.id) && !own(n)).map((n) => ({ kind: "network", ...n })) : []
   };
   if (!created.containers.length && !created.volumes.length && !created.networks.length) return;
 
-  // What ties each new object to this project: now, from earlier notes, and from recent events.
-  const seen = loadSeen(root, start);
-  const { judged, names, contested } = await observe(run, { identity: projectIdentity(root), had, seen, current: now.containers, engineNow: now.engine, o, report });
   const volMeta = created.volumes.length ? await inspectMeta(run, "volume", created.volumes.map((v) => v.name), o) : new Map();
   const netMeta = created.networks.length ? await inspectMeta(run, "network", created.networks.map((n) => n.id), o) : new Map();
+  created.networks = created.networks.filter((n) => !(netMeta.get(n.id) || {}).ingress);
+
+  // What ties each new object to this project: now, from earlier notes, and from recent events.
+  const seen = loadSeen(root, start);
+  const { judged, names, contested } = await observe(run, { identity: projectIdentity(root), had, seen, current: now.containers, engineNow: now.engine, o, report, known: volMeta });
   const meta = (item) => (item.kind === "container" ? judged.get(item.id) : (item.kind === "volume" ? volMeta : netMeta).get(item.id)) || {};
   const tie = (item) => {
     if (item.kind === "container") {
@@ -542,11 +603,13 @@ async function finish(root, { run, remove, config, deadline, wait }, report) {
       return { tied: false, why: j && j.project ? `it belongs to the compose project ${j.project}${contested.has(j.project) ? ", which a container from another folder also uses" : ""}` : null };
     }
     const t = valid(seen[`${item.kind}s`][item.id], contested);
-    if (t) return { tied: true, why: t.why };
+    // A volume's tie holds only for the volume it saw, not for one made since under its name.
+    const other = !!t && item.kind === "volume" && SAFE_NAME.test(item.name) && !sameVolume(t, meta(item));
+    if (t && !other) return { tied: true, why: t.why };
     const labels = meta(item).labels || {};
     const p = labels[LABEL.project] ? String(labels[LABEL.project]) : null;
     if (p && names.has(p)) return { tied: true, why: `its compose project, ${p}, is this project's` };
-    return { tied: false, why: p ? `it belongs to the compose project ${p}${contested.has(p) ? ", which a container from another folder also uses" : ""}` : null };
+    return { tied: false, why: p ? `it belongs to the compose project ${p}${contested.has(p) ? ", which a container from another folder also uses" : ""}` : other ? otherVolume(t, meta(item)) : null };
   };
   // Docker's own creation date, on the engine's clock like the start record's time, is a second
   // proof that a tied object is new: a run-start list that missed something (a cache answering

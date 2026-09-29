@@ -170,6 +170,7 @@ settings page (autoclaude config).
 | A feature failed 3 times              | Read the newest report in .autoclaude/reports/ (it names the failing Accept lines), fix the code or rewrite the steps, then autoclaude resume |
 | Stuck                                 | Look at the run window and .autoclaude/logs/, then autoclaude resume |
 | Could not run (tester, bug bash, security) | A tool is broken (Playwright or Claude). Fix it, then autoclaude resume |
+| Out of time                           | A feature is too big to check in one go (30 minutes at most). Split it into smaller phases or make the tests faster, then autoclaude resume |
 | Passed but was not committed          | git is broken or missing. Fix it, then autoclaude resume (it commits first) |
 | Push failed                           | The work is safe locally; fix GitHub access. The next feature's push retries |
 | Weekly usage limit                    | Wait for your weekly reset, then autoclaude resume            |
@@ -213,8 +214,9 @@ that accepts a security risk is marked "Owner review: yes" and listed first in H
   for you with a reason.
 - Secrets it needs (a database password, a key) are generated into the project's secrets/
   folder, which git ignores. They are never committed or shown in logs.
-- Docker containers, volumes and networks it created and no longer uses are removed at the end;
-  anything else it created is listed in HANDOFF.md.
+- Docker containers, volumes and networks it created for this project and no longer uses are
+  removed at the end. Something new it cannot prove belongs to this project is left alone and
+  listed in HANDOFF.md, and nothing that was there before the run is ever touched.
 
 
 ## 10. After the run
@@ -279,9 +281,11 @@ deploys the plan names, plus installing tools, using Docker and creating GitHub 
 unless the plan says otherwise. Planning writes the exact permissions for that, so Claude Code's
 own safety checks do not stop it half way.
 
-AutoClaude blocks: asking you questions, editing the plan or its settings, Claude committing or
-pushing by itself (the run commits and pushes for it), force pushing, resetting git history,
-deleting things outside the project, and every command on the project's deny list. The deny list
+AutoClaude blocks: asking you questions, editing the plan or its settings (the project's and
+this computer's), Claude committing by itself (the run commits for it), force pushing or deleting
+anything on a remote, resetting git history, deleting things outside the project (or anything it
+cannot tell is inside), and every command on the project's deny list. A plain push is allowed
+when pushing is on, for example to a new repository the plan creates. The deny list
 looks at the commands being run; reading or mentioning a blocked file is fine.
 
 These checks look at what Claude runs, so they are a strong safety net, not a wall. Before a run
@@ -298,6 +302,7 @@ changes an existing machine, it takes the snapshot you agreed to during planning
 | FAIL git-cli / FAIL node                        | Use a terminal where git and node work               |
 | FAIL plan                                       | autoclaude lint-plan shows what is wrong             |
 | FAIL checks: a requirement failed               | Start or install what it names (for example Docker Desktop) |
+| FAIL checks: bash is WSL's                      | Call Git's bash by full path: "C:/Program Files/Git/bin/bash.exe" |
 | FAIL playwright                                 | npx.cmd playwright install chromium                  |
 | FAIL dev server                                 | Start your app by hand and check the address on the settings page |
 | FAIL usage                                      | Your weekly usage is too high; wait for the reset    |

@@ -112,7 +112,7 @@ test("every rehearsal rule still denies what it was written for", () => {
     ["powershell -File scripts/deploy.ps1", SCRIPTS], ["pwsh -NoProfile -ExecutionPolicy Bypass -File .\\scripts\\deploy.ps1", SCRIPTS],
     ["& .\\scripts\\deploy.ps1", SCRIPTS], ["Get-Content scripts\\deploy.ps1 -Raw | Invoke-Expression", SCRIPTS],
     ["powershell -NoProfile -Command \"& ./scripts/deploy.ps1\"", SCRIPTS], ["Invoke-Command -ComputerName pve { hostname }", HOSTS],
-    ["Test-Connection 10.0.5.105", HOSTS], ["$r = ssh pve uptime", HOSTS], ["Set-ExecutionPolicy Bypass -Scope CurrentUser", MACHINE],
+    ["Test-Connection 10.0.5.105", HOSTS], ["$r = ssh pve uptime", HOSTS], ["$r = Restart-Computer", MACHINE], ["Set-ExecutionPolicy Bypass -Scope CurrentUser", MACHINE],
     ["Get-ItemProperty HKLM:\\Software\\x", MACHINE]
   ]) {
     assert.match(String(ps(win, c)), new RegExp(`does not allow that command.*${reason}`), c);
@@ -243,6 +243,41 @@ test("recursive deletes: a variable or cd that may not have taken effect is not 
   assert.equal(ps(off, "$d = Join-Path $env:TEMP x; if (Test-Path $d) { Remove-Item -Recurse -Force $d }"), null);
 });
 
+test("recursive deletes: a target the guard cannot place is refused, with a message to name the path literally", () => {
+  const UNKNOWN = /cannot tell where this one's target is.*Name the path literally/;
+  const posix = { root: "/proj", config: off.config, tempDirs: ["/tmp"] };
+  // A value made by a command (PowerShell's $x = <command>, an if, an expression; bash's
+  // backticks), a target in brackets, splatted, piped in or a provider path.
+  for (const c of [
+    "$d = Resolve-Path ..; Remove-Item -Recurse -Force $d", "$d = Get-Location; Remove-Item -Recurse -Force $d", "$d=Get-Location; Remove-Item -Recurse $d",
+    "$d = Get-ChildItem -Directory C:\\work; Remove-Item -Recurse -Force $d", "$d = if (Test-Path C:\\work) { 'C:\\work' } else { Join-Path $env:TEMP x }; Remove-Item -Recurse -Force $d",
+    "$d = \"$(Get-Location)\\dist\"; Remove-Item -Recurse $d", "Remove-Item -Recurse -Force (Resolve-Path ..)", "Remove-Item -Recurse -Force @('C:\\work')",
+    "$p = @{ Path = 'C:\\work'; Recurse = $true }; Remove-Item @p", "Get-ChildItem C:\\work | Remove-Item -Recurse -Force",
+    "Get-ChildItem | Remove-Item -Recurse -Path { $_.FullName }", "Remove-Item -Recurse -Force Microsoft.PowerShell.Core\\FileSystem::C:\\work", "Remove-Item -Recurse -Force HKCU:\\Software\\x"
+  ]) assert.match(ps(off, c), UNKNOWN, c);
+  // A list of paths, and every child path Join-Path joins, are read.
+  for (const c of ["Remove-Item -Recurse -Force dist,C:\\work", "$d = Join-Path $env:TEMP x ..\\..\\..; Remove-Item -Recurse -Force $d", "cmd /c \"rd /s /q dist;C:\\work\""]) {
+    assert.match(ps(off, c), RECURSIVE, c);
+  }
+  assert.equal(ps(off, "cmd /c \"rd /s /q dist,build\""), null);
+  for (const ctx of [off, posix]) {
+    for (const c of [
+      "d=`realpath ..`; rm -rf \"$d\"", "d=`cd .. && pwd`; rm -rf \"$d\"", "rm -rf `realpath ..`", "cd .. && d=$(pwd)/other && cd proj && rm -rf \"$d\"", "rm -rf {dist,../other}",
+      "rm -rf \"$TEMP/x\"{/../../../../important,}", "ls .. | xargs rm -rf", "ls .. | xargs -n 1 rm -rf", "xargs -a list.txt rm -rf", "rm -rf ~root", "rm -rf ~-",
+      "rm -rf $'\\x2e\\x2e'", "rm -rf /tmp/l*/../x", "cd /tmp/l* && rm -rf ../x", "env -C .. rm -rf proj", "sudo -D / rm -rf proj"
+    ]) assert.match(sh(ctx, c), UNKNOWN, c);
+  }
+  // Plain paths, and the values and forms the guard does resolve, still pass.
+  for (const c of [
+    "rm -rf dist", "d=build; rm -rf \"$d\"", "d=$(mktemp -d); rm -rf \"$d\"", "rm -rf packages/*/dist", "rm -rf \"$(pwd)/dist\"", "mkdir -p {src,test}/lib && rm -rf src/lib",
+    "find . -name node_modules -type d -prune -exec rm -rf {} +"
+  ]) assert.equal(sh(off, c), null, c);
+  for (const c of [
+    "$d = 'dist'; Remove-Item -Recurse -Force $d", "$d = \"$env:TEMP\\x\"; Remove-Item -Recurse $d", "$a = 'C:\\proj\\dist'; $b = $a; Remove-Item -Recurse $b",
+    "Remove-Item -Recurse -Force node_modules, dist", "Remove-Item -Recurse \"$(Get-Location)\\dist\"", "$d = 'dist'; Set-Location src; Remove-Item -Recurse $d"
+  ]) assert.equal(ps(off, c), null, c);
+});
+
 test("recursive deletes: a wildcard for most of the temp folder is refused, a narrow one passes", () => {
   // Other programs keep their files there too, and other sessions their scratchpads.
   for (const c of ["rm -rf \"$TMPDIR\"/*.*", "rm -rf \"$TMPDIR\"/[a-z]*", "rm -rf /tmp/?*", "rm -rf /tmp/a*", "Remove-Item -Recurse $env:TEMP\\*.*"]) {
@@ -304,6 +339,13 @@ test("parseCommandLine: pipes, heredoc bodies, input files and substitutions", (
   const ps = parseCommandLine("diff <(git show HEAD:a.sh) a.sh");
   assert.deepEqual(ps[0].words, ["diff", "<(git show HEAD:a.sh)", "a.sh"]);
   assert.ok(ps.some((c) => c.words.join(" ") === "git show HEAD:a.sh"));
+  // Which words were quoted, and a command whose arguments go on in a bracket.
+  assert.deepEqual(parseCommandLine("$d = 'C:\\x'", "powershell")[0].quoted, [false, false, true]);
+  assert.equal(parseCommandLine("Remove-Item -Recurse (Resolve-Path ..)", "powershell")[0].open, true);
+  assert.equal(parseCommandLine("rm -rf {a,b}")[0].open, true);
+  assert.equal(parseCommandLine("cd x && (ls)")[0].open, undefined);
+  // bash: .\. is .., $"..." a plain string, $'...' keeps its $' mark.
+  assert.deepEqual(parseCommandLine("rm -rf .\\. $\"x\" $'y'")[0].words, ["rm", "-rf", "..", "x", "$'y"]);
 });
 
 test("the built-in rules now see through heredoc shells, PowerShell assignments and line variables", () => {

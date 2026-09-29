@@ -433,6 +433,7 @@ test("a push the remote rejects is alerted, the run goes on, and the next featur
 
 test("a phase verified again keeps the tag of its first verification, so the pushes after it never fail on that tag", async () => {
   const root = scratch();
+  saveState(root, { ...loadState(root), baseCommit: rev(root, "HEAD") });
   const bare = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "autoclaude-fgate-remote-")), "origin.git");
   git(os.tmpdir(), "init", "-q", "--bare", bare);
   git(root, "remote", "add", "origin", bare);
@@ -617,7 +618,123 @@ test("a fix-up pass closes only when every finding has an outcome; a ready witho
   assert.ok(treeClean(root));
 });
 
-test("a new plan whose Phase 1 meets an earlier plan's ac-phase-1: this plan's phase gets its own tag, pushed, and the log says why", async () => {
+test("a findings row the builder deleted in the fix-up pass is put back, left for the owner, so the feature still closes", async () => {
+  const blockersRow = (root) => fs.readFileSync(path.join(root, "docs", "BLOCKERS.md"), "utf8").split("\n").find((l) => /hard to read/.test(l));
+  const deleteRow = (root) => {
+    const file = path.join(root, "docs", "BLOCKERS.md");
+    fs.writeFileSync(file, fs.readFileSync(file, "utf8").split("\n").filter((l) => !/hard to read/.test(l)).join("\n"));
+  };
+  const root = scratch();
+  const { deps: b } = fakeBrowser({ tester: withFollowUp });
+  await build(root, ["S1.1", "S1.2"], b);
+  let r = await ready(root, "S1.3", b);
+  assert.match(r.reason, /^Phase 1 passed its verification, with 1 non-blocking finding/);
+  const row = blockersRow(root);
+  // The builder fixes it and deletes the row instead of setting its status.
+  deleteRow(root);
+  r = await ready(root, "S1.3", b);
+  assert.match(r.reason || "", /^Phase 1 \(Lists\) verified and committed/, JSON.stringify(r.events));
+  assert.ok(r.events.some((e) => e.type === "fixup-rows-restored" && e.rows === 1), JSON.stringify(r.events));
+  const back = git(root, "show", "HEAD:docs/BLOCKERS.md").stdout.split(/\r?\n/).filter((l) => /hard to read/.test(l));
+  assert.equal(back.length, 1, "committed with the feature, once");
+  assert.equal(back[0].split("|").slice(1, 5).join("|"), row.split("|").slice(1, 5).join("|"), "the row as the gate wrote it");
+  assert.match(back[0], /\| owner \| left for the owner: its row was deleted during the fix-up pass instead of given a status, so the gate put it back; check whether it was fixed \|$/);
+  let s = loadState(root);
+  assert.deepEqual([s.fixup, s.currentStep], [null, "S2.1"]);
+  assert.ok(treeClean(root));
+
+  // With another finding still open, the ready is an attempt, and the builder is told what came back.
+  const two = { ...withFollowUp, followUps: [...withFollowUp.followUps, { severity: "low", title: "the four is misaligned", actual: "off by 2px", repro: "open /", expected: "aligned", foundBy: "tester" }] };
+  const root2 = scratch();
+  const { deps: b2 } = fakeBrowser({ tester: two });
+  await build(root2, ["S1.1", "S1.2"], b2);
+  await ready(root2, "S1.3", b2);
+  deleteRow(root2);
+  r = await ready(root2, "S1.3", b2);
+  assert.equal(r.decision, "block", JSON.stringify(r.events));
+  assert.match(r.reason, /^The row of "the two is hard to read" was deleted; I put it back, left for the owner\. Never delete a findings row: set its Status instead\.\n\nThe fix-up pass of Phase 1 is not finished \(attempt 1\/3\): 1 finding still has no outcome\./);
+  assert.match(r.reason, /1\. \[browser tester, low\] the four is misaligned \(docs\/BLOCKERS\.md\): status "open"/);
+  assert.doesNotMatch(r.reason, /no longer in the file/);
+  settleFindings(root2);
+  r = await ready(root2, "S1.3", b2);
+  assert.match(r.reason || "", /^Phase 1 \(Lists\) verified and committed/, JSON.stringify(r.events));
+  assert.equal(git(root2, "show", "HEAD:docs/BLOCKERS.md").stdout.split(/\r?\n/).filter((l) => /hard to read/.test(l)).length, 1);
+});
+
+test("a feature close cut off after its fix-up pass, with the files changed since, runs the fix-up checks again before it commits", async () => {
+  const root = scratch();
+  const { deps: b } = fakeBrowser({ tester: withFollowUp });
+  await build(root, ["S1.1", "S1.2"], b);
+  let r = await ready(root, "S1.3", b);
+  assert.match(r.reason, /^Phase 1 passed its verification, with 1 non-blocking finding/);
+  settleFindings(root);
+  const hook = path.join(root, ".git", "hooks", "pre-commit");
+  fs.writeFileSync(hook, "#!/bin/sh\ncp .autoclaude/state.json .autoclaude/state-at-commit.json\nexit 0\n");
+  fs.chmodSync(hook, 0o755);
+  r = await ready(root, "S1.3", b);
+  assert.match(r.reason, /^Phase 1 \(Lists\) verified and committed/, JSON.stringify(r.events));
+  const atCommit = JSON.parse(fs.readFileSync(path.join(root, ".autoclaude", "state-at-commit.json"), "utf8"));
+  assert.deepEqual([atCommit.closing.fixupDone, atCommit.fixup && atCommit.fixup.stepId, /^[0-9a-f]{40}$/.test(atCommit.closing.tree)], [true, "S1.3", true]);
+
+  // Cut off in the commit; the builder changes a file and readies again before the next stop.
+  git(root, "reset", "-q", "--soft", "HEAD~1");
+  saveState(root, atCommit);
+  fs.writeFileSync(path.join(root, "late.js"), "export const late = 1;\n");
+  const runs = checkRuns(root);
+  r = await ready(root, "S1.3", b);
+  const types = r.events.map((e) => e.type);
+  assert.ok(types.includes("close-changed") && !types.includes("close-resumed"), JSON.stringify(r.events));
+  assert.ok(r.events.some((e) => e.type === "verify" && e.fixup), JSON.stringify(r.events));
+  assert.match(r.reason, /^Phase 1 \(Lists\) verified and committed/);
+  assert.equal(checkRuns(root), runs + 1, "the checks ran on the changed files");
+  assert.match(git(root, "show", "--name-only", "--format=", "HEAD").stdout, /late\.js/);
+  assert.equal(gitLog(root).filter((l) => /^autoclaude\(S1\.3\)/.test(l)).length, 1);
+  assert.equal(markers(root), "xxx   ");
+  const s = loadState(root);
+  assert.deepEqual([s.closing, s.fixup, s.currentStep], [null, null, "S2.1"]);
+  assert.ok(treeClean(root));
+});
+
+test("a new plan with the same title as the last one (every plan is named after the project) is told apart by where the run started: its Phase 1 gets its own tag, kept when verified again", async () => {
+  const root = scratch({ plan: NO_UI });
+  fs.writeFileSync(path.join(root, "PLAN.md"), "# Backend plan\n\n## Phase 1: Old\n- [x] **S1.1** Old\n  - Accept: old\n");
+  git(root, "commit", "-qam", "the last plan, finished");
+  git(root, "tag", "ac-phase-1");
+  const old = rev(root, "ac-phase-1");
+  fs.writeFileSync(path.join(root, "PLAN.md"), NO_UI);
+  git(root, "commit", "-qam", "a new plan, same title");
+  // `autoclaude start` records the commit the run starts from.
+  const base = rev(root, "HEAD");
+  saveState(root, { ...loadState(root), currentStep: "S1.1", tickedByGate: [], baseCommit: base });
+  const bare = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "autoclaude-fgate-remote-")), "origin.git");
+  git(os.tmpdir(), "init", "-q", "--bare", bare);
+  git(root, "remote", "add", "origin", bare);
+  const { deps: b } = fakeBrowser({});
+  await build(root, ["S1.1"], b);
+  let r = await ready(root, "S1.2", b);
+  assert.match(r.reason, /^Phase 1 \(Store\) verified and committed/, JSON.stringify(r.events));
+  const mine = `ac-phase-1-${base.slice(0, 7)}`;
+  const first = rev(root, "HEAD");
+  assert.equal(rev(root, "ac-phase-1"), old, "the last plan's tag stays where it is");
+  assert.equal(rev(root, mine), first);
+  assert.equal(rev(bare, `refs/tags/${mine}`), first, "and this run's is pushed");
+  assert.equal(loadState(root).pushState.ok, true);
+  const log = () => fs.readFileSync(path.join(root, ".autoclaude", "logs", "gate.log"), "utf8");
+  assert.match(log(), new RegExp(`ac-phase-1 marks Phase 1 of an earlier run, not of this run; this run's Phase 1 is tagged ${mine}`));
+
+  // The owner reopens S1.2 in the same run: the phase keeps this run's first tag.
+  saveState(root, { ...loadState(root), status: "paused", pauseReason: "review" });
+  editPlan(root, "- [x] **S1.2**", "- [ ] **S1.2**");
+  resumeRun(project(root), loadState(root));
+  r = await ready(root, "S1.2", b);
+  assert.match(r.reason, /^Phase 1 \(Store\) verified and committed/, JSON.stringify(r.events));
+  assert.notEqual(rev(root, "HEAD"), first);
+  assert.deepEqual([rev(root, mine), rev(root, "ac-phase-1")], [first, old]);
+  assert.match(log(), new RegExp(`${mine} already marks an earlier verification of Phase 1; left where it is`));
+  assert.deepEqual([loadState(root).pushState.ok, gitTags(root).sort()], [true, ["ac-phase-1", mine].sort()]);
+});
+
+test("a new plan whose Phase 1 meets an earlier plan's ac-phase-1, in a state without the run's start commit: the plan's title tells them apart, and the log says why", async () => {
   const root = scratch({ plan: NO_UI });
   // An earlier plan finished its Phase 1 and tagged it.
   fs.writeFileSync(path.join(root, "PLAN.md"), "# First plan\n\n## Phase 1: Old\n- [x] **S1.1** Old\n  - Accept: old\n");
@@ -638,7 +755,7 @@ test("a new plan whose Phase 1 meets an earlier plan's ac-phase-1: this plan's p
   assert.equal(rev(root, "ac-phase-1-backend"), rev(root, "HEAD"));
   assert.equal(rev(bare, "refs/tags/ac-phase-1-backend"), rev(root, "HEAD"), "and it is pushed");
   assert.equal(loadState(root).pushState.ok, true);
-  assert.match(fs.readFileSync(path.join(root, ".autoclaude", "logs", "gate.log"), "utf8"), /ac-phase-1 marks Phase 1 of first, not of this plan; this plan's Phase 1 is tagged ac-phase-1-backend/);
+  assert.match(fs.readFileSync(path.join(root, ".autoclaude", "logs", "gate.log"), "utf8"), /ac-phase-1 marks Phase 1 of first, not of this run; this run's Phase 1 is tagged ac-phase-1-backend/);
 });
 
 test("a resume typed in the builder's own session at a feature's end does not ask for a fresh session, which would end it mid-work", async () => {
