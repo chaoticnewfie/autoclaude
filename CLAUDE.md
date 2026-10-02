@@ -14,11 +14,9 @@ what order lives in [PLAN.md](PLAN.md). Where things are right now lives in
 
 ## Status, in one line
 
-Phase 8 done (2026-09-29): per-feature verification, full-scope planning, the settings page,
-alerts per event, HANDOFF.md and Docker cleanup are built, verified by two review workflows, and
-proven by a practice run Claude did itself (7 steps in 64 min). Version 0.10.3 is on GitHub and
-installed on this machine from there. 468 tests pass. Next: CHECKPOINT 8 with Scott, then P9.1,
-his run of the DB project's next part (the DB project may be read for reviews, never edited).
+Phase 9 under way (2026-10-02): Phase 8 is done and released as 0.10.x; Scott ran the DB project's
+next part on it (36 steps, 28 h 40 min, VM created and the stack deployed). 0.10.4 sets effort in
+runs (D54). Next: the P9.1 review, then P9.2. The DB project may be read for reviews, never edited.
 
 ## Definition of done: every prompt, no exceptions
 

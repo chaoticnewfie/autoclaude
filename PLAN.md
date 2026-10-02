@@ -699,7 +699,7 @@ Every step here comes from Scott's answers on 2026-09-28 and the rehearsal revie
 
 ### Phase 9: Rollout and 1.0
 
-- [ ] **P9.1** The DB project's next part on 0.10.0
+- [ ] **P9.1** The DB project's next part on 0.10.0 (2026-10-02: Scott ran it: 36 steps in 12 features, 28 h 40 min, VM 105 created and the stack deployed, alerts received, no pauses or recoveries, 9 of 12 features first time. Measured read-only (docs/SESSION_LOG.md 2026-10-02); the effort findings became D54 (0.10.4). Still open: the full review, every issue to a fix or a backlog item)
   - Accept: Scott re-plans with the new questions (create the new VM and work there, touch nothing else) and the run does it; the review afterwards turns every issue into a fix or a backlog item
 - [ ] **P9.2** A second existing repo of Scott's is onboarded the same way
   - Accept: a second existing project has run at least one feature unattended with no false alarms

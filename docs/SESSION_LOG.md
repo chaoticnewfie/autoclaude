@@ -384,3 +384,6 @@ One entry per working session: what was done, what was committed. Append only.
 - Estimate: high instead of xhigh for the builder saves about 55 to 125 min of 28.7 h (3 to 7%);
   one extra failed attempt costs 35 to 80 min. Bigger levers: test time and fix-up passes that
   rerun the whole 10 to 20 min check suite.
+- Scott keeps xhigh for the builder, chose his own default for the checkers and no ultracode in
+  runs (D54): runHeadless drops an inherited CLAUDE_EFFORT; builder.effort "ultracode" launches at
+  xhigh. Docs, the settings page and the plan skill say so. 0.10.4.

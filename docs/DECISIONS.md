@@ -812,3 +812,26 @@ as is, and do another test run on the db project all day today so I'm able to po
 everything running."
 
 **Rejected.** A `fixup.minSeverity` setting now (DEFERRED 22), until a real run measures it.
+
+### D54 Effort in a run: builder at the owner's choice, checkers at the owner's default, no ultracode (2026-10-02)
+
+**Decision.** (1) The builder keeps the effort the owner chooses; Scott keeps xhigh. (2) The
+headless checkers (browser tester, bug bash, security reviewer) and the decider use the owner's
+own Claude Code effort setting: `runHeadless` drops an inherited `CLAUDE_EFFORT`. (3) Ultracode's
+multi-agent orchestration stays off in runs: `builder.effort: "ultracode"` launches the builder
+at `--effort xhigh`.
+
+**Why.** Measured on the DB project's second run (28 h 40 min, 36 steps): effort only touches the
+builder's model time (25% of the run; thinking about 8%), so high instead of xhigh would save an
+estimated 55 to 125 min (3 to 7%), while one extra failed feature costs 35 to 80 min and high
+trims exactly the hard 10% of turns that carry 70% of the thinking. Scott: "I like the idea of
+it being on xhigh to make sure it can think about what it's doing". The checkers ran at high by
+accident (they inherited the builder's CLAUDE_EFFORT "ultracode", which `claude -p` did not take
+as xhigh); Scott chose his default for them, about 10 to 20 min more per run. Ultracode never
+reached the unattended builder (its reminder comes only with a prompt a person types; 0 workflow
+calls); turned on it would multiply usage several times for little speed, since half the run is
+serial machine time. Scott chose to leave it off; mapping it to xhigh keeps that true whatever a
+later Claude Code does.
+
+**Rejected.** High for the builder (small saving, quality risk where it matters); checkers fixed
+at high; making runs orchestrate workflows.
