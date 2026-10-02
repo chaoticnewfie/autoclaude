@@ -1,0 +1,39 @@
+# Changelog
+
+## 1.0.0 (2026-10-02)
+
+The first stable release, and the repository is public. Everything below has been proven on two
+all-day unattended runs of a real project: 28 steps in 18 hours, then 36 steps in 28.7 hours that
+created a virtual machine and deployed a database stack onto it.
+
+- Install, init and every command from the public repository; no invitation or GitHub sign-in.
+
+## 0.10.x (2026-09-28 to 2026-10-02)
+
+- **0.10.5** One `checkers.effort` setting for the browser tester, bug bash, security review and
+  decider, `xhigh` by default, on the settings page.
+- **0.10.4** The checkers no longer inherit the builder's effort by accident; `builder.effort:
+  "ultracode"` runs at `xhigh`, because a run never uses ultracode's multi-agent workflows.
+- **0.10.3** A browser checker with no working browser counts as "could not run", never as a
+  failed attempt; MCP servers get 120 s to start.
+- **0.10.1, 0.10.2** Fixes from two verification rounds: Docker cleanup removes only what is
+  provably the project's, on the same engine; a verification cut off by the hook's time limit is
+  counted and paused, not looped; resumable commits and hand-back; a stricter tool guard
+  (destructive pushes, settings files, inline code, literal delete targets).
+- **0.10.0** Verification once per feature instead of per step; a fresh builder session per
+  feature; the branch and a tag pushed after each verified feature; planning that asks the scope
+  and never assumes; pre-approved permissions for what the plan allows; `autoclaude decide`;
+  `HANDOFF.md` at the end; Docker cleanup; alerts per event; layered settings and the settings
+  page (`autoclaude config`).
+
+## 0.9.x (2026-09-27)
+
+- Installs from the GitHub marketplace; `INSTRUCTIONS.md` copied into each project as
+  `AUTOCLAUDE.md`; the `/autoclaude:plan` skill; README and the full guide; Opus as the main
+  model, Sonnet the floor, never Haiku.
+
+## Before 0.9 (2026-09-26 to 2026-09-27)
+
+- The gate (checks, headless browser tester, bug bash, security review), the supervisor and
+  scheduled watchdog, Discord and ntfy alerts, pause, notes, resume and blocked questions,
+  weekly usage limits, all on Windows first.

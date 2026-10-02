@@ -12,7 +12,9 @@ about 34%), gate 22% (checks 92% of it). From that, D54 (0.10.4) and D55 (0.10.5
 launches at xhigh (ultracode stays off in runs), and a new `checkers.effort` setting (default
 xhigh, on the settings page) sets the tester, bug bash, security review and decider together.
 
-0.10.5 is pushed and installed on this machine (updated in place from 0.10.3 on 2026-10-02).
+**1.0.0 is released** (tag v1.0.0, CHANGELOG.md, D57) and the repository is public from
+2026-10-02 (D56), with no license yet. This machine runs 0.10.5 until `claude plugin marketplace
+update autoclaude` and `claude plugin update autoclaude@autoclaude`.
 
 ## The exact next step
 

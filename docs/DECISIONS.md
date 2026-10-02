@@ -853,3 +853,31 @@ both DB runs suggests xhigh reviews notice more small problems.
 
 **Rejected.** One setting per checker (more to set for little gain); one dial for the builder and
 the checkers together; following the Claude Code default as the built-in default.
+
+### D56 The repository goes public, without a license for now (2026-10-02)
+
+**Decision.** Scott makes `chaoticnewfie/autoclaude` public so the developers he works with can
+install it. Install no longer needs an invitation, a GitHub account or the GitHub CLI; README,
+INSTRUCTIONS.md and docs/USAGE.md say so, and Claude can read docs/USAGE.md from the raw URL.
+No license yet. Commits from this clone use his GitHub no-reply address; the existing history
+keeps his Gmail address. Supersedes D41's install-as-an-invited-collaborator path.
+
+**Why.** Scott: "I'm about to set the repo to public so the devs I work with can use it." A scan
+of the whole history found no secrets (no webhook URLs, tokens or keys) and no IP addresses or
+domain names; the build-history docs mention his machines by name only.
+
+**Rejected.** MIT or Apache 2.0 now (his choice: no license for now); rewriting the history to
+remove the email (destructive: every clone would have to re-clone).
+
+### D57 1.0.0 now, the rest of Phase 9 after it (2026-10-02)
+
+**Decision.** Release 1.0.0 now (plugin version, tag `v1.0.0`, CHANGELOG.md), together with the
+public repository (D56). P9.1's written review, a second repository (P9.2), the Windows 11
+desktop (P9.3) and the backlog review (P9.4) continue after 1.0 rather than before it.
+
+**Why.** Scott: "make it 1.0 too", after the second DB run: "It finished again the other day and
+was much better. VM was created and database deployed, got the discord notifications.
+Everything we talked about was fixed and worked." He is sharing it with the developers he works
+with now.
+
+**Rejected.** Holding 1.0 until P9.2 to P9.4 are done, as the plan had it.

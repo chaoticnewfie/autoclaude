@@ -707,10 +707,10 @@ Every step here comes from Scott's answers on 2026-09-28 and the rehearsal revie
   - Accept: the fixture plan passes unattended on the Windows 11 desktop, and the sleep and power settings that matter are written into `docs/USAGE.md`
 - [ ] **P9.4** Backlog of later ideas lives in `docs/DEFERRED.md`, each with a trigger; review it and file anything new from the rollout
   - Accept: every later idea raised during the rollout is in `docs/DEFERRED.md` with a trigger, and nothing is left only in chat
-- [ ] **P9.5** Release 1.0.0
-  - Accept: `plugin.json` version `1.0.0`, git tag `v1.0.0` and `CHANGELOG.md`, after Scott's review of P9.1. No `LICENSE` file: the repo stays private and is shared with invited collaborators (D41)
+- [x] **P9.5** Release 1.0.0 (2026-10-02: released by Scott's decision after his own review of the P9.1 run, ahead of P9.2 to P9.4, which continue after 1.0 (D57). `plugin.json` 1.0.0, tag `v1.0.0`, `CHANGELOG.md`; the repo is public with no license yet (D56))
+  - Accept: `plugin.json` version `1.0.0`, git tag `v1.0.0` and `CHANGELOG.md`, after Scott's review of P9.1. No `LICENSE` file for now (D56; the repo is public since 2026-10-02)
 
-**CHECKPOINT 9:** Review of the second DB run with Scott; if it is good, 1.0.
+**CHECKPOINT 9:** Review of the second DB run with Scott; if it is good, 1.0. (2026-10-02: held. Scott judged the run good and asked for 1.0 now; P9.1's written review, P9.2, P9.3 and P9.4 follow after 1.0, D57.)
 
 ---
 

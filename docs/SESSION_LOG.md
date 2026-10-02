@@ -396,3 +396,7 @@ One entry per working session: what was done, what was committed. Append only.
   added `checkers.effort` (one level for tester, bug bash, security review and decider, default
   xhigh, D55), passed as --effort; the plan skill asks it. 0.10.5.
 - Updated this machine's install from 0.10.3 to 0.10.5 (launcher reports 0.10.5).
+- Scott is making the repo public (D56). Scanned all 55 commits: no secrets, no IPs or domains;
+  his Gmail address is on every commit (kept; new commits use the no-reply address). Install docs
+  no longer mention an invitation or the GitHub CLI. No license for now.
+- Scott asked for 1.0 now (D57): version 1.0.0, tag v1.0.0, CHANGELOG.md; P9.5 ticked, CHECKPOINT 9 held; P9.1's written review and P9.2 to P9.4 continue after 1.0.

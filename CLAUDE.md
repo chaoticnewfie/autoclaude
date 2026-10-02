@@ -14,9 +14,10 @@ what order lives in [PLAN.md](PLAN.md). Where things are right now lives in
 
 ## Status, in one line
 
-Phase 9 under way (2026-10-02): Phase 8 is done and released as 0.10.x; Scott ran the DB project's
-next part on it (36 steps, 28 h 40 min, VM created and the stack deployed). 0.10.5 sets effort in
-runs (D54, D55). Next: the P9.1 review, then P9.2. The DB project may be read for reviews, never edited.
+1.0.0 released (2026-10-02, D57), and the repository is public (D56). Phase 8 built per-feature
+verification, full-scope planning, the settings page and the hand-back; two all-day runs of the DB
+project proved it. Next: P9.1's written review, then P9.2 to P9.4. The DB project may be read for
+reviews, never edited.
 
 ## Definition of done: every prompt, no exceptions
 
@@ -97,6 +98,7 @@ runs (D54, D55). Next: the P9.1 review, then P9.2. The DB project may be read fo
 | `CONTINUE_HERE.md` | Resume point. Read first |
 | `INSTRUCTIONS.md` | Plain instructions for people using AutoClaude; keep in step with `docs/USAGE.md`. `init` copies it into projects as `AUTOCLAUDE.md` from `plugins/autoclaude/project-template/AUTOCLAUDE.md`, which a test keeps identical: copy the file over after every edit |
 | `CLAUDE.md` | This file |
+| `CHANGELOG.md` | What changed in each version, for people using AutoClaude; add a line with every version bump |
 | `docs/DECISIONS.md` | Dated decision log (D17 onward; D1 to D16 are in the plan) |
 | `docs/SESSION_LOG.md` | One entry per working session |
 | `docs/DEFERRED.md` | Deliberately not built yet, with triggers |
@@ -128,7 +130,9 @@ runs (D54, D55). Next: the P9.1 review, then P9.2. The DB project may be read fo
   runner needs the native install: `irm https://claude.ai/install.ps1 | iex`.
 - `~/.claude/settings.json` on that VM already carries Stop, PermissionRequest and PreToolUse hooks
   from the `ai-agent-sound-notification` VS Code extension. They call `node` by bare name.
-- GitHub `chaoticnewfie/autoclaude` is private. SSH to github.com is already trusted there.
+- GitHub `chaoticnewfie/autoclaude` is public from 2026-10-02, with no license yet (D56). SSH to
+  github.com is already trusted there. This clone commits as the GitHub no-reply address
+  (local `user.email`); the first 55 commits carry Scott's Gmail address and stay as they are.
 - An RDP disconnect keeps a console window alive on Windows; a log-off or a sleeping machine kills
   it. That is the difference between "walk away" and "lose the run".
 - The native CLI's first interactive run shows a theme picker, then a workspace-trust dialog. Until
