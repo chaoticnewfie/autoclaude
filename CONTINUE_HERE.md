@@ -13,8 +13,7 @@ launches at xhigh (ultracode stays off in runs), and a new `checkers.effort` set
 xhigh, on the settings page) sets the tester, bug bash, security review and decider together.
 
 **1.0.0 is released** (tag v1.0.0, CHANGELOG.md, D57) and the repository is public from
-2026-10-02 (D56), with no license yet. This machine runs 0.10.5 until `claude plugin marketplace
-update autoclaude` and `claude plugin update autoclaude@autoclaude`.
+2026-10-02 (D56), with no license yet. This machine runs 1.0.0 (updated from GitHub).
 
 ## The exact next step
 

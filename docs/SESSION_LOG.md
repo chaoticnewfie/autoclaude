@@ -400,3 +400,4 @@ One entry per working session: what was done, what was committed. Append only.
   his Gmail address is on every commit (kept; new commits use the no-reply address). Install docs
   no longer mention an invitation or the GitHub CLI. No license for now.
 - Scott asked for 1.0 now (D57): version 1.0.0, tag v1.0.0, CHANGELOG.md; P9.5 ticked, CHECKPOINT 9 held; P9.1's written review and P9.2 to P9.4 continue after 1.0.
+- This machine updated from 0.10.5 to 1.0.0 from GitHub; the launcher reports 1.0.0.
