@@ -395,3 +395,4 @@ One entry per working session: what was done, what was committed. Append only.
 - Scott asked for the effort to be settable on the settings page. Builder effort already was;
   added `checkers.effort` (one level for tester, bug bash, security review and decider, default
   xhigh, D55), passed as --effort; the plan skill asks it. 0.10.5.
+- Updated this machine's install from 0.10.3 to 0.10.5 (launcher reports 0.10.5).
