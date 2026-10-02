@@ -408,3 +408,4 @@ One entry per working session: what was done, what was committed. Append only.
   workflow (reuse seams, security techniques, optimization techniques; results in the session
   scratchpad, summarized in D58) and seven rounds of questions settled the design. Phase 10
   (P10.1 to P10.12, CHECKPOINT 10) is in PLAN.md; the plan lints at 75 steps in 11 phases.
+- Phase 10 build workflow started (5 builders, integrator, adversarial review).

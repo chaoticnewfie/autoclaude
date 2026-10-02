@@ -18,7 +18,10 @@ xhigh, on the settings page) sets the tester, bug bash, security review and deci
 ## The exact next step
 
 Build Phase 10 (P10.1 to P10.11), the security and optimize sweeps Scott asked for on
-2026-10-02; every design choice is in D58 (his answers to seven rounds of questions). Then P10.12:
+2026-10-02. A build workflow (wf_d5a2e96b-b84: 5 builders on disjoint files against shared
+contracts, an integrator, an adversarial review) started 2026-10-02 evening; if this session
+ended before it reported, check `git status` for its uncommitted work and its journal under
+~/.claude/projects/c--AutoClaude/<session>/subagents/workflows/; every design choice is in D58 (his answers to seven rounds of questions). Then P10.12:
 prove it on the practice app with planted problems, and stop at CHECKPOINT 10. Release 1.1.0
 after the checkpoint. Still open from Phase 9 (after 1.0): P9.1's written review, P9.2 to P9.4.
 
