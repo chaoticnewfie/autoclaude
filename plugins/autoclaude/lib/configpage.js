@@ -11,7 +11,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import {
-  DEFAULTS, PROJECT_ONLY_KEYS, EFFORTS, isSafeLiveKey, loadLayers, readMachineDefaults, readProjectConfig,
+  DEFAULTS, PROJECT_ONLY_KEYS, EFFORTS, CHECKER_EFFORTS, isSafeLiveKey, loadLayers, readMachineDefaults, readProjectConfig,
   writeProjectConfig, writeMachineDefaults, validateConfig, mergeLayers, settingPathOf, getPath, setPath,
   deletePath, machineDefaultsFile, cleanMachineDefaults
 } from "./config.js";
@@ -50,7 +50,8 @@ export const FIELDS = Object.freeze([
   f("retries.maxAttemptsPerStep", "run", "int", "Attempts before it pauses", "How many times a step, or a whole feature when verifying per feature, may fail verification before the run pauses and alerts you."),
   f("retries.maxNoProgressStops", "run", "int", "Stops without progress", "How many times in a row the session may stop without using a tool or committing before the run counts as stuck."),
   f("builder.model", "run", "model", "Builder model", "The model that writes the code. opus or sonnet always mean the newest of each; a full claude-opus-* or claude-sonnet-* id pins one. Haiku is not allowed."),
-  f("builder.effort", "run", "enum-null", "Builder effort", "Reasoning effort for the builder. Left on your Claude Code default, the builder works the way your own sessions do. ultracode runs at xhigh: a run never uses its multi-agent workflows. The tester, bug bash and security review always use your Claude Code default.", { options: [...EFFORTS], nullLabel: "Your Claude Code default" }),
+  f("builder.effort", "run", "enum-null", "Builder effort", "Reasoning effort for the builder. Left on your Claude Code default, the builder works the way your own sessions do. ultracode runs at xhigh: a run never uses its multi-agent workflows.", { options: [...EFFORTS], nullLabel: "Your Claude Code default" }),
+  f("checkers.effort", "run", "enum-null", "Checker effort", "Reasoning effort for everything that checks the builder's work: the browser tester, the bug bash, the security review and the decider. Higher catches more small problems and takes a little longer; these checks are a small part of a run's time.", { options: [...CHECKER_EFFORTS], nullLabel: "Your Claude Code default" }),
   f("tester.enabled", "run", "bool", "Browser tester", "Open the app in a headless browser and check the feature's Accept lines. Needs the dev server below."),
   f("tester.model", "run", "model", "Browser tester model", "The model that drives the browser checks."),
   f("tester.maxTurns", "run", "int", "Browser tester turns", "Turns the tester may take for every 5 Accept lines (at most 4 times this for a big feature)."),

@@ -353,3 +353,12 @@ test("runSecurityReview passes the fixture plan's decisions to the reviewer", as
   await runSecurityReview({ root, config, step: p.steps[0], parsed: p, state: null, env, attempt: 1, run });
   assert.match(calls[0].prompt, /## The owner's decisions[^\n]*\n\n- Stack: Node 24 built-ins only/);
 });
+
+test("runSecurityReview passes checkers.effort as --effort, and none when it is null (D55)", async () => {
+  const at = (args) => (args.includes("--effort") ? args[args.indexOf("--effort") + 1] : null);
+  const pass = { verdict: "pass", findings: [], notes: "" };
+  let { calls } = await review([ok(pass)]);
+  assert.equal(at(calls[0].args), "xhigh");
+  ({ calls } = await review([ok(pass)], { config: mergeConfig({ ...config, checkers: { effort: null } }) }));
+  assert.equal(at(calls[0].args), null);
+});

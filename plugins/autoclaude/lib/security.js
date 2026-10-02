@@ -236,7 +236,7 @@ export async function runSecurityReview({ root, config, step = null, steps = nul
   const reviewed = reviewedSteps(step, state, steps);
   const prompt = buildSecurityPrompt({ template, step, steps: reviewed, parsed, base, diff, root, planFile: config.plan });
   // The reviewer works inside its report folder; --add-dir keeps the project readable.
-  const args = buildArgs({ model: s.model, maxTurns: MAX_TURNS, schema: SECURITY_SCHEMA, mcpConfig: null, allowedTools: SECURITY_TOOLS, extraArgs: ["--add-dir", root] });
+  const args = buildArgs({ model: s.model, effort: config.checkers ? config.checkers.effort : null, maxTurns: MAX_TURNS, schema: SECURITY_SCHEMA, mcpConfig: null, allowedTools: SECURITY_TOOLS, extraArgs: ["--add-dir", root] });
   const before = await untrackedSet(root, env);
 
   const errors = [];

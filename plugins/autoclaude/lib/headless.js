@@ -19,10 +19,12 @@ export function claudeBinary(env = process.env) {
   return findOnPath("claude", env);
 }
 
-export function buildArgs({ model = null, maxTurns = null, schema = null, mcpConfig = null, allowedTools = [], extraArgs = [] } = {}) {
+export function buildArgs({ model = null, effort = null, maxTurns = null, schema = null, mcpConfig = null, allowedTools = [], extraArgs = [] } = {}) {
   const args = ["-p", "--output-format", "json", "--settings", JSON.stringify({ disableAllHooks: true }), "--permission-mode", "dontAsk", "--strict-mcp-config"];
   if (mcpConfig) args.push("--mcp-config", mcpConfig);
   if (model) args.push("--model", String(model));
+  // checkers.effort (D55); without it the session uses the owner's own effort setting.
+  if (effort) args.push("--effort", String(effort));
   if (maxTurns) args.push("--max-turns", String(maxTurns));
   if (schema) args.push("--json-schema", JSON.stringify(schema));
   if (allowedTools && allowedTools.length) args.push("--allowedTools", allowedTools.join(","));
@@ -190,9 +192,9 @@ export function validDecision(v) {
 
 // Runs the decider once (plus a wrap-up at the turn limit). Resolves to { ok, decision, error,
 // durationMs, costUsd, numTurns }; never rejects. `run` is runHeadless or a test fake.
-export async function runDecider({ root, question, planFile, decisionsFile, model = "opus", template = "", step = null, stepText = null, env = process.env, run = runHeadless, timeoutMs = DECIDER_TIMEOUT_MS }) {
+export async function runDecider({ root, question, planFile, decisionsFile, model = "opus", effort = null, template = "", step = null, stepText = null, env = process.env, run = runHeadless, timeoutMs = DECIDER_TIMEOUT_MS }) {
   const prompt = buildDeciderPrompt({ template, question, root, planFile, decisionsFile, step, stepText });
-  const args = buildArgs({ model, maxTurns: DECIDER_MAX_TURNS, schema: DECIDER_SCHEMA, allowedTools: [...DECIDER_TOOLS] });
+  const args = buildArgs({ model, effort, maxTurns: DECIDER_MAX_TURNS, schema: DECIDER_SCHEMA, allowedTools: [...DECIDER_TOOLS] });
   // Not the builder: the child's hooks (disabled anyway) must never take it for one.
   const childEnv = { ...env };
   delete childEnv.AUTOCLAUDE_BUILDER;

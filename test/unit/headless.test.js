@@ -199,3 +199,14 @@ test("runDecider: read-only tools, the project's model, the project folder, a sc
   r = await runDecider({ root: "r", question: "q", planFile: "p", decisionsFile: "d", run: async (x) => { calls.push(x); return seq[calls.length - 1]; } });
   assert.deepEqual([r.ok, r.decision, calls.length, calls[1].prompt], [true, ROUTINE, 2, WRAP_UP_PROMPT]);
 });
+
+test("runDecider passes its effort as --effort, and none when it is null (D55)", async () => {
+  const calls = [];
+  const run = async (o) => { calls.push(o); return { ok: true, structured: ROUTINE, durationMs: 1 }; };
+  const base = { root: "C:/proj", question: "Which port?", planFile: "C:/proj/PLAN.md", decisionsFile: "C:/proj/docs/DECISIONS.md", env: { PATH: "p" }, run };
+  await runDecider({ ...base, effort: "xhigh" });
+  await runDecider(base);
+  assert.equal(calls[0].args[calls[0].args.indexOf("--effort") + 1], "xhigh");
+  assert.equal(calls[1].args.includes("--effort"), false);
+  assert.equal(buildArgs({ effort: "max" }).includes("--effort"), true);
+});

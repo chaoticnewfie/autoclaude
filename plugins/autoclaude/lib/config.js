@@ -19,6 +19,9 @@ export const DEFAULTS = Object.freeze({
   tester: { enabled: true, model: "opus", maxTurns: 40, timeoutSec: 900 },
   security: { when: ["phase-end", "tag:security"], blockOn: "high", model: "opus", timeoutSec: 900 },
   bugBash: { atPhaseEnd: true },
+  // Reasoning effort for the browser tester, bug bash, security reviewer and decider: one level
+  // for all of them; null = the owner's own Claude Code default (D55).
+  checkers: { effort: "xhigh" },
   retries: { maxAttemptsPerStep: 3, maxNoProgressStops: 3, maxMinutesPerStep: 120 },
   usage: { weeklyPauseAtPct: 85, autoResumeAfterWeeklyReset: false, staleAfterMin: 30 },
   git: { commitEachStep: true, tagPhaseEnds: true, push: true },
@@ -61,6 +64,8 @@ export function isSafeLiveKey(dotted) {
 
 export const EFFORTS = Object.freeze(["low", "medium", "high", "xhigh", "max", "ultracode"]);
 export const VERIFY_AT = Object.freeze(["phase", "step"]);
+// The checkers' levels: ultracode's orchestration has no place in a headless check (D54, D55).
+export const CHECKER_EFFORTS = Object.freeze(["low", "medium", "high", "xhigh", "max"]);
 const PAUSE_AT = ["never", "phase-end", "every-step"];
 // The Stop hook's own timeout in hooks.json. Claude Code kills the gate after this many seconds,
 // so a longer gate.timeoutSec would never be honoured.
@@ -167,6 +172,10 @@ export function validateConfig(cfg) {
     model("builder.model", cfg.builder.model);
     const e = cfg.builder.effort;
     if (e !== null && e !== undefined && !EFFORTS.includes(e)) err("builder.effort", `expected null (your Claude Code default) or one of ${EFFORTS.join(", ")}, got ${JSON.stringify(e)}`);
+  }
+  if (expect("checkers", cfg.checkers, "object")) {
+    const e = cfg.checkers.effort;
+    if (e !== null && e !== undefined && !CHECKER_EFFORTS.includes(e)) err("checkers.effort", `expected null (your Claude Code default) or one of ${CHECKER_EFFORTS.join(", ")}, got ${JSON.stringify(e)}`);
   }
   if (expect("tester", cfg.tester, "object")) {
     expect("tester.enabled", cfg.tester.enabled, "boolean");

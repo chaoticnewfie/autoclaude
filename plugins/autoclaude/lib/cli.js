@@ -797,6 +797,7 @@ async function cmdDecide(args, io) {
     planFile: path.join(root, config.plan),
     decisionsFile: path.join(root, config.docs.decisions),
     model: (config.builder && config.builder.model) || "opus",
+    effort: config.checkers ? config.checkers.effort : null,
     template: readText(path.join(pluginRoot(), "agents", "decider.md"), ""),
     step,
     stepText: step ? stepText(plan.parsed, step) : null,

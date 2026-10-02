@@ -260,6 +260,9 @@ set on the config page (`autoclaude config`) instead. Two rounds:
 - `builder.effort`: unset (Recommended; the builder uses the owner's own Claude Code default) or
   one of `low`, `medium`, `high`, `xhigh`, `max`, `ultracode` (which runs at `xhigh`: a run never
   uses ultracode's multi-agent workflows).
+- `checkers.effort`: the effort of the browser tester, bug bash, security review and decider, one
+  setting for all: `xhigh` (Recommended; the default), or `low`, `medium`, `high`, `max`, or the
+  owner's own Claude Code default.
 
 **2.10 Hand-back.** What the owner gets at the end:
 - Docker cleanup (`footprint.docker`): remove the stopped containers, unused volumes and unused

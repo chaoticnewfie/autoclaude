@@ -334,7 +334,7 @@ export async function runBrowserCheck({ kind = "tester", root, config, step = nu
   const mcpFile = mcpConfigFor(root, shotsDir.replace(/\\/g, "/"));
   // The checker's working directory is its own report folder, so anything it saves by a bare
   // file name lands there; --add-dir keeps the project readable for Read, Glob and Grep.
-  const args = buildArgs({ model: t.model, maxTurns, schema: VERDICT_SCHEMA, mcpConfig: mcpFile, allowedTools: ALLOWED_TOOLS, extraArgs: ["--add-dir", root] });
+  const args = buildArgs({ model: t.model, effort: config.checkers ? config.checkers.effort : null, maxTurns, schema: VERDICT_SCHEMA, mcpConfig: mcpFile, allowedTools: ALLOWED_TOOLS, extraArgs: ["--add-dir", root] });
   const before = await untrackedSet(root, env);
 
   const errors = [];

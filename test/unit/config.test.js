@@ -104,6 +104,7 @@ test("gate.timeoutSec may not exceed the Stop hook's 1800 s; a check's timeoutSe
 test("the Phase 8 defaults: verify per feature, push on, effort unset, feature alerts on, Docker cleanup, no permissions", () => {
   const cfg = mergeConfig({});
   assert.deepEqual(cfg.builder, { model: "opus", effort: null });
+  assert.deepEqual(cfg.checkers, { effort: "xhigh" }, "one effort for every checker, xhigh unless set (D55)");
   assert.deepEqual(cfg.gate, { timeoutSec: 1800, verifyAt: "phase" });
   assert.deepEqual(cfg.git, { commitEachStep: true, tagPhaseEnds: true, push: true });
   assert.deepEqual(cfg.notify, { morningSummaryAt: null, events: { featureVerified: true, stepVerified: false, runStarted: false, runResumed: false, pausedByOwner: false } });
@@ -233,4 +234,9 @@ test("SAFE_LIVE_KEYS: alerts, usage, review pauses, supervisor timings, pushes a
   for (const k of ["notify.events.featureVerified", "notify.morningSummaryAt", "usage.weeklyPauseAtPct", "review.pauseAt", "supervisor.stallMin", "git.push", "git.tagPhaseEnds", "footprint.docker"]) assert.ok(isSafeLiveKey(k), k);
   for (const k of ["builder.model", "builder.effort", "gate.verifyAt", "tester.model", "security.blockOn", "checks", "guard.deny", "permissions.allow", "git.commitEachStep", "retries.maxAttemptsPerStep", "notifyx"]) assert.ok(!isSafeLiveKey(k), k);
   assert.ok(SAFE_LIVE_KEYS.includes("notify"));
+});
+
+test("checkers.effort: null or low to max; ultracode and other words are refused (D55)", () => {
+  for (const e of [null, "low", "medium", "high", "xhigh", "max"]) assert.deepEqual(validateConfig(mergeConfig({ checkers: { effort: e } })), [], String(e));
+  for (const e of ["ultracode", "turbo", 3]) assert.equal(validateConfig(mergeConfig({ checkers: { effort: e } }))[0].path, "checkers.effort", String(e));
 });

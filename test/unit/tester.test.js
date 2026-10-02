@@ -343,3 +343,11 @@ test("testChanges from the feature's first commit shows committed and uncommitte
   await runBrowserCheck({ kind: "tester", root, config, steps: phaseSteps, parsed: phased, env, run });
   assert.match(calls[0].prompt, /-  assert\.throws\(\(\) => s\.toggle\(9\)/);
 });
+
+test("runBrowserCheck passes checkers.effort as --effort (D55)", async () => {
+  const at = (args) => (args.includes("--effort") ? args[args.indexOf("--effort") + 1] : null);
+  let { calls } = await check([ok(good)]);
+  assert.equal(at(calls[0].args), "xhigh");
+  ({ calls } = await check([ok(good)], { config: mergeConfig({ ...config, checkers: { effort: "high" } }) }));
+  assert.equal(at(calls[0].args), "high");
+});
