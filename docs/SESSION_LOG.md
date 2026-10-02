@@ -401,3 +401,10 @@ One entry per working session: what was done, what was committed. Append only.
   no longer mention an invitation or the GitHub CLI. No license for now.
 - Scott asked for 1.0 now (D57): version 1.0.0, tag v1.0.0, CHANGELOG.md; P9.5 ticked, CHECKPOINT 9 held; P9.1's written review and P9.2 to P9.4 continue after 1.0.
 - This machine updated from 0.10.5 to 1.0.0 from GitHub; the launcher reports 1.0.0.
+
+## 2026-10-02 (Code VM) - Security and optimize sweeps planned (Phase 10)
+
+- Scott asked for `autoclaude security` and `autoclaude optimize`. A 3-agent read-only research
+  workflow (reuse seams, security techniques, optimization techniques; results in the session
+  scratchpad, summarized in D58) and seven rounds of questions settled the design. Phase 10
+  (P10.1 to P10.12, CHECKPOINT 10) is in PLAN.md; the plan lints at 75 steps in 11 phases.

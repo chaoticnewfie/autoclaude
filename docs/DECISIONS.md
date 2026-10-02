@@ -881,3 +881,49 @@ Everything we talked about was fixed and worked." He is sharing it with the deve
 with now.
 
 **Rejected.** Holding 1.0 until P9.2 to P9.4 are done, as the plan had it.
+
+### D58 Security and optimize sweeps: what Scott chose (2026-10-02)
+
+Scott asked for a security command and an optimize command for existing projects, each able to
+write a report with suggested fixes or to start fixing right away. A read-only research workflow
+(3 agents: reuse seams, security techniques, optimization techniques) informed seven rounds of
+questions. His answers:
+
+- **Start and run.** `/autoclaude:security` or `/autoclaude:optimize` in a Claude session in the
+  project asks the questions, then the sweep runs in its own window like any other AutoClaude
+  run, unattended, with alerts.
+- **Fixing.** Confirmed findings become a generated plan that a normal run fixes, every fix
+  verified by the gate; the plan has its own file and branch, leaving the project's plan alone.
+  Report only, a plan to review, or fix right away is asked at the start of each sweep; fix right
+  away fixes all confirmed findings, and anything that needs Scott is left for him.
+- **Report.** In the project folder, never committed (gitignored), with suggested fixes.
+- **Security checks.** All on by default: whole-codebase review; secrets (files and git history)
+  and package vulnerabilities; config and infrastructure; live attacks on the app.
+- **Live targets.** Chosen per sweep: local dev server by default; staging URLs he names;
+  production off, read-only or full attacks with a warning; each test kind can be switched off.
+  "We should have a way to choose everything possible, or restrict certain things if needed."
+  Writes only on data confirmed throwaway. Test users made by the sweep, or asked for and kept in
+  the gitignored secrets/ folder.
+- **Advisories.** Package names and versions may go to npm and OSV, behind a switch.
+- **Severity.** Critical, high, medium, low, with CWE and CVSS; critical is treated as high when
+  fixing.
+- **Depth and load.** Thorough by default (every finding checked by independent sessions);
+  3 sessions at once; Opus at checkers.effort.
+- **Optimize.** All on by default: unused code and packages, duplicates and leftovers,
+  performance, poorly built features, and the test suite's speed and flakiness. Rebuilds are
+  allowed, with tests that pin the current behaviour written first. A real bug found is fixed
+  with a test and logged. Minor and patch upgrades are made; majors are report-only.
+- **Tools.** Fetched on the fly (npx, Docker images) and never added to the project.
+- **Setup.** A sweep sets up checks and the dev server itself when missing, as planning does;
+  fix right away needs the checks green first.
+- **Disclosure.** Fix plans and commits use neutral wording; security findings from normal runs
+  go to a gitignored file. Accepted risks and false alarms are remembered in a committed list
+  (fingerprints and reasons, no details).
+- **Hardening found on the way.** Block Playwright MCP's arbitrary-code tool for every browser
+  checker and pin its version, now.
+- **Proof and release.** Planted problems in the practice app, done by Claude; both sweeps and
+  both modes released together as 1.1.0 after CHECKPOINT 10.
+
+**Rejected.** Running the sweep in the owner's session; fixing inside the sweep without the gate;
+committed reports; standard or chosen-each-time depth; offline-only advisories; requiring
+/autoclaude:plan first; report-only rebuilds; releasing security before optimize.

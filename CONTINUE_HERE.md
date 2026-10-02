@@ -1,6 +1,6 @@
 # CONTINUE_HERE.md
 
-**Last updated: 2026-10-02 (later).** Rewrite this file at the end of every prompt.
+**Last updated: 2026-10-02 (evening).** Rewrite this file at the end of every prompt.
 
 ## Where things are
 
@@ -17,11 +17,10 @@ xhigh, on the settings page) sets the tester, bug bash, security review and deci
 
 ## The exact next step
 
-Ask Scott whether he wants the full P9.1 review (two read-only agents over C:database's logs,
-reports and transcripts, as for P7.3), then turn every issue into a fix or a DEFERRED entry and
-tick P9.1. The measurement already found: 4 of 5 check failures were flaky or timing tests (P8
-pgAdmin start, P11 npm test over 900 s, P9 Grafana, P18 mcp health), and fix-up passes rerun the
-full 10 to 20 min check suite (about 2 h in the run; DEFERRED 22). Then P9.2 (a second repo).
+Build Phase 10 (P10.1 to P10.11), the security and optimize sweeps Scott asked for on
+2026-10-02; every design choice is in D58 (his answers to seven rounds of questions). Then P10.12:
+prove it on the practice app with planted problems, and stop at CHECKPOINT 10. Release 1.1.0
+after the checkpoint. Still open from Phase 9 (after 1.0): P9.1's written review, P9.2 to P9.4.
 
 ## Notes for whoever continues
 

@@ -67,8 +67,8 @@ Everything Scott has asked for after 2026-09-24, with where it landed. Nothing i
 | 2026-09-27 | "Id rather 25 questions or more and end up with what I want than everything assumed and waste tokens. The point is a little extra planning time and I save most of the build time. Thats the goal. And I'll sit and work with claude code as I'm used to, to fine tune and make sure everything is working and looking how I want" | D48; P8.1 | Planned |
 | 2026-09-28 | "a autoclaude:config command so we can change the config easily. Like have it open a page we can scroll up and down through to change things like the limit we stop at on the weekly, maybe be able to change the webhook url, everything we can set in there would be nice. It'll also be nice when other people use the project as well and might want different settings than me." | P8.7, D49 | Planned |
 | 2026-09-28 | "I also wouldn't mind getting more updates in general, like get one each time a feature is finished... configurable alerts" | P8.6, D49 | Planned |
-| 2026-10-02 | "Add an security command to autoclaude that we could run on existing projects that would run a security sweap on an app that would check over the entire app in the code and using a headless browser, and anything else you would have available to do a full security sweap. Also give the option to have it output a file with all the details including suggested fixes, or the ability to have autoclaude start fixing them right away after the sweap finishes." | Phase 10 (being planned with Scott) | Planning |
-| 2026-10-02 | "optimize command. Have autoclaude sweap the entire project looking for stale or unused code to remove, or look for features that were poorly built and rebuild/ optimize them too. I'd want to have it do a total optimization sweap." Same report-or-fix-now option | Phase 10 (being planned with Scott) | Planning |
+| 2026-10-02 | "Add an security command to autoclaude that we could run on existing projects that would run a security sweap on an app that would check over the entire app in the code and using a headless browser, and anything else you would have available to do a full security sweap. Also give the option to have it output a file with all the details including suggested fixes, or the ability to have autoclaude start fixing them right away after the sweap finishes." | Phase 10 (P10.1 to P10.12), D58 | Planned |
+| 2026-10-02 | "optimize command. Have autoclaude sweap the entire project looking for stale or unused code to remove, or look for features that were poorly built and rebuild/ optimize them too. I'd want to have it do a total optimization sweap." Same report-or-fix-now option | Phase 10 (P10.1 to P10.12), D58 | Planned |
 
 ### How each requirement is met
 
@@ -713,6 +713,59 @@ Every step here comes from Scott's answers on 2026-09-28 and the rehearsal revie
   - Accept: `plugin.json` version `1.0.0`, git tag `v1.0.0` and `CHANGELOG.md`, after Scott's review of P9.1. No `LICENSE` file for now (D56; the repo is public since 2026-10-02)
 
 **CHECKPOINT 9:** Review of the second DB run with Scott; if it is good, 1.0. (2026-10-02: held. Scott judged the run good and asked for 1.0 now; P9.1's written review, P9.2, P9.3 and P9.4 follow after 1.0, D57.)
+
+### Phase 10: Security and optimize sweeps (1.1.0)
+
+Scott's requests of 2026-10-02 and his answers in seven rounds of questions (D58). Both sweeps run
+on one engine; "fix right away" turns confirmed findings into a generated plan that a normal run
+fixes and the gate verifies.
+
+- [ ] **P10.1** Sweep engine
+  - Accept: `/autoclaude:security` and `/autoclaude:optimize` (and `autoclaude security`, `autoclaude optimize`) start a sweep that runs unattended in its own console window, survives a closed terminal or an RDP disconnect, and picks up where it left off after a crash or restart (finished agents are not rerun)
+  - Accept: the sweep splits the project into areas under a size budget and runs read-only headless sessions (Read, Glob, Grep; no Bash) at most `sweep.concurrency` (default 3) at a time, on Opus at `checkers.effort`
+  - Accept: it waits for the 5-hour reset when the window is nearly full or a session reports a rate limit, stops at `usage.weeklyPauseAtPct`, and shows an estimate of sessions and time before it starts
+  - Accept: a "sweep finished" alert is always sent, carrying counts and the report path only, never finding details
+- [ ] **P10.2** Findings, verification and the report
+  - Accept: one findings schema for both sweeps: id, category, severity (critical, high, medium, low), CWE (security), CVSS and fixed version (packages), confidence, file and line, redacted evidence, impact, suggested fix with code, test idea, fix tier, fingerprint
+  - Accept: with depth "thorough" (the default) every candidate is checked by 3 independent sessions that try to disprove it and kept only on a majority; "standard" uses 1; refuted findings go to an appendix, uncertain ones are never fixed automatically
+  - Accept: the report (`report.md` and `findings.json`) goes to a dated folder under the gitignored `.autoclaude/sweeps/`, states what was and was not examined, and no secret value appears in it, in the saved session output or in an alert
+  - Accept: findings the owner marks as an accepted risk or a false alarm are kept by fingerprint and reason (no details) in a committed list, and later sweeps list them as accepted instead of reporting them again
+- [ ] **P10.3** Security scanners (Node, no model)
+  - Accept: secrets are searched in the working tree and the whole git history, with values masked; tracked sensitive files and `.gitignore` coverage are checked
+  - Accept: package advisories come from `npm audit --json` and, for other lockfiles, the OSV service, behind a switch (`sweep.advisories`, on by default); a tool that is missing or switched off is reported as "not checked", never as clean
+  - Accept: scanners fetched on the fly (npx, or a Docker image when Docker is running) are used when available and never added to the project
+- [ ] **P10.4** Security review of the code
+  - Accept: one session maps the app (entry points, routes, roles, data stores, trust boundaries); area sessions then review login and sessions, access control (database roles and row-level security included), input handling and injection, output encoding, secrets and data exposure (logging, errors, CORS, CSRF), crypto, and configuration and infrastructure (Dockerfiles, compose, CI, web server config, `.env` handling, open ports)
+  - Accept: reviewers respect the project plan's "Constraints & decisions", and triage every scanner hit (reachable or not, real secret or test value)
+- [ ] **P10.5** Live attacks on the running app
+  - Accept: the targets are chosen per sweep: the local dev server (default), staging URLs the owner names, and production as off, read-only checks or full attacks (with a warning); each kind of test can be switched off
+  - Accept: every live request goes through an allow-list: a Node proxy for the browser and the same list for direct HTTP probes; a request to any other host is refused and logged
+  - Accept: direct probes check security headers, cookie flags, CORS, exposed files (`/.git`, `/.env`, source maps), verbose errors, routes that answer without a login and rate limiting; a browser session with two test users checks one user reaching the other's data, XSS, CSRF, open redirects and session handling
+  - Accept: tests that write data run only when the owner confirms the database is throwaway (ideally with a reset command); test users are signed up by the sweep when the app allows it, otherwise asked for and kept in the gitignored `secrets/` folder, never in a report
+- [ ] **P10.6** The questions before a sweep, and setup
+  - Accept: the skills ask in rounds with a recommendation each: what to check (all modules on by default), targets and test kinds, test logins, depth, what to exclude, and report only, report plus a fix plan to review, or fix right away (recommended)
+  - Accept: a project without proven checks or dev server is set up as planning does it (found, confirmed with the owner, proven to run); "fix right away" refuses until the checks pass on the starting commit
+- [ ] **P10.7** Fix right away
+  - Accept: confirmed findings (all severities; anything needing the owner listed under "After the run") become a generated plan (`SECURITY_PLAN.md` or `OPTIMIZE_PLAN.md`) on its own branch: phases grouped by area then severity, at most 5 steps each, each with a regression test as an Accept line, security steps tagged `security`, the main plan's "Constraints & decisions" copied in; it passes `lint-plan`
+  - Accept: the generated plan words every fix neutrally and points to finding ids in the gitignored report; no exploit detail reaches a commit, a pushed file or an alert
+  - Accept: `autoclaude run --plan <file>` runs that plan with every gate check, leaves the project's own plan and its state alone, and is refused while another run is running or paused; "report plus a fix plan to review" writes the plan and stops
+- [ ] **P10.8** Optimize: baseline and scanners
+  - Accept: before any finding is acted on, a baseline is recorded: each check's and each test file's time, flaky tests found by rerunning, build time, bundle size (gzip), package count, dev-server start time, and per page load time and request count from the browser
+  - Accept: unused code, packages and duplicates are found with tools fetched on the fly (for example knip, jscpd, `npm outdated`), at pinned versions, plus git churn hotspots; something is "unused" only when a tool flags it, a search of the whole repository (scripts, CI, manifests, config, docs) finds no reference, and it matches no entry-point convention of the stack
+- [ ] **P10.9** Optimize: review and safe changes
+  - Accept: sessions review unused code and packages, duplicates and leftovers, performance (measured before and after, an improvement claimed only above the noise), poorly built features (a written rubric), and the test suite's speed and flakiness, never weakening a test
+  - Accept: a rebuild or other behaviour-sensitive change comes as two steps: first tests that pin the current behaviour (they pass on the unchanged code), then the change, with an Accept line that the pinned tests were not edited and the browser shows the same pages
+  - Accept: a real bug found while optimizing is fixed with a test and listed in the hand-back as a behaviour change; minor and patch upgrades are made, major upgrades and changes to a database shared with other apps are report-only
+- [ ] **P10.10** Disclosure and the browser checkers
+  - Accept: in a new project, security findings from normal runs go to a gitignored file, never to a committed one; an existing project with a committed findings file is offered the move in the sweep's and planning's questions
+  - Accept: no browser checker (tester, bug bash, sweep) can use Playwright MCP's arbitrary-code tool, and Playwright MCP runs at a pinned, tested version (closes DEFERRED 17)
+- [ ] **P10.11** Docs and version 1.1.0
+  - Accept: INSTRUCTIONS.md (and its template copy), docs/USAGE.md, README.md and CHANGELOG.md describe both sweeps, their questions, reports, fix mode and safety limits; the settings page shows the sweep settings; the plugin is version 1.1.0
+- [ ] **P10.12** Proof on the practice app, done by Claude
+  - Accept: the practice app gets planted problems (security holes of several kinds, a secret in its git history, unused files and packages, duplicated code, a slow path, a flaky test); a thorough security sweep and an optimize sweep each find the planted problems that are in scope, and their reports say what was not checked
+  - Accept: "fix right away" fixes them through a normal run that the gate verifies, on its own branch; the proxy log shows no request outside the allow-list; nothing that existed before the sweep outside the project is changed
+
+**CHECKPOINT 10:** Show Scott both reports, the fix run's hand-back, the alerts, and the time and usage each sweep took.
 
 ---
 
