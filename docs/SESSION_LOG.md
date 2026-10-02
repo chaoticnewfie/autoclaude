@@ -392,3 +392,6 @@ One entry per working session: what was done, what was committed. Append only.
   98 s average; second run (high, whole-feature reviews) 13 reviews, 10 findings (0.8 each; 1
   high, a real flaw it caught), 50 s average. Estimate for high everywhere: about 1 to 2.5 h of a
   28.7 h run. No change made; the choice stays D54.
+- Scott asked for the effort to be settable on the settings page. Builder effort already was;
+  added `checkers.effort` (one level for tester, bug bash, security review and decider, default
+  xhigh, D55), passed as --effort; the plan skill asks it. 0.10.5.

@@ -835,3 +835,21 @@ later Claude Code does.
 
 **Rejected.** High for the builder (small saving, quality risk where it matters); checkers fixed
 at high; making runs orchestrate workflows.
+
+### D55 One checker effort setting, xhigh by default (2026-10-02)
+
+**Decision.** A new setting, `checkers.effort`, sets the reasoning effort of the browser tester,
+the bug bash, the security reviewer and the decider together. Built-in default `xhigh`; allowed
+`low`, `medium`, `high`, `xhigh`, `max`, or `null` for the owner's own Claude Code default. It is
+on the settings page next to "Builder effort", can be a computer default, and is locked during a
+run like the other verification settings. The plan skill asks it in the run-settings round.
+Builder effort is unchanged (unset = the owner's Claude Code default). Supersedes D54's "the
+checkers use the owner's own Claude Code effort setting" as the default.
+
+**Why.** Scott: "could we make the default effort be something configurable in the config page
+too?", then chose one setting for all checkers, xhigh, as a fixed level. The checkers are about 5%
+of a run's gate time, so xhigh costs about 10 to 20 minutes per long run, and the comparison of
+both DB runs suggests xhigh reviews notice more small problems.
+
+**Rejected.** One setting per checker (more to set for little gain); one dial for the builder and
+the checkers together; following the Claude Code default as the built-in default.

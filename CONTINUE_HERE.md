@@ -1,6 +1,6 @@
 # CONTINUE_HERE.md
 
-**Last updated: 2026-10-02.** Rewrite this file at the end of every prompt.
+**Last updated: 2026-10-02 (later).** Rewrite this file at the end of every prompt.
 
 ## Where things are
 
@@ -8,11 +8,11 @@
 part on 0.10.3: 36 steps in 12 features, 28 h 40 min, VM 105 created and the stack deployed,
 alerts received, no pauses or recoveries. It was measured read-only (docs/SESSION_LOG.md,
 2026-10-02): builder model time 25% of the run (thinking about 8%), builder tool time 52% (tests
-about 34%), gate 22% (checks 92% of it). From that, D54 (0.10.4): the builder keeps xhigh, the
-checkers now use the owner's own effort (they had run at high by accident), and
-`builder.effort: "ultracode"` launches at xhigh because ultracode stays off in runs.
+about 34%), gate 22% (checks 92% of it). From that, D54 (0.10.4) and D55 (0.10.5): the builder keeps xhigh, `builder.effort: "ultracode"`
+launches at xhigh (ultracode stays off in runs), and a new `checkers.effort` setting (default
+xhigh, on the settings page) sets the tester, bug bash, security review and decider together.
 
-0.10.4 is pushed; this machine still runs 0.10.3 until `claude plugin marketplace update
+0.10.5 is pushed; this machine still runs 0.10.3 until `claude plugin marketplace update
 autoclaude` and `claude plugin update autoclaude@autoclaude` (run from a terminal, then restart
 sessions).
 

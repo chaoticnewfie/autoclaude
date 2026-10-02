@@ -605,6 +605,7 @@ These are the built-in defaults:
   "tester": { "enabled": true, "model": "opus", "maxTurns": 40, "timeoutSec": 900 },
   "security": { "when": ["phase-end", "tag:security"], "blockOn": "high", "model": "opus", "timeoutSec": 900 },
   "bugBash": { "atPhaseEnd": true },
+  "checkers": { "effort": "xhigh" },
   "retries": { "maxAttemptsPerStep": 3, "maxNoProgressStops": 3, "maxMinutesPerStep": 120 },
   "usage": { "weeklyPauseAtPct": 85, "autoResumeAfterWeeklyReset": false, "staleAfterMin": 30 },
   "git": { "commitEachStep": true, "tagPhaseEnds": true, "push": true },
@@ -631,7 +632,8 @@ These are the built-in defaults:
 | `plan` | The plan file, if it is not `PLAN.md` |
 | `branch` | The run branch; `{planSlug}` comes from the plan's `#` title |
 | `builder.model`, `tester.model`, `security.model` | The models for the builder (and its decider), the browser tester and bug bash, and the security reviewer. All default to `opus`. Allowed: `opus` or `sonnet`, which always mean the newest of each, or a full `claude-opus-*` or `claude-sonnet-*` id. Haiku is refused |
-| `builder.effort` | `null` (the default) follows your own Claude Code effort setting, read again at every launch. Or one of `low`, `medium`, `high`, `xhigh`, `max` for this run only; `ultracode` is accepted and runs at `xhigh`, because a run never uses ultracode's multi-agent workflows. The browser tester, bug bash, security reviewer and decider always use your own Claude Code effort setting |
+| `builder.effort` | `null` (the default) follows your own Claude Code effort setting, read again at every launch. Or one of `low`, `medium`, `high`, `xhigh`, `max` for this run only; `ultracode` is accepted and runs at `xhigh`, because a run never uses ultracode's multi-agent workflows. |
+| `checkers.effort` | The reasoning effort of everything that checks the builder's work: the browser tester, bug bash, security reviewer and decider. One of `low`, `medium`, `high`, `xhigh` (the default) or `max`, or `null` for your own Claude Code effort setting. Higher catches more small problems; these checks are a small part of a run's time |
 | `devServer` | How to start the app for the browser checks: `command`, the `url` it serves, the `healthPath` that answers when it is up, and how long to wait. A wrong URL fails every UI step; an empty one skips the browser checks |
 | `checks` | Commands the gate runs when it verifies, in order, stopping at the first failure: `{ "name", "command", "timeoutSec", "needsDevServer", "requires" }`. `name` and `command` are required; `timeoutSec` defaults to 900; `needsDevServer: true` starts the dev server first and needs `devServer` set; `requires` is a command that must succeed first (for example `docker version`), tried by the preflight so a missing tool fails before the run, not hours in. Each check must exit non-zero on failure. They run in `cmd.exe` on Windows and `/bin/sh` elsewhere, with the PATH the run recorded; `autoclaude checks` runs them the same way |
 | `tester` | The browser tester: model, turn budget (`maxTurns` tool calls; the bug bash gets one and a half times that), time limit |

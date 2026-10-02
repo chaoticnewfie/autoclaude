@@ -15,8 +15,8 @@ what order lives in [PLAN.md](PLAN.md). Where things are right now lives in
 ## Status, in one line
 
 Phase 9 under way (2026-10-02): Phase 8 is done and released as 0.10.x; Scott ran the DB project's
-next part on it (36 steps, 28 h 40 min, VM created and the stack deployed). 0.10.4 sets effort in
-runs (D54). Next: the P9.1 review, then P9.2. The DB project may be read for reviews, never edited.
+next part on it (36 steps, 28 h 40 min, VM created and the stack deployed). 0.10.5 sets effort in
+runs (D54, D55). Next: the P9.1 review, then P9.2. The DB project may be read for reviews, never edited.
 
 ## Definition of done: every prompt, no exceptions
 
