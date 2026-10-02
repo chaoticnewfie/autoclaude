@@ -364,3 +364,23 @@ One entry per working session: what was done, what was committed. Append only.
   project's next part today (P9.1). Checked the DB project read-only: the Phase A run branch is
   28 commits ahead of main and not merged; its config (from 0.9.4) already pushes; its old deny
   rules block ssh, pve and qm; AUTOCLAUDE.md is the 0.9.4 copy; no watchdog is installed.
+
+## 2026-10-02 (Code VM) - P9.1 run measured: effort, ultracode, where the time went
+
+- Scott reported the DB project's second run (P9.1) finished: VM created, database deployed,
+  alerts received, the Phase 8 fixes all worked. Measured read-only from C:\database's logs and
+  transcripts: 36 steps in 12 features, 28 h 40 min (48 min per step; the steps were larger,
+  real VM builds and deploys), 9 of 12 features passed first time, no pauses, no recoveries,
+  0 workflows. Weekly usage about 14 points (about 0.5 per hour).
+- Where the time went: builder model generation 25% (thinking alone about 8%), builder tool time
+  52% (tests in all forms about 34% of the run), the gate 22% (its checks 92% of that; the
+  checker models 5%). Gate rework (3 failed attempts, 8 fix-ups, 10 fix-up check passes) 170 min
+  plus about 246 min of builder fixes; 4 of the 5 check failures were flaky or timing tests.
+- Effort: the builder ran at xhigh (`--effort ultracode` set xhigh). Ultracode itself never took
+  effect: its reminder is attached only to prompts a person types, so the builder made no
+  workflow calls. The checkers (tester, security, decider) ran at high, not xhigh, most likely
+  because they inherited the builder's CLAUDE_EFFORT ("ultracode"), which `claude -p` does not
+  take as xhigh. In the rehearsal they ran at xhigh.
+- Estimate: high instead of xhigh for the builder saves about 55 to 125 min of 28.7 h (3 to 7%);
+  one extra failed attempt costs 35 to 80 min. Bigger levers: test time and fix-up passes that
+  rerun the whole 10 to 20 min check suite.
