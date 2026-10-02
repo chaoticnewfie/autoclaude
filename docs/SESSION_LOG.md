@@ -387,3 +387,8 @@ One entry per working session: what was done, what was committed. Append only.
 - Scott keeps xhigh for the builder, chose his own default for the checkers and no ultracode in
   runs (D54): runHeadless drops an inherited CLAUDE_EFFORT; builder.effort "ultracode" launches at
   xhigh. Docs, the settings page and the plan skill say so. 0.10.4.
+- Scott asked what high effort for everything would cost and save. Security reviews compared:
+  first run (xhigh, per-step reviews) 17 reviews, 29 findings (1.7 each; 1 medium, 0 high),
+  98 s average; second run (high, whole-feature reviews) 13 reviews, 10 findings (0.8 each; 1
+  high, a real flaw it caught), 50 s average. Estimate for high everywhere: about 1 to 2.5 h of a
+  28.7 h run. No change made; the choice stays D54.
