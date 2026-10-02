@@ -61,9 +61,13 @@ export function builderSettings(config) {
 }
 
 // The per-launch options from the project's settings: model, effort and the settings JSON.
+// builder.effort "ultracode" launches at xhigh: ultracode's multi-agent orchestration stays off in
+// runs (D54). It never reached the unattended builder anyway (its reminder comes only with a typed
+// prompt), so this keeps the run as measured, whatever a later Claude Code does.
 export function launchOptions(config) {
   const b = (config && config.builder) || {};
-  return { model: b.model || null, effort: b.effort || null, settings: builderSettings(config) };
+  const effort = b.effort === "ultracode" ? "xhigh" : b.effort || null;
+  return { model: b.model || null, effort, settings: builderSettings(config) };
 }
 
 // A start launch names its session (`--session-id`, a fresh UUID each time: Claude Code refuses

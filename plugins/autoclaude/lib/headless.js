@@ -65,6 +65,16 @@ export function interpret({ stdout = "", stderr = "", code = null, timedOut = fa
   return { ...base, ...meta, ok: true, infra: false, error: null, structured: out.structured_output === undefined ? null : out.structured_output };
 }
 
+// The environment of a headless session: AUTOCLAUDE_ROLE, and no CLAUDE_EFFORT. Claude Code
+// exports its session's effort to child processes, so a checker started by the gate inherited
+// the builder's ("ultracode" in the DB project's second run) and ran at high instead of the
+// owner's default xhigh. Without it the checker uses the owner's own effort setting (D54).
+export function headlessEnv(env, role) {
+  const out = { ...env, AUTOCLAUDE_ROLE: role };
+  delete out.CLAUDE_EFFORT;
+  return out;
+}
+
 // Runs one headless session. Never rejects. `role` is exported as AUTOCLAUDE_ROLE so every
 // AutoClaude hook in the child exits at once even if hooks were somehow enabled.
 export function runHeadless({ prompt, args, cwd, env = process.env, role = "reviewer", timeoutMs = 900000, bin = null, binArgs = [], expectStructured = true }) {
@@ -77,7 +87,7 @@ export function runHeadless({ prompt, args, cwd, env = process.env, role = "revi
     let child;
     try {
       // An npm claude.cmd cannot be spawned directly (EINVAL); spawnClaude runs it through cmd.exe.
-      child = spawnClaude(exe, [...binArgs, ...args], { cwd, env: { ...env, AUTOCLAUDE_ROLE: role }, stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
+      child = spawnClaude(exe, [...binArgs, ...args], { cwd, env: headlessEnv(env, role), stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
     } catch (e) {
       return done(interpret({ spawnError: e.message, durationMs: Date.now() - started }));
     }

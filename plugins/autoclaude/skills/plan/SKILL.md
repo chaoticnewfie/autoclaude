@@ -258,7 +258,8 @@ set on the config page (`autoclaude config`) instead. Two rounds:
   itself after the weekly reset (`usage.autoResumeAfterWeeklyReset`, default false). Show the
   estimate (section 4) next to it.
 - `builder.effort`: unset (Recommended; the builder uses the owner's own Claude Code default) or
-  one of `low`, `medium`, `high`, `xhigh`, `max`, `ultracode`.
+  one of `low`, `medium`, `high`, `xhigh`, `max`, `ultracode` (which runs at `xhigh`: a run never
+  uses ultracode's multi-agent workflows).
 
 **2.10 Hand-back.** What the owner gets at the end:
 - Docker cleanup (`footprint.docker`): remove the stopped containers, unused volumes and unused

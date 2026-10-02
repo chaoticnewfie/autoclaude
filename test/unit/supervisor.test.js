@@ -295,6 +295,8 @@ test("builderSettings: nothing without entries; allow rules and $defaults plus t
   assert.deepEqual(JSON.parse(builderSettings({ permissions: { environment: ["x"] } })), { autoMode: { environment: ["$defaults", "x"] } });
   assert.deepEqual(launchOptions(mergeConfig({ builder: { effort: "max" } })), { model: "opus", effort: "max", settings: null });
   assert.deepEqual(launchOptions(mergeConfig({})), { model: "opus", effort: null, settings: null });
+  // Ultracode's orchestration stays off in runs (D54): "ultracode" launches at xhigh.
+  assert.deepEqual(launchOptions(mergeConfig({ builder: { effort: "ultracode" } })), { model: "opus", effort: "xhigh", settings: null });
 });
 
 test("decide: a fresh-session request replaces the session, waits for a verification, and never counts as a relaunch", () => {

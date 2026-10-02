@@ -16,5 +16,5 @@ if (mode === "sleep") {
 } else if (mode === "noise") {
   process.stdout.write("some warning line\n" + JSON.stringify({ is_error: false, num_turns: 1, structured_output: { ok: true } }) + "\n");
 } else {
-  process.stdout.write(JSON.stringify({ is_error: false, num_turns: 3, total_cost_usd: 0.012, session_id: "fake", structured_output: { prompt, role: process.env.AUTOCLAUDE_ROLE, args } }));
+  process.stdout.write(JSON.stringify({ is_error: false, num_turns: 3, total_cost_usd: 0.012, session_id: "fake", structured_output: { prompt, role: process.env.AUTOCLAUDE_ROLE, effort: process.env.CLAUDE_EFFORT ?? null, args } }));
 }

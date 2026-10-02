@@ -50,6 +50,15 @@ test("runHeadless sends the prompt on stdin, sets AUTOCLAUDE_ROLE and parses the
   assert.equal(r.costUsd, 0.012);
 });
 
+test("runHeadless drops an inherited CLAUDE_EFFORT, so a checker uses the owner's own effort", async () => {
+  // The DB project's second run: the gate inherited the builder's CLAUDE_EFFORT ("ultracode") and
+  // every checker ran at high instead of the owner's xhigh (D54).
+  const r = await run("ok", { env: { ...process.env, FAKE_CLAUDE_MODE: "ok", CLAUDE_EFFORT: "ultracode" } });
+  assert.equal(r.ok, true, r.error);
+  assert.equal(r.structured.effort, null);
+  assert.equal(r.structured.role, "tester");
+});
+
 // An npm install of Claude Code is a claude.cmd, which Node will not spawn without a shell
 // (a synchronous EINVAL); every checker and `autoclaude decide` failed as infra with it.
 test("runHeadless runs a .cmd claude (an npm install) through cmd.exe, arguments and stdin intact", { skip: process.platform !== "win32" && "Windows only" }, async () => {

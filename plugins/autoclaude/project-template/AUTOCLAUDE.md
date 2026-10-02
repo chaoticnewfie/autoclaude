@@ -264,7 +264,7 @@ The settings you are most likely to change:
 | Resume after the weekly reset   | carry on by itself after the reset                          |
 | Push                            | push the run branch and tags after each feature (default on) |
 | Models                          | Opus (the newest) everywhere by default; Sonnet is the lowest allowed |
-| Builder effort                  | unset = your own Claude Code default                        |
+| Builder effort                  | unset = your own Claude Code default (ultracode = xhigh)    |
 | Alerts                          | the channel, and which informational messages you get       |
 | Checks, dev server              | your test commands, and how to start the app for the browser checks |
 | Deny rules, permissions         | what the run must never run, and what it may do outside the project |
