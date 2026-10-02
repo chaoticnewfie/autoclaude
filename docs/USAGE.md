@@ -57,7 +57,6 @@ Contents:
 | Claude Code, native install (an npm install works too) | `irm https://claude.ai/install.ps1 \| iex` in PowerShell | `curl -fsSL https://claude.ai/install.sh \| bash` | `claude --version` |
 | Node.js 24 or newer | `winget install OpenJS.NodeJS` | your package manager, or nodejs.org | `node --version` |
 | git | `winget install Git.Git` (Git for Windows, which Claude Code also needs) | your package manager | `git --version` |
-| GitHub CLI (one way to reach the private repo) | `winget install GitHub.cli` | `brew install gh`, or your package manager | `gh --version` |
 | tmux (Linux and macOS only) | not needed | `brew install tmux` / `apt install tmux` | `tmux -V` |
 | Chromium for Playwright (web UI projects) | `npx.cmd playwright install chromium` | `npx playwright install chromium` | `autoclaude run --check` reports it |
 
@@ -75,19 +74,13 @@ On Windows, check Git Bash with `Test-Path "$env:ProgramFiles\Git\bin\bash.exe"`
 True). In PowerShell, `npx` may fail with "running scripts is disabled on this system"; use
 `npx.cmd` as shown, or run `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` once.
 
-### Access to the private repository
+### Access to the repository
 
-Accept the GitHub invitation, then give git a way to read the repository from the command line:
-
-- the GitHub CLI: `gh auth login`, then `gh auth setup-git` (without the second command, git
-  itself still has no credentials), or
-- an SSH key on your GitHub account (`ssh -T git@github.com` greets you by name).
-
-Test it before going on; either command must list branches, not ask for a password:
+The repository is public: no GitHub account or sign-in is needed. If the install below fails,
+check that this machine can reach GitHub (it lists branches):
 
 ```
 git ls-remote https://github.com/chaoticnewfie/autoclaude.git
-git ls-remote git@github.com:chaoticnewfie/autoclaude.git
 ```
 
 ### Install the plugin

@@ -48,8 +48,6 @@ remote desktop. The run waits until you get there.
   comfortable plan for long runs.
 - Node.js 24 or newer, and git. On Windows, Git for Windows.
 - For projects with a web UI: a dev server command, and Chromium for Playwright.
-- Read access to this repository. It is private: accept your invitation, then sign in the GitHub
-  CLI (`gh auth login`, then `gh auth setup-git`) or add an SSH key to your GitHub account.
 
 [docs/USAGE.md](docs/USAGE.md) section 1 has install commands for each of these.
 
@@ -116,11 +114,10 @@ the next committed step; `autoclaude pause --now` stops it at once. Everything e
 
 If a user gave you this repository's address and asked you to add AutoClaude to their project,
 follow [docs/USAGE.md](docs/USAGE.md) section 2, "Adding AutoClaude to a project". It is written
-as a checklist for you. The repository is private, so a plain web fetch cannot read it. Use the
-user's GitHub CLI or git credentials instead:
+as a checklist for you. The repository is public, so you can read the raw file directly:
 
 ```
-gh api repos/chaoticnewfie/autoclaude/contents/docs/USAGE.md -H "Accept: application/vnd.github.raw"
+https://raw.githubusercontent.com/chaoticnewfie/autoclaude/main/docs/USAGE.md
 ```
 
 Or clone it into a temporary folder outside the user's project (never inside it, because that
@@ -132,8 +129,10 @@ leaves the project's working tree dirty), read it, and delete the clone afterwar
 |---|---|
 | `plugins/autoclaude/` | The plugin: hooks, skills, the CLI (`bin/autoclaude.js`), prompts, templates, and the project template `init` copies |
 | `.claude-plugin/marketplace.json` | The marketplace entry that `claude plugin marketplace add` reads |
+| `CHANGELOG.md` | What changed in each version |
 | `docs/USAGE.md` | The full guide: install, plan, run, pause, alerts, settings, recovery, uninstall, troubleshooting |
 | `PLAN.md`, `docs/DECISIONS.md`, `docs/SESSION_LOG.md` | How AutoClaude itself was built, and why it works the way it does |
 | `test/` | `node scripts/check.js` runs every test |
 
-AutoClaude is private and shared by invitation. It has no open-source license.
+The repository is public. AutoClaude has no open-source license yet: ask the author before you
+reuse its code elsewhere.

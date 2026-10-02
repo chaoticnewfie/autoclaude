@@ -36,9 +36,6 @@ secrets it created, and decisions worth a look.
   Then run "claude" once, log in with your Claude subscription, pick a theme, and type /exit.
 - Node.js 24 or newer:  winget install OpenJS.NodeJS
 - Git for Windows:      winget install Git.Git
-- GitHub CLI:           winget install GitHub.cli
-  Then: gh auth login   and then   gh auth setup-git
-  (You also need an invitation to this private repository.)
 - For web apps: Chromium for the browser checker:  npx.cmd playwright install chromium
 
 Open a new terminal after installing anything, so it can find the new program.
