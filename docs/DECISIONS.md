@@ -927,3 +927,16 @@ questions. His answers:
 **Rejected.** Running the sweep in the owner's session; fixing inside the sweep without the gate;
 committed reports; standard or chosen-each-time depth; offline-only advisories; requiring
 /autoclaude:plan first; report-only rebuilds; releasing security before optimize.
+
+### D59 Two small Phase 10 choices, made for Scott's review (2026-10-03)
+
+**Decision.** (1) During a fix run (a run-plan override), the builder's resume file is
+CONTINUE_HERE-SECURITY.md or CONTINUE_HERE-OPTIMIZE.md, like HANDOFF-SECURITY.md, so the
+project's CONTINUE_HERE.md is left alone and a merge does not carry fix-run notes over it.
+(2) The browser tester and bug bash keep Playwright's in-page JavaScript tool (browser_evaluate:
+it runs only inside the test browser's page); the sweep's browser sessions do not get it.
+
+**Why.** Scott declined the question popup and asked to continue; both are the recommended
+answers, recorded here for him to confirm at CHECKPOINT 10.
+
+**Rejected.** Sharing CONTINUE_HERE.md with the fix run; blocking browser_evaluate everywhere.

@@ -409,3 +409,13 @@ One entry per working session: what was done, what was committed. Append only.
   scratchpad, summarized in D58) and seven rounds of questions settled the design. Phase 10
   (P10.1 to P10.12, CHECKPOINT 10) is in PLAN.md; the plan lints at 75 steps in 11 phases.
 - Phase 10 build workflow started (5 builders, integrator, adversarial review).
+
+## 2026-10-03 (Code VM) - Phase 10 built on its own branch
+
+- The build workflow (32 agents, about 4.4 h) and a fix round (14 agents, about 6.3 h) produced
+  the sweeps: 706 of 706 tests. Committed to branch phase10-sweeps as 1.1.0-rc.1 so main stays
+  the released 1.0.0 (the repo is public). GitHub push protection rejected the first push: a
+  test planted a Stripe-shaped fake key; tests now build fake keys at runtime.
+- A builder had left a stray folder with a literal %7E in its name under C:\Users; deleted.
+- Scott declined two small questions and asked to continue: recommended answers taken (D59).
+  A smaller fix round (2 fixers) handles the 8 remaining review findings.

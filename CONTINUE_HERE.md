@@ -1,6 +1,6 @@
 # CONTINUE_HERE.md
 
-**Last updated: 2026-10-02 (evening).** Rewrite this file at the end of every prompt.
+**Last updated: 2026-10-03.** Rewrite this file at the end of every prompt.
 
 ## Where things are
 
@@ -17,13 +17,12 @@ xhigh, on the settings page) sets the tester, bug bash, security review and deci
 
 ## The exact next step
 
-Build Phase 10 (P10.1 to P10.11), the security and optimize sweeps Scott asked for on
-2026-10-02. A build workflow (wf_d5a2e96b-b84: 5 builders on disjoint files against shared
-contracts, an integrator, an adversarial review) started 2026-10-02 evening; if this session
-ended before it reported, check `git status` for its uncommitted work and its journal under
-~/.claude/projects/c--AutoClaude/<session>/subagents/workflows/; every design choice is in D58 (his answers to seven rounds of questions). Then P10.12:
-prove it on the practice app with planted problems, and stop at CHECKPOINT 10. Release 1.1.0
-after the checkpoint. Still open from Phase 9 (after 1.0): P9.1's written review, P9.2 to P9.4.
+Phase 10 (security and optimize sweeps, D58, D59) is built on branch `phase10-sweeps`
+(1.1.0-rc.1, 706 tests green); `main` stays at the released 1.0.0 until CHECKPOINT 10. A last
+small fix round (2 fixers, 8 review leftovers) was running on 2026-10-03; then: full suite, commit
+to the branch, the user docs (P10.11), the live proof on the practice app (P10.12), CHECKPOINT 10
+with Scott, merge to main and release 1.1.0. Still open from Phase 9: P9.1's written review, P9.2
+to P9.4.
 
 ## Notes for whoever continues
 
