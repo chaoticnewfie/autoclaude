@@ -409,3 +409,8 @@ One entry per working session: what was done, what was committed. Append only.
   scratchpad, summarized in D58) and seven rounds of questions settled the design. Phase 10
   (P10.1 to P10.12, CHECKPOINT 10) is in PLAN.md; the plan lints at 75 steps in 11 phases.
 - Phase 10 build workflow started (5 builders, integrator, adversarial review).
+- Hotfix 1.0.1 on main: with git 2.55, the gate's commit failed in any project whose .gitignore
+  ignores an existing secrets/ folder (an exclude pathspec for an ignored folder exits 1), so a
+  run that generated a secret would pause as commit-failed. Staging is now add -A, then reset
+  secrets/. Found by the Phase 10 integrator; reproduced, test added (fails without the fix).
+  Full suite on main: 474 of 474.

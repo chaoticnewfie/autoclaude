@@ -1230,10 +1230,7 @@ async function stagedTree(g) {
   try {
     if (fs.existsSync(real)) fs.copyFileSync(real, copy);
     const opts = { env: { ...g.env, GIT_INDEX_FILE: copy } };
-    const add = await git.git(g.root, ["add", "-A", "--", ".", git.SECRETS_PATHSPEC], opts);
-    if (!add.ok) return null;
-    const unstage = await git.git(g.root, ["reset", "-q", "--", ":(top,icase)secrets"], opts);
-    if (!unstage.ok) return null;
+    if (!(await git.stageForCommit(g.root, opts)).ok) return null;
     const r = await git.git(g.root, ["write-tree"], opts);
     return r.ok ? r.stdout.trim() || null : null;
   } catch {

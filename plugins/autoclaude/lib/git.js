@@ -104,16 +104,27 @@ function messageFile(kind, text) {
 export const SECRETS_PATHSPEC = ":(top,exclude,icase)secrets";
 const SECRETS_DIR = ":(top,icase)secrets";
 
-// git add -A (all but secrets/), unstage secrets/ whatever put it in the index (the builder's own
-// `git add -A`, say), then commit. committed is false (with ok true) when there was nothing to
-// commit.
-export async function commitAll(root, message, opts = {}) {
-  const add = await git(root, ["add", "-A", "--", ".", SECRETS_PATHSPEC], opts);
-  if (!add.ok) return { ok: false, committed: false, sha: null, stderr: add.stderr };
-  // Back to HEAD's version: a new secret leaves the index, a change to one committed earlier is
-  // not committed. Works before the first commit too, and matching nothing is not an error.
+// Stages the working tree the way a run commits it: everything but secrets/ at the top of the
+// project. A plain `add -A -- .`, then secrets/ back to HEAD's version: a new secret leaves the
+// index, a change to one committed earlier is not committed (works before the first commit too,
+// and matching nothing is not an error). No exclude pathspec on the add: git 2.55 fails an add
+// whose exclude pathspec names a folder .gitignore also ignores, when that folder exists, even
+// though it staged everything else (1.0.1). The gate stages a copy of the index the same way
+// (gate.js stagedTree). { ok, stderr }.
+export async function stageForCommit(root, opts = {}) {
+  const add = await git(root, ["add", "-A", "--", "."], opts);
+  if (!add.ok) return { ok: false, stderr: add.stderr };
   const unstage = await git(root, ["reset", "-q", "--", SECRETS_DIR], opts);
-  if (!unstage.ok) return { ok: false, committed: false, sha: null, stderr: unstage.stderr };
+  if (!unstage.ok) return { ok: false, stderr: unstage.stderr };
+  return { ok: true, stderr: "" };
+}
+
+// Stages everything but secrets/ (stageForCommit: secrets/ is unstaged whatever put it in the
+// index, the builder's own `git add -A`, say), then commits. committed is false (with ok true)
+// when there was nothing to commit.
+export async function commitAll(root, message, opts = {}) {
+  const staging = await stageForCommit(root, opts);
+  if (!staging.ok) return { ok: false, committed: false, sha: null, stderr: staging.stderr };
   // Staged changes, not the status: an unignored secrets/ stays untracked and must not count.
   const staged = await git(root, ["diff", "--cached", "--quiet"], opts);
   if (staged.code !== 0 && staged.code !== 1) return { ok: false, committed: false, sha: null, stderr: staged.stderr };

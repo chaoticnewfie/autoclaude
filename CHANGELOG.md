@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.0.1 (2026-10-03)
+
+- Fixed: in a project whose `.gitignore` ignores `secrets/` and where that folder exists (a run
+  generated a secret there), every gate commit failed and the run paused as `commit-failed`. git
+  2.55 rejects an exclude pathspec for an ignored folder; the gate now stages everything and then
+  unstages `secrets/`.
+
 ## 1.0.0 (2026-10-02)
 
 The first stable release, and the repository is public. Everything below has been proven on two
