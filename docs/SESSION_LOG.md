@@ -424,3 +424,4 @@ One entry per working session: what was done, what was committed. Append only.
   Hotfix 1.0.1 released on main (the secrets/ staging bug); this machine updated to 1.0.1.
   Scott asked for Discord pings when he is needed (saved as a standing preference).
 - P10.13 designed with Scott in two rounds (D60); building on the sweeps branch for 1.1.0.
+- Scott passed on a suggestion to run the checkers side by side; the security review now runs alongside the browser checks (D61), added to the gate agent's P10.13 work.

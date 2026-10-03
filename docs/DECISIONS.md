@@ -960,3 +960,19 @@ on the verification of a phase." The DB run showed the test suite alone taking 1
 **Rejected.** Asking before each split (he chose automatic); one part per turn always (extra
 turns for small phases); measuring test times once; 85% or 50% headroom; advice-only for a plan
 already running out of time; a separate 1.0.2 release.
+
+### D61 The security review runs alongside the browser checks (2026-10-03)
+
+**Decision.** In a verification, once the checks pass, the security review starts together with
+the browser tester and runs alongside it and the bug bash. The tester and the bug bash stay one
+after the other. Part of P10.13, together with spreading a verification over turns (D60).
+
+**Why.** Suggested by Claude in another project of Scott's that kept timing out, and Scott
+asked: "Would we be able to do this to help with timeouts as well? This combined with smaller
+phases should make it pretty safe compared to before." The security review reads only the diff
+and never uses the browser, so running it in parallel costs no extra usage, only a second
+session for a few minutes, and takes its time off the clock.
+
+**Rejected.** Running the tester and the bug bash at the same time: they share one dev server and
+one database, and the bug bash tries to break things, so the tester would fail at random.
+Starting the security review before the checks pass: a failing check would waste it.
