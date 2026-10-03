@@ -420,3 +420,6 @@ One entry per working session: what was done, what was committed. Append only.
 - Scott declined two small questions and asked to continue: recommended answers taken (D59).
   A smaller fix round (2 fixers) handles the 8 remaining review findings.
 - Scott asked (2026-10-03) for planning to size phases so their verification fits the time limit; P10.13, before 1.1.0.
+- Last fix round (2 fixers, 12 items) and the user docs: branch at 1.1.0-rc.2, 724 of 724.
+  Hotfix 1.0.1 released on main (the secrets/ staging bug); this machine updated to 1.0.1.
+  Scott asked for Discord pings when he is needed (saved as a standing preference).

@@ -17,12 +17,15 @@ xhigh, on the settings page) sets the tester, bug bash, security review and deci
 
 ## The exact next step
 
-Phase 10 (security and optimize sweeps, D58, D59) is built on branch `phase10-sweeps`
-(1.1.0-rc.1, 706 tests green); `main` stays at the released 1.0.0 until CHECKPOINT 10. A last
-small fix round (2 fixers, 8 review leftovers) was running on 2026-10-03; then: full suite, commit
-to the branch, the user docs (P10.11), the live proof on the practice app (P10.12), CHECKPOINT 10
-with Scott, merge to main and release 1.1.0. Still open from Phase 9: P9.1's written review, P9.2
-to P9.4.
+Phase 10 (security and optimize sweeps, D58, D59) is built, reviewed twice, documented
+(INSTRUCTIONS.md section 15, USAGE.md section 17) and committed on branch `phase10-sweeps`
+(1.1.0-rc.2, 724 tests green). `main` carries the hotfix 1.0.1 (tag v1.0.1: gate commits failed
+when an ignored secrets/ folder existed); merge main into the branch before the release (expect
+conflicts in git.js, gate.js, CHANGELOG.md and the version files; the branch already has the
+same fix). Next: P10.12, the live proof on the practice app with planted problems (heavy on
+usage: ask Scott when), then P10.13 (phases sized to fit their verification, design questions
+for Scott first), then CHECKPOINT 10 and the 1.1.0 release. Still open from Phase 9: P9.1's
+written review, P9.2 to P9.4.
 
 ## Notes for whoever continues
 
