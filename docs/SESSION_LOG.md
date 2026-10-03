@@ -419,3 +419,4 @@ One entry per working session: what was done, what was committed. Append only.
 - A builder had left a stray folder with a literal %7E in its name under C:\Users; deleted.
 - Scott declined two small questions and asked to continue: recommended answers taken (D59).
   A smaller fix round (2 fixers) handles the 8 remaining review findings.
+- Scott asked (2026-10-03) for planning to size phases so their verification fits the time limit; P10.13, before 1.1.0.

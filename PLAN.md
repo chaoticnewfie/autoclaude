@@ -69,6 +69,7 @@ Everything Scott has asked for after 2026-09-24, with where it landed. Nothing i
 | 2026-09-28 | "I also wouldn't mind getting more updates in general, like get one each time a feature is finished... configurable alerts" | P8.6, D49 | Planned |
 | 2026-10-02 | "Add an security command to autoclaude that we could run on existing projects that would run a security sweap on an app that would check over the entire app in the code and using a headless browser, and anything else you would have available to do a full security sweap. Also give the option to have it output a file with all the details including suggested fixes, or the ability to have autoclaude start fixing them right away after the sweap finishes." | Phase 10 (P10.1 to P10.12), D58 | Planned |
 | 2026-10-02 | "optimize command. Have autoclaude sweap the entire project looking for stale or unused code to remove, or look for features that were poorly built and rebuild/ optimize them too. I'd want to have it do a total optimization sweap." Same report-or-fix-now option | Phase 10 (P10.1 to P10.12), D58 | Planned |
+| 2026-10-03 | "when doing the autoclaude plan, make sure that the phase is small enough that it'll be able to actually be verified in the given time. I'm currently redoing a plan because it keeps running out of time on the verification of a phase... something to get fixed before doing another big update" | P10.13, before the 1.1.0 release | Planned |
 
 ### How each requirement is met
 
@@ -764,6 +765,11 @@ fixes and the gate verifies.
 - [ ] **P10.12** Proof on the practice app, done by Claude
   - Accept: the practice app gets planted problems (security holes of several kinds, a secret in its git history, unused files and packages, duplicated code, a slow path, a flaky test); a thorough security sweep and an optimize sweep each find the planted problems that are in scope, and their reports say what was not checked
   - Accept: "fix right away" fixes them through a normal run that the gate verifies, on its own branch; the proxy log shows no request outside the allow-list; nothing that existed before the sweep outside the project is changed
+
+- [ ] **P10.13** Phases small enough to verify in the time a verification has (design to be settled with Scott)
+  - Accept: planning estimates each phase's verification time from the measured check times (`autoclaude checks`) and the phase's Accept lines and checker budgets, and splits or asks about any phase over the limit before the plan is written
+  - Accept: `autoclaude lint-plan` (and the run's preflight) warns about a phase whose estimated verification does not fit, naming the phase and the levers
+  - Accept: a plan that keeps running out of time on one phase gets a clear way out that does not need the plan rewritten by hand
 
 **CHECKPOINT 10:** Show Scott both reports, the fix run's hand-back, the alerts, and the time and usage each sweep took.
 
