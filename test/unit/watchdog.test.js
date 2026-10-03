@@ -5,10 +5,13 @@ import os from "node:os";
 import path from "node:path";
 import {
   TASK_NAME, projectSlug, supervisorPid, launchSupervisor, watchdogPass, installWatchdog,
-  uninstallWatchdog, watchdogStatus, defaultRunner, parseSchtasksList
+  uninstallWatchdog, watchdogStatus, defaultRunner, parseSchtasksList, launchSweep, sweepWatchdogFile,
+  isWeeklyPause, weeklyResetPassed
 } from "../../plugins/autoclaude/lib/watchdog.js";
 
 const tmp = (tag) => fs.mkdtempSync(path.join(os.tmpdir(), `autoclaude-wd-${tag}-`));
+// A project's config is read over this computer's defaults: never the real ones.
+process.env.CLAUDE_CONFIG_DIR = tmp("cfg");
 
 function makeProject(parent, name, { status = "running", pidFile = null, statePid = null, updatedAt = new Date().toISOString() } = {}) {
   const root = path.join(parent, name);
@@ -174,6 +177,125 @@ test("a launch that fails becomes launch-failed, records nothing, and the pass n
   const sync = await watchdogPass({ registry: [{ root }], isAlive: () => { throw new Error("boom"); }, launch: tmux.launch, logFile });
   assert.equal(sync[0].action, "error");
   assert.match(sync[0].error, /boom/);
+});
+
+// ---------- sweeps (P10.1) ----------
+
+test("launchSweep opens ac-sweep-<slug> running sweep-run <id>, logging to the sweep's own log", () => {
+  const root = makeProject(tmp("sweep-launch"), "My Project", { status: "idle" });
+  const seen = [];
+  launchSweep({ root, id: "20261002-0905-security", env: { MARKER: "1" }, open: (o) => { seen.push(o); return { method: "fake" }; } });
+  const o = seen[0];
+  assert.equal(o.title, "ac-sweep-my-project");
+  assert.equal(o.cwd, root);
+  assert.equal(o.program, process.execPath);
+  assert.ok(o.args[0].endsWith(path.join("bin", "autoclaude.js")) && fs.existsSync(o.args[0]));
+  assert.deepEqual(o.args.slice(1), ["sweep-run", "20261002-0905-security"]);
+  assert.equal(o.logFile, path.join(root, ".autoclaude", "sweeps", "20261002-0905-security", "sweep.log"));
+  assert.deepEqual(o.env, { MARKER: "1" });
+});
+
+test("watchdogPass opens a sweep again whose window died while it was running or waiting, once per gap, and leaves a day-old one alone", async () => {
+  const parent = tmp("sweeps");
+  const root = makeProject(parent, "Swept", { status: "idle" });
+  const logFile = path.join(parent, "watchdog.log");
+  const T = Date.parse("2026-10-02T12:00:00.000Z");
+  const iso = (ms) => new Date(ms).toISOString();
+  const dead = [
+    { id: "s-run", status: "running", pid: 71, heartbeatAt: iso(T - 60 * 1000) },
+    { id: "s-wait", status: "waiting", pid: 72, updatedAt: iso(T - 10 * 60 * 1000) },
+    { id: "s-old", status: "running", pid: 73, heartbeatAt: iso(T - 2 * 24 * 60 * 60 * 1000) },
+    { id: "s-done", status: "done", pid: 74 }
+  ];
+  const asked = [];
+  const launched = [];
+  const sweeps = {
+    // Sync or async, either works.
+    findDeadSweeps: async (r, o) => { asked.push([r, typeof o.isAlive]); return dead; },
+    findActiveSweeps: () => [],
+    launchSweep: async (o) => { launched.push(o.id); return { method: "fake", pid: 900 + launched.length }; }
+  };
+  const { launch, calls } = fakeLauncher();
+  const r1 = await watchdogPass({ registry: [{ root }], now: T, isAlive: () => false, launch, logFile, sweeps });
+  assert.deepEqual(r1.map((r) => [r.action, r.sweep || null]), [["not-running", null], ["sweep-launched", "s-run"], ["sweep-launched", "s-wait"], ["sweep-stale", "s-old"]]);
+  assert.deepEqual(launched, ["s-run", "s-wait"]);
+  assert.equal(calls.length, 0, "no run supervisor is involved");
+  assert.deepEqual(asked, [[root, "function"]]);
+  const record = JSON.parse(fs.readFileSync(sweepWatchdogFile(root), "utf8"));
+  assert.deepEqual([record["s-run"].lastLaunchAt, record["s-run"].previousPid, record["s-run"].pid, record["s-run"].reason], [iso(T), 71, 901, "sweep-launched"]);
+  assert.match(readLines(path.join(root, ".autoclaude", "logs", "watchdog.log"))[0], /sweep-launched .*Swept sweep=s-run pid=71 via=fake$/);
+
+  const r2 = await watchdogPass({ registry: [{ root }], now: T + 60 * 1000, isAlive: () => false, launch, logFile, sweeps });
+  assert.deepEqual(r2.slice(1).map((r) => r.action), ["sweep-too-soon", "sweep-too-soon", "sweep-stale"]);
+  assert.equal(launched.length, 2, "a slow-starting sweep window is not opened twice");
+  const r3 = await watchdogPass({ registry: [{ root }], now: T + 5 * 60 * 1000, isAlive: () => false, launch, logFile, sweeps: { ...sweeps, launchSweep: async () => ({ method: "tmux", ok: false, stderr: "duplicate session" }) } });
+  assert.deepEqual(r3.slice(1, 3).map((r) => [r.action, r.error]), [["sweep-launch-failed", "duplicate session"], ["sweep-launch-failed", "duplicate session"]]);
+  // A broken sweep engine never stops the pass.
+  const r4 = await watchdogPass({ registry: [{ root }], now: T, isAlive: () => false, launch, logFile, sweeps: { ...sweeps, findDeadSweeps: () => { throw new Error("bad sweep.json"); } } });
+  assert.deepEqual(r4.map((r) => r.action), ["not-running", "sweep-error"]);
+  assert.match(r4[1].error, /bad sweep\.json/);
+});
+
+test("a sweep paused at the weekly limit resumes after the weekly reset, only with usage.autoResumeAfterWeeklyReset on, and once per reset", async () => {
+  const parent = tmp("weekly");
+  const root = makeProject(parent, "weekly", { status: "idle" });
+  const cfgFile = path.join(root, "autoclaude.config.json");
+  fs.writeFileSync(cfgFile, JSON.stringify({ version: 1 }));
+  const logFile = path.join(parent, "watchdog.log");
+  const T = Date.parse("2026-10-09T12:00:00.000Z");
+  const iso = (ms) => new Date(ms).toISOString();
+  let paused = [
+    { id: "w1", status: "paused", pauseReason: "weekly-limit", weeklyResetsAt: iso(T - 30 * 60 * 1000), updatedAt: iso(T - 3 * 24 * 60 * 60 * 1000) },
+    { id: "r1", status: "paused", error: "paused for review" }
+  ];
+  const launched = [];
+  let usage = { sevenDay: { pct: 90, resetsAt: T + 60 * 60 * 1000 }, fetchedAt: T - 4 * 24 * 60 * 60 * 1000 };
+  const sweeps = { findDeadSweeps: () => [], findActiveSweeps: () => paused, launchSweep: async (o) => { launched.push(o.id); return { method: "fake" }; }, readUsage: () => usage };
+  const pass = (now) => watchdogPass({ registry: [{ root }], now, isAlive: () => false, launch: fakeLauncher().launch, logFile, sweeps });
+
+  // Off by default: nothing is resumed.
+  let r = await pass(T);
+  assert.deepEqual(r.map((x) => x.action), ["not-running"]);
+  assert.deepEqual(launched, []);
+  fs.writeFileSync(cfgFile, JSON.stringify({ version: 1, usage: { autoResumeAfterWeeklyReset: true } }));
+  r = await pass(T);
+  assert.deepEqual(r.slice(1).map((x) => [x.action, x.sweep]), [["sweep-resumed", "w1"]]);
+  assert.deepEqual(launched, ["w1"], "a sweep paused for another reason is left alone");
+  // It paused again on the same reset: not resumed a second time for it.
+  r = await pass(T + 10 * 60 * 1000);
+  assert.deepEqual(r.slice(1).map((x) => x.action), ["sweep-paused-weekly"]);
+  assert.equal(launched.length, 1);
+
+  // Before the recorded reset (plus the grace), it waits.
+  paused = [{ id: "w2", status: "paused", error: "weekly usage limit reached (91%)", weeklyResetsAt: iso(T + 5 * 60 * 1000), updatedAt: iso(T - 60 * 60 * 1000) }];
+  r = await pass(T);
+  assert.deepEqual(r.slice(1).map((x) => x.action), ["sweep-paused-weekly"]);
+  // No reset recorded: the usage reading decides. Its window still ahead and still high: wait.
+  paused = [{ id: "w3", status: "paused", pauseReason: "weekly-limit", updatedAt: iso(T - 60 * 60 * 1000) }];
+  r = await pass(T);
+  assert.deepEqual(r.slice(1).map((x) => x.action), ["sweep-paused-weekly"]);
+  // A reading taken after the pause, under the threshold: the window reset.
+  usage = { sevenDay: { pct: 4, resetsAt: T + 7 * 24 * 60 * 60 * 1000 }, fetchedAt: T - 5 * 60 * 1000 };
+  r = await pass(T);
+  assert.deepEqual(r.slice(1).map((x) => [x.action, x.sweep]), [["sweep-resumed", "w3"]]);
+  // A sweep whose driver is still alive is never opened twice.
+  paused = [{ id: "w4", status: "paused", pauseReason: "weekly-limit", pid: 4242, weeklyResetsAt: iso(T - 60 * 60 * 1000) }];
+  r = await watchdogPass({ registry: [{ root }], now: T, isAlive: (pid) => pid === 4242, launch: fakeLauncher().launch, logFile, sweeps });
+  assert.deepEqual(r.slice(1), []);
+});
+
+test("isWeeklyPause and weeklyResetPassed read the sweep's own record first, then the usage reading", () => {
+  assert.equal(isWeeklyPause({ status: "paused", pauseReason: "weekly-limit" }), true);
+  assert.equal(isWeeklyPause({ status: "paused", error: "weekly usage limit reached (88%)" }), true);
+  assert.equal(isWeeklyPause({ status: "running", pauseReason: "weekly-limit" }), false);
+  assert.equal(isWeeklyPause({ status: "paused", error: "the 5-hour window" }), false);
+  const now = Date.parse("2026-10-09T12:00:00Z");
+  const o = { nowMs: now, graceMs: 10 * 60 * 1000, pauseAtPct: 85 };
+  assert.deepEqual(weeklyResetPassed({ weeklyResetsAt: "2026-10-09T11:55:00Z" }, null, o), { passed: false, key: `recorded:${Date.parse("2026-10-09T11:55:00Z")}` }, "within the grace");
+  assert.equal(weeklyResetPassed({ weeklyResetsAt: "2026-10-09T11:00:00Z" }, { sevenDay: { pct: 99, resetsAt: now + 1e9 } }, o).passed, true, "the sweep's record wins");
+  assert.equal(weeklyResetPassed({}, { sevenDay: { pct: 99, resetsAt: now - 11 * 60 * 1000 } }, o).passed, true);
+  assert.equal(weeklyResetPassed({ updatedAt: "2026-10-09T10:00:00Z" }, { sevenDay: { pct: 50, resetsAt: now + 1e9 }, fetchedAt: Date.parse("2026-10-09T09:00:00Z") }, o).passed, false, "a low reading from before the pause proves nothing");
+  assert.equal(weeklyResetPassed({}, null, o).passed, false);
 });
 
 const NODE_WIN = "C:\\Program Files\\nodejs\\node.exe";

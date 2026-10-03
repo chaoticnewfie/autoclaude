@@ -4,12 +4,17 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
-import { writeHandoff, commitsByStep, HANDOFF_FILE } from "../../plugins/autoclaude/lib/handoff.js";
+import { writeHandoff, commitsByStep, HANDOFF_FILE, handoffFileFor, handoffFileName } from "../../plugins/autoclaude/lib/handoff.js";
 import { buildSummary } from "../../plugins/autoclaude/lib/summary.js";
 import { parsePlan } from "../../plugins/autoclaude/lib/plan.js";
-import { mergeConfig } from "../../plugins/autoclaude/lib/config.js";
+import { mergeConfig, loadConfig, setRunPlan, runPlanFile } from "../../plugins/autoclaude/lib/config.js";
+import { runGate } from "../../plugins/autoclaude/lib/gate.js";
+import { loadState, saveState, defaultState, beginRunPlan, mainStateFile } from "../../plugins/autoclaude/lib/state.js";
+import { writeReady } from "../../plugins/autoclaude/lib/protocol.js";
 import { prepareFixture, gitEnv } from "../fixtures/prepare.js";
 
+// Usage and this computer's defaults come from a throwaway config dir, never the machine's.
+process.env.CLAUDE_CONFIG_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "autoclaude-handoff-cfg-"));
 const env = gitEnv(process.env);
 const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), "autoclaude-handoff-"));
 const config = mergeConfig({ git: { push: true } });
@@ -79,7 +84,9 @@ function project() {
   fs.writeFileSync(path.join(root, "PLAN.md"), PLAN);
   fs.writeFileSync(path.join(root, "docs", "DECISIONS.md"), DECISIONS);
   fs.writeFileSync(path.join(root, "docs", "BLOCKERS.md"), "# BLOCKERS\n\n| Date | Found by | Step | What | Owner | Status |\n|---|---|---|---|---|---|\n| 2026-09-28 | bug bash | S1.1 | low: button wraps on narrow screens | Claude | fixed in S1.3 |\n| 2026-09-28 | builder | S2.1 | Add the DNS record for todo.lan | owner | left for the owner: needs the router's admin login |\n| 2026-09-28 | browser tester | S2.1 | medium: theme flickers on reload | Claude | open |\n");
-  fs.writeFileSync(path.join(root, "docs", "SECURITY-FINDINGS.md"), "| Date | Severity | File | Issue | Fix | Status |\n|---|---|---|---|---|---|\n| 2026-09-28 | low | server.js:12 | no rate limit on /api/todos | add a limit | open |\n");
+  // The default findings file: gitignored under docs/private/ (P10.10).
+  fs.mkdirSync(path.join(root, "docs", "private"), { recursive: true });
+  fs.writeFileSync(path.join(root, "docs", "private", "SECURITY-FINDINGS.md"), "| Date | Severity | File | Issue | Fix | Status |\n|---|---|---|---|---|---|\n| 2026-09-28 | low | server.js:12 | no rate limit on /api/todos | add a limit | open |\n");
   fs.mkdirSync(path.join(root, "secrets"));
   fs.writeFileSync(path.join(root, "secrets", "db.env"), "DB_PASSWORD=hunter2-very-secret\n");
   return { root, base, shas };
@@ -141,7 +148,10 @@ test("writeHandoff: HANDOFF.md with what was built, what is left, secrets by nam
   assert.match(text, /## Decisions the run made\n\n2 decisions logged during the run, in docs\/DECISIONS\.md:\n\n- D-002 \(S1\.2, by decider\) Count done todos on the client\n- D-003/);
   // Open findings, the fixed row left out.
   assert.match(text, /- Follow-up \(2026-09-28\): S2\.1 medium: theme flickers on reload\. Status: open\. \(docs\/BLOCKERS\.md\)/);
-  assert.match(text, /- Security \(2026-09-28\): low server\.js:12 no rate limit on \/api\/todos\. Fix: add a limit\. Status: open/);
+  // A row of the private findings file: its severity and where it is, never what it says, since
+  // HANDOFF.md is committed and pushed.
+  assert.match(text, /- Security \(2026-09-28\): low security finding, details in docs\/private\/SECURITY-FINDINGS\.md \(kept out of git\)\. Status: open/);
+  assert.doesNotMatch(text, /no rate limit|add a limit|server\.js:12/);
   assert.doesNotMatch(text, /button wraps/);
   // Push: what failed before this file was committed, and the commands that finish it if the
   // push after it fails too.
@@ -275,4 +285,93 @@ test("writeHandoff and the alert list Docker objects not tied to the project, wi
   assert.match(text, /- volume `app-cache` \(a container of this project used it\)\n/);
   const alert = buildSummary({ root, config: mergeConfig({ git: { push: false } }), state: { status: "complete" }, parsed: parsePlan(plan), handoff: r });
   assert.match(alert, /Docker: removed 1 unused thing the run created, 1 container it started still running, left alone 2 not tied to this project\./);
+});
+
+// ---------- a run on a generated plan (P10.7) ----------
+
+test("handoffFileFor names a generated plan's hand-back after it; handoffFileName uses it only while that plan is the run's override", () => {
+  assert.equal(handoffFileFor("SECURITY_PLAN.md"), "HANDOFF-SECURITY.md");
+  assert.equal(handoffFileFor("OPTIMIZE_PLAN.md"), "HANDOFF-OPTIMIZE.md");
+  assert.equal(handoffFileFor("plans/fix-plan.md"), "HANDOFF-FIX.md");
+  assert.equal(handoffFileFor("Hardening.md"), "HANDOFF-HARDENING.md");
+  assert.equal(handoffFileFor("plan.md"), "HANDOFF-RUN.md");
+  const root = tmp();
+  fs.writeFileSync(path.join(root, "SECURITY_PLAN.md"), "# Security fixes\n");
+  assert.equal(handoffFileName(root, mergeConfig({})), HANDOFF_FILE);
+  setRunPlan(root, "SECURITY_PLAN.md");
+  assert.equal(handoffFileName(root, loadConfig(root).config), "HANDOFF-SECURITY.md");
+  assert.equal(handoffFileName(root, mergeConfig({})), HANDOFF_FILE, "a config that names the project's own plan keeps HANDOFF.md");
+});
+
+test("during a run on a generated plan, the alert's hand-back line and the builder's rules name HANDOFF-SECURITY.md, not HANDOFF.md", async () => {
+  const root = tmp();
+  const fixPlan = "# Security fixes 2026-10-02\n\n## Phase 1: Fixes\n\n- [x] **SF1.1** Resolve finding SEC-001\n  - Tags: no-ui\n  - Test: test/sec.test.js\n  - Accept: the check passes\n";
+  fs.writeFileSync(path.join(root, "PLAN.md"), "# Own plan\n\n## Phase 1: One\n- [x] **S1.1** a\n  - Accept: a\n");
+  fs.writeFileSync(path.join(root, "SECURITY_PLAN.md"), fixPlan);
+  setRunPlan(root, "SECURITY_PLAN.md");
+  const config = loadConfig(root).config;
+  const startedAt = new Date(Date.now() - 60000).toISOString();
+  // A fresh HANDOFF-SECURITY.md (no hand-back result handed in, as for a later summary).
+  fs.writeFileSync(path.join(root, "HANDOFF-SECURITY.md"), "# Hand-back\n");
+  const text = buildSummary({ root, config, state: { status: "complete", startedAt }, parsed: parsePlan(fs.readFileSync(path.join(root, "SECURITY_PLAN.md"), "utf8")) });
+  assert.match(text, /Hand-back: HANDOFF-SECURITY\.md in the project folder\./);
+  assert.doesNotMatch(text, /HANDOFF\.md/);
+  // The builder's session context says where its hand-back goes.
+  const { buildContext } = await import("../../plugins/autoclaude/scripts/session-context.js");
+  const ctx = buildContext({ root, state: { ...defaultState(), status: "running", currentStep: "SF1.1" }, config, planText: fixPlan, progressText: "", promptTemplate: "the run's hand-back, `{{HANDOFF_FILE}}`, gathers these rows" });
+  assert.match(ctx, /the run's hand-back, `HANDOFF-SECURITY\.md`, gathers these rows/);
+  const own = buildContext({ root: tmp(), state: { ...defaultState(), status: "running", currentStep: "S1.1" }, config: mergeConfig({}), planText: "", progressText: "", promptTemplate: "`{{HANDOFF_FILE}}`" });
+  assert.match(own, /`HANDOFF\.md`/);
+  // And the real prompt uses the slot.
+  assert.match(fs.readFileSync(new URL("../../plugins/autoclaude/prompts/context.md", import.meta.url), "utf8"), /the run's hand-back, `\{\{HANDOFF_FILE\}\}`/);
+});
+
+const FIX_PLAN = `# Security fixes 2026-10-02
+
+## Phase 1: Fixes
+
+- [ ] **SEC1.1** Resolve finding SEC-001
+  - Tags: no-ui
+  - Test: test/sec.test.js
+  - Accept: the check passes
+`;
+
+test("a run on a generated plan completes with HANDOFF-SECURITY.md committed, HANDOFF.md untouched, and the project handed back to its own plan and state", async () => {
+  const root = tmp();
+  const node = JSON.stringify(process.execPath);
+  prepareFixture({ dest: root, plan: "happy", git: true, checks: [{ name: "unit", command: `${node} -e "process.exit(0)"`, timeoutSec: 60 }], devServer: { command: null, url: null, healthPath: "/", startTimeoutSec: 10 }, env });
+  const cfgFile = path.join(root, "autoclaude.config.json");
+  fs.writeFileSync(cfgFile, JSON.stringify({ ...JSON.parse(fs.readFileSync(cfgFile, "utf8")), gate: { verifyAt: "step" } }, null, 2) + "\n");
+  fs.writeFileSync(path.join(root, "HANDOFF.md"), "# Hand-back: the project's own last run\n");
+  fs.writeFileSync(path.join(root, "SECURITY_PLAN.md"), FIX_PLAN);
+  git(root, ["checkout", "-q", "-b", "autoclaude/security-fixes-2026-10-02"]);
+  git(root, ["add", "-A"]);
+  git(root, ["commit", "-q", "-m", "autoclaude: fix plan from sweep s1"]);
+  const planBefore = fs.readFileSync(path.join(root, "PLAN.md"), "utf8");
+  // The project's own run finished earlier and has a note waiting; run --plan kept it aside.
+  saveState(root, { ...defaultState(), status: "complete", pendingNotes: [{ at: "2026-10-01T00:00:00Z", text: "keep the table" }], tickedByGate: ["S1.1"] });
+  beginRunPlan(root, "SECURITY_PLAN.md", { branch: "autoclaude/security-fixes-2026-10-02", sweepId: "s1" }, { now: new Date("2026-10-02T10:00:00Z") });
+  saveState(root, { ...loadState(root), status: "running", currentStep: "SEC1.1", tickedByGate: [], startedAt: new Date().toISOString(), baseCommit: git(root, ["rev-parse", "HEAD"]) });
+  writeReady(root, "SEC1.1");
+  const sent = [];
+  const r = await runGate({ cwd: root, session_id: "s", hook_event_name: "Stop", stop_hook_active: false }, { env, root, notify: async (m) => { sent.push(m); return { ok: true }; }, stdout: { write() {} }, runTester: null, runSecurity: null, noteFootprint: null, finishFootprint: null });
+  assert.equal(r.decision, "allow", JSON.stringify(r.events));
+  assert.match(sent.at(-1).title, /plan complete \(security-fixes-2026-10-02\)/);
+  // The generated plan's hand-back, committed under its own name; the project's own is untouched.
+  assert.ok(fs.existsSync(path.join(root, "HANDOFF-SECURITY.md")));
+  assert.match(fs.readFileSync(path.join(root, "HANDOFF-SECURITY.md"), "utf8"), /^# Hand-back: Security fixes 2026-10-02/);
+  assert.equal(fs.readFileSync(path.join(root, "HANDOFF.md"), "utf8"), "# Hand-back: the project's own last run\n");
+  assert.equal(git(root, ["log", "-1", "--format=%s"]), "autoclaude: hand-back");
+  assert.match(git(root, ["log", "-1", "--format=%b"]), /^HANDOFF-SECURITY\.md, written when the plan completed/);
+  assert.equal(git(root, ["show", "--name-only", "--format=", "HEAD"]), "HANDOFF-SECURITY.md");
+  assert.match(fs.readFileSync(path.join(root, "SECURITY_PLAN.md"), "utf8"), /- \[x\] \*\*SEC1\.1\*\*/);
+  assert.equal(fs.readFileSync(path.join(root, "PLAN.md"), "utf8"), planBefore, "the project's own plan is untouched");
+  // Handed back: the project's own state (with its note) is in state.json again, the override is gone.
+  const s = loadState(root);
+  assert.deepEqual([s.status, s.pendingNotes.length, s.tickedByGate], ["complete", 1, ["S1.1"]]);
+  assert.deepEqual([s.lastRunPlan.plan, s.lastRunPlan.branch, s.lastRunPlan.sweepId], ["SECURITY_PLAN.md", "autoclaude/security-fixes-2026-10-02", "s1"]);
+  assert.equal(fs.existsSync(runPlanFile(root)), false);
+  assert.equal(fs.existsSync(mainStateFile(root)), false);
+  assert.equal(loadConfig(root).config.plan, "PLAN.md");
+  assert.match(fs.readFileSync(path.join(root, ".autoclaude", "logs", "gate.log"), "utf8"), /the run on SECURITY_PLAN\.md is complete; the project's own plan and its run state are back/);
 });

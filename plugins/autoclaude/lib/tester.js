@@ -12,7 +12,7 @@ import { readText, readJson, writeJsonAtomic, ensureDir } from "./fsatomic.js";
 import { stepText, MARKERS } from "./plan.js";
 import { loadState } from "./state.js";
 import { runHeadless, buildArgs, runWithWrapUp } from "./headless.js";
-import { playwrightMcpConfig } from "./init.js";
+import { playwrightMcpConfig, pinPlaywrightArgs } from "./init.js";
 import * as git from "./git.js";
 
 export const VERDICT_SCHEMA = {
@@ -61,6 +61,18 @@ export function checkerEnv(env) {
 
 // Playwright MCP tools, plus read-only file tools. Nothing that edits or runs commands.
 export const ALLOWED_TOOLS = ["mcp__playwright", "Read", "Glob", "Grep"];
+
+// Playwright MCP tools no browser checker (tester, bug bash, sweep) may use, passed as
+// --disallowedTools, which wins over the blanket allowance above (P10.10, D58). The pinned
+// release (init.js PLAYWRIGHT_MCP_VERSION) turns on by default a tool that runs arbitrary code in
+// the MCP server's own process, outside the page; that would undo the checkers' no-Bash,
+// read-only design. The older name is listed too, in case an owner pins an earlier release.
+export const PLAYWRIGHT_DISALLOWED = Object.freeze(["mcp__playwright__browser_run_code_unsafe", "mcp__playwright__browser_run_code"]);
+
+// The CLI arguments that keep those tools away from a headless session.
+export function playwrightGuardArgs() {
+  return ["--disallowedTools", PLAYWRIGHT_DISALLOWED.join(",")];
+}
 
 export const KINDS = {
   tester: { label: "Browser tester", prompt: "tester.md", turnsFactor: 1 },
@@ -180,22 +192,124 @@ export async function testChanges(root, env = process.env, maxChars = 6000, base
   return text;
 }
 
+// Playwright MCP flags a sweep's browser sets itself, or must not have, with the number of values
+// each takes ("many": every following argument up to the next flag). An owner's own value for one
+// is dropped, so the allow-list proxy cannot be bypassed or replaced, the browser cannot be one
+// that is already running (the owner's own, with their sign-ins and no proxy), and files outside
+// the workspace stay out of reach (--allow-unrestricted-file-access). --config is replaced by the
+// sweep's own copy (sweepBrowserConfig).
+const SWEEP_OWNED_FLAGS = Object.freeze({
+  "--proxy-server": 1, "--proxy-bypass": 1, "--allowed-origins": 1, "--secrets": 1, "--config": 1,
+  "--cdp-endpoint": 1, "--cdp-header": "many", "--endpoint": 1, "--extension": 0, "--user-data-dir": 1,
+  "--allow-unrestricted-file-access": 0
+});
+
+// Chromium switches a sweep's browser always gets. WebRTC may use UDP only through a proxy that
+// carries it, and the HTTP proxy does not, so no page reaches a STUN or TURN host around the
+// allow-list.
+export const SWEEP_CHROMIUM_ARGS = Object.freeze(["--force-webrtc-ip-handling-policy=disable_non_proxied_udp"]);
+// Chromium switches an owner's config may not carry into a sweep: other proxy settings, other
+// WebRTC policies, host rewrites, and the ones that switch web security or file access off.
+const SWEEP_DROPPED_CHROMIUM = /^--(no-proxy-server|proxy-|proxy$|force-webrtc-ip-handling-policy|webrtc-ip-handling-policy|host-resolver-rules|host-rules|disable-web-security|allow-file-access-from-files|remote-debugging-)/i;
+
+// Playwright MCP settings read from the environment before the command line (PLAYWRIGHT_MCP_*):
+// a sweep's server gets them neutral, so an owner's environment cannot switch file access back
+// on, attach the browser to a running one or route around the proxy. "" means "not set".
+const SWEEP_ENV = Object.freeze({
+  PLAYWRIGHT_MCP_ALLOW_UNRESTRICTED_FILE_ACCESS: "false", PLAYWRIGHT_MCP_EXTENSION: "false",
+  PLAYWRIGHT_MCP_CDP_ENDPOINT: "", PLAYWRIGHT_MCP_CDP_HEADERS: "", PLAYWRIGHT_MCP_ENDPOINT: "",
+  PLAYWRIGHT_MCP_PROXY_SERVER: "", PLAYWRIGHT_MCP_PROXY_BYPASS: "", PLAYWRIGHT_MCP_CONFIG: "",
+  PLAYWRIGHT_MCP_USER_DATA_DIR: "", PLAYWRIGHT_MCP_ALLOWED_ORIGINS: "", PLAYWRIGHT_MCP_SECRETS_FILE: ""
+});
+
+// Removes `flag` and its value(s): the next argument (count 1), none (0), or every argument up
+// to the next flag ("many"); also the "=value" form. { args, values } (the values removed).
+function dropFlag(args, flag, count = 1) {
+  const out = [];
+  const values = [];
+  for (let i = 0; i < args.length; i++) {
+    const a = String(args[i]);
+    if (a.startsWith(`${flag}=`)) { values.push(a.slice(flag.length + 1)); continue; }
+    if (a !== flag) { out.push(args[i]); continue; }
+    if (count === 1) { if (i + 1 < args.length) values.push(String(args[++i])); }
+    else if (count === "many") { while (i + 1 < args.length && !String(args[i + 1]).startsWith("-")) values.push(String(args[++i])); }
+  }
+  return { args: out, values };
+}
+
+// The sweep's Playwright MCP config file: the owner's --config (if any, read relative to the
+// project) without what a sweep must not have, plus SWEEP_CHROMIUM_ARGS. The command line still
+// sets the proxy, the origins and the secrets, and it wins over this file.
+function sweepBrowserConfig(root, ownerConfigPath) {
+  let cfg = {};
+  if (ownerConfigPath) {
+    try {
+      const abs = path.isAbsolute(ownerConfigPath) ? ownerConfigPath : path.join(root, ownerConfigPath);
+      const parsed = JSON.parse(fs.readFileSync(abs, "utf8"));
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) cfg = parsed;
+    } catch {}
+  }
+  const out = JSON.parse(JSON.stringify(cfg));
+  for (const k of ["allowUnrestrictedFileAccess", "extension", "secrets", "sharedBrowserContext"]) delete out[k];
+  const browser = out.browser && typeof out.browser === "object" && !Array.isArray(out.browser) ? out.browser : {};
+  for (const k of ["cdpEndpoint", "cdpHeaders", "remoteEndpoint", "userDataDir"]) delete browser[k];
+  const launch = browser.launchOptions && typeof browser.launchOptions === "object" ? browser.launchOptions : {};
+  delete launch.proxy;
+  const ownArgs = Array.isArray(launch.args) ? launch.args.map(String).filter((a) => !SWEEP_DROPPED_CHROMIUM.test(a)) : [];
+  launch.args = [...ownArgs, ...SWEEP_CHROMIUM_ARGS];
+  browser.launchOptions = launch;
+  if (browser.contextOptions && typeof browser.contextOptions === "object") delete browser.contextOptions.proxy;
+  out.browser = browser;
+  if (out.network && typeof out.network === "object") delete out.network.allowedOrigins;
+  return out;
+}
+
 // A per-run MCP config: the project's .autoclaude/mcp.playwright.json (so an owner's tweaks are
 // kept) plus --headless, --isolated (a fresh in-memory browser profile per run) and --output-dir
 // pointing at this attempt's screenshot folder. The server is always named "playwright", which
-// is what ALLOWED_TOOLS refers to.
-export function mcpConfigFor(root, outputDir) {
+// is what ALLOWED_TOOLS refers to. An unpinned Playwright MCP is pinned (init.js). `name` gives
+// each agent its own file (mcp.playwright.<name>.json), so sweep agents running side by side
+// never share one; without it the file is mcp.playwright.run.json, as before.
+// For a sweep's browser: `proxyServer` sends every request through the allow-list proxy
+// (probe.js; Playwright routes loopback addresses through it too unless a bypass list names
+// them, so any owner bypass is dropped), `allowedOrigins` adds Playwright's own origin list as a
+// second layer (not a boundary by itself), and `secretsFile` hands test logins over in dotenv
+// form so they never appear in the prompt. A sweep's browser also gets its own Playwright MCP
+// config file next to the MCP file (WebRTC kept to the proxy, an owner's --config carried over
+// without what a sweep must not have), the owner flags in SWEEP_OWNED_FLAGS dropped, and the
+// PLAYWRIGHT_MCP_* environment neutral (SWEEP_ENV).
+export function mcpConfigFor(root, outputDir, { name = null, proxyServer = null, allowedOrigins = null, secretsFile = null } = {}) {
   const p = projectPaths(root);
   let base = null;
   try { base = readJson(p.mcpPlaywrightFile, null); } catch { base = null; }
-  if (!base || !base.mcpServers) base = playwrightMcpConfig();
+  if (!base || !base.mcpServers || typeof base.mcpServers !== "object" || Object.keys(base.mcpServers).length === 0) base = playwrightMcpConfig();
   const server = base.mcpServers.playwright || Object.values(base.mcpServers)[0];
-  const args = [...(server.args || [])];
+  let args = pinPlaywrightArgs(server.args || []);
+  const sweep = !!(proxyServer || (allowedOrigins && allowedOrigins.length) || secretsFile);
+  const safe = name ? String(name).replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 80) : null;
+  const file = path.join(p.runtimeDir, safe ? `mcp.playwright.${safe}.json` : "mcp.playwright.run.json");
+  let ownerConfig = null;
+  if (sweep) {
+    for (const [flag, count] of Object.entries(SWEEP_OWNED_FLAGS)) {
+      const r = dropFlag(args, flag, count);
+      args = r.args;
+      if (flag === "--config" && r.values.length) ownerConfig = r.values[r.values.length - 1];
+    }
+  }
   if (!args.includes("--headless")) args.push("--headless");
   if (!args.includes("--isolated")) args.push("--isolated");
   if (!args.includes("--output-dir")) args.push("--output-dir", outputDir);
-  const file = path.join(p.runtimeDir, "mcp.playwright.run.json");
-  writeJsonAtomic(file, { mcpServers: { playwright: { ...server, args } } });
+  if (proxyServer) args.push("--proxy-server", String(proxyServer));
+  if (allowedOrigins && allowedOrigins.length) args.push("--allowed-origins", allowedOrigins.join(";"));
+  if (secretsFile) args.push("--secrets", String(secretsFile).replace(/\\/g, "/"));
+  let entry = { ...server, args };
+  if (sweep) {
+    const browserFile = file.replace(/\.json$/, ".browser.json");
+    writeJsonAtomic(browserFile, sweepBrowserConfig(root, ownerConfig));
+    args.push("--config", browserFile.replace(/\\/g, "/"));
+    entry = { ...entry, env: { ...(server.env && typeof server.env === "object" ? server.env : {}), ...SWEEP_ENV } };
+  }
+  writeJsonAtomic(file, { mcpServers: { playwright: entry } });
   return file;
 }
 
@@ -242,7 +356,8 @@ export async function sweepStrays(root, before, destDir, env = process.env) {
   return moved;
 }
 
-function listImages(dir) {
+// Every screenshot under dir (png, jpg, webp), sorted. Also used by the sweep's browser agents.
+export function listImages(dir) {
   const out = [];
   const walk = (d) => {
     let entries = [];
@@ -334,7 +449,7 @@ export async function runBrowserCheck({ kind = "tester", root, config, step = nu
   const mcpFile = mcpConfigFor(root, shotsDir.replace(/\\/g, "/"));
   // The checker's working directory is its own report folder, so anything it saves by a bare
   // file name lands there; --add-dir keeps the project readable for Read, Glob and Grep.
-  const args = buildArgs({ model: t.model, effort: config.checkers ? config.checkers.effort : null, maxTurns, schema: VERDICT_SCHEMA, mcpConfig: mcpFile, allowedTools: ALLOWED_TOOLS, extraArgs: ["--add-dir", root] });
+  const args = buildArgs({ model: t.model, effort: config.checkers ? config.checkers.effort : null, maxTurns, schema: VERDICT_SCHEMA, mcpConfig: mcpFile, allowedTools: ALLOWED_TOOLS, extraArgs: ["--add-dir", root, ...playwrightGuardArgs()] });
   const before = await untrackedSet(root, env);
 
   const errors = [];

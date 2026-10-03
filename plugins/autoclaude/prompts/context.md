@@ -26,7 +26,7 @@ When a feature's verification passes with non-blocking findings (lower-severity 
 - Before the run changes an existing machine, take the snapshot the plan asks for.
 - Installing tools and packages, using Docker and creating GitHub repositories are allowed unless the plan says otherwise.
 - A secret the run needs (a database password, a signing key) is generated into the `secrets/` folder, one file per secret. Make sure `secrets/` is in `.gitignore` first. Never print a secret, commit it, or copy it into a doc, a log or a test's output; refer to it by its file. Log a `D-###` naming the file and what uses it, never the value. A secret this machine cannot generate (a third-party key, an account) is critical.
-- Something you leave for the owner (a manual action, a script only they may run, a finding you did not fix) gets a row in the blockers file (`docs/BLOCKERS.md` unless `docs.blockers` in `autoclaude.config.json` names another) with "owner" in the Owner column and the status `left for the owner: <reason>`, including the exact command they would run. The plan is read-only for you; the run's hand-back, `HANDOFF.md`, gathers these rows with the plan's "After the run" section.
+- Something you leave for the owner (a manual action, a script only they may run, a finding you did not fix) gets a row in the blockers file (`docs/BLOCKERS.md` unless `docs.blockers` in `autoclaude.config.json` names another) with "owner" in the Owner column and the status `left for the owner: <reason>`, including the exact command they would run. The plan is read-only for you; the run's hand-back, `{{HANDOFF_FILE}}`, gathers these rows with the plan's "After the run" section.
 
 ## Questions
 

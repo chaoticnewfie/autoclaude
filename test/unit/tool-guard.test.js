@@ -386,3 +386,142 @@ test("cmd: ; , and = end a redirect's file name, so a bash-style ; cannot hide a
   assert.equal(ps(win, 'cmd /c "echo a;b > out.txt"'), null);
   assert.equal(ps(win, 'cmd /c "set X=1 & echo %X% > notes.txt"'), null);
 });
+
+// ---------- Phase 10: generated plans, the accepted list, the sweep reports (P10.7, D58) ----------
+
+const fixRun = (ctx) => ({ ...ctx, config: mergeConfig({ git: { push: false }, plan: "SECURITY_PLAN.md" }), mainPlan: "PLAN.md" });
+const MAIN = /Shell writes to PLAN\.md are not allowed; it is the project's own plan, left alone while this run works on SECURITY_PLAN\.md/;
+const ACCEPTED = /autoclaude\.accepted\.json is the owner's list of accepted risks and false alarms/;
+
+test("a run on a generated plan protects that plan and the project's own plan alike", () => {
+  const ctx = fixRun({ root });
+  assert.match(decide({ tool_name: "Edit", tool_input: { file_path: path.join(root, "SECURITY_PLAN.md") } }, ctx), /Only the gate ticks SECURITY_PLAN\.md/);
+  const own = decide({ tool_name: "Write", tool_input: { file_path: path.join(root, "PLAN.md") } }, ctx);
+  assert.match(own, /PLAN\.md \(the project's own plan\) is left alone while this run works on SECURITY_PLAN\.md/);
+  assert.equal(decide({ tool_name: "Edit", tool_input: { file_path: path.join(root, "src", "app.js") } }, ctx), null);
+  // Without a generated plan nothing changes: the main plan is the run's plan.
+  const plain = { root, config: mergeConfig({ git: { push: false } }), mainPlan: "PLAN.md" };
+  assert.match(decide({ tool_name: "Edit", tool_input: { file_path: path.join(root, "PLAN.md") } }, plain), /Only the gate ticks PLAN\.md; the config/);
+  for (const c of [fixRun(win), fixRun(nix)]) {
+    assert.match(sh(c, "echo x > SECURITY_PLAN.md"), /Shell writes to SECURITY_PLAN\.md/);
+    assert.match(sh(c, "sed -i s/a/b/ PLAN.md"), MAIN);
+    assert.match(sh(c, "mv PLAN.md PLAN.old"), MAIN);
+    assert.match(sh(c, "node -e \"require('fs').writeFileSync('PLAN.md', 'x')\""), /PLAN\.md/);
+    assert.equal(sh(c, "cat PLAN.md SECURITY_PLAN.md"), null, "reading both plans is fine");
+  }
+  assert.match(ps(fixRun(win), "Set-Content -Path PLAN.md -Value x"), MAIN);
+});
+
+test("autoclaude.accepted.json and the sweep reports are read-only during a run", () => {
+  const ctx = { root, config: mergeConfig({ git: { push: false } }) };
+  assert.match(decide({ tool_name: "Write", tool_input: { file_path: path.join(root, "autoclaude.accepted.json") } }, ctx), /only the owner changes it, never a run/);
+  assert.match(decide({ tool_name: "Edit", tool_input: { file_path: path.join(root, ".autoclaude", "sweeps", "20261002-1430-security", "report.md") } }, ctx), /managed by the gate/);
+  assert.match(decide({ tool_name: "Write", tool_input: { file_path: path.join(root, ".autoclaude", "run-plan.json") } }, ctx), /managed by the gate/);
+  for (const c of [win, nix]) {
+    assert.match(sh(c, "echo [] > autoclaude.accepted.json"), ACCEPTED);
+    assert.match(sh(c, "rm autoclaude.accepted.json"), ACCEPTED);
+    assert.match(sh(c, "node -e \"require('fs').writeFileSync('autoclaude.accepted.json', '[]')\""), ACCEPTED);
+    assert.match(sh(c, "echo x >> .autoclaude/sweeps/20261002-1430-security/findings.json"), STATE);
+    assert.match(sh(c, "rm -rf .autoclaude/sweeps"), STATE);
+    assert.equal(sh(c, "cat .autoclaude/sweeps/20261002-1430-security/report.md"), null, "the builder reads the report for a finding's details");
+    assert.equal(sh(c, "cat autoclaude.accepted.json"), null);
+  }
+  assert.match(ps(win, "Set-Content autoclaude.accepted.json '[]'"), ACCEPTED);
+});
+
+const PINNED = /test\/characterization\/ holds the characterization tests the pin step OF1\.1 wrote\. Step OF1\.2 changes the code under them/;
+
+test("a change step under pinned tests may not write under test/characterization/, by any tool; other steps may", () => {
+  for (const base of [win, nix]) {
+    const pinned = { ...fixRun(base), config: mergeConfig({ git: { push: false }, plan: "OPTIMIZE_PLAN.md" }), pinned: { step: "OF1.2", dir: "test/characterization", pinStep: "OF1.1" } };
+    const r = base.root;
+    const sep = base === win ? "\\" : "/";
+    const edit = (tool, file) => decide({ tool_name: tool, tool_input: tool === "NotebookEdit" ? { notebook_path: file } : { file_path: file } }, pinned);
+    for (const tool of ["Edit", "Write", "MultiEdit", "NotebookEdit"]) {
+      assert.match(edit(tool, `${r}${sep}test${sep}characterization${sep}opt-001.test.js`), PINNED, tool);
+      assert.match(edit(tool, "test/characterization/deep/x.test.js"), PINNED, `${tool}, relative`);
+    }
+    assert.equal(edit("Edit", `${r}${sep}test${sep}opt-002.test.js`), null, "other tests are the step's to write");
+    assert.equal(edit("Edit", `${r}${sep}src${sep}price.js`), null);
+    assert.equal(edit("Edit", `${r}${sep}test${sep}characterization-notes.md`), null, "a sibling with a longer name is not the folder");
+    for (const cmd of [
+      "echo x > test/characterization/opt-001.test.js",
+      "sed -i s/1/2/ test/characterization/opt-001.test.js",
+      "rm -rf test/characterization",
+      "rm test/characterization/*.js",
+      "git checkout -- test/characterization/opt-001.test.js",
+      "mv test/characterization/opt-001.test.js /tmp/x",
+      "node -e \"require('fs').writeFileSync('test/characterization/opt-001.test.js', '')\""
+    ]) assert.match(sh(pinned, cmd), PINNED, cmd);
+    if (base === win) {
+      assert.match(ps(pinned, "Set-Content -Path test\\characterization\\opt-001.test.js -Value x"), PINNED);
+      assert.match(ps(pinned, "Remove-Item -Recurse -Force .\\test\\characterization"), PINNED);
+    }
+    assert.equal(sh(pinned, "cat test/characterization/opt-001.test.js && node --test test/characterization/opt-001.test.js"), null, "reading and running them is fine");
+    // The pin step itself (not pinned) writes them.
+    const pinStep = { ...pinned, pinned: null };
+    assert.equal(decide({ tool_name: "Write", tool_input: { file_path: "test/characterization/opt-001.test.js" } }, pinStep), null);
+    assert.equal(sh(pinStep, "echo x > test/characterization/opt-001.test.js"), null);
+  }
+});
+
+test("the hook finds the pinned step in the run's plan: denied during the change step, allowed during the pin step", async () => {
+  const fs = await import("node:fs");
+  const { spawnSync } = await import("node:child_process");
+  const { fileURLToPath } = await import("node:url");
+  const { saveState, defaultState } = await import("../../plugins/autoclaude/lib/state.js");
+  const { setRunPlan } = await import("../../plugins/autoclaude/lib/config.js");
+  const { pinnedStep } = await import("../../plugins/autoclaude/scripts/tool-guard.js");
+  const proj = fs.mkdtempSync(path.join(os.tmpdir(), "autoclaude-guard-pin-"));
+  fs.writeFileSync(path.join(proj, "autoclaude.config.json"), JSON.stringify({ version: 1, plan: "PLAN.md" }));
+  fs.writeFileSync(path.join(proj, "PLAN.md"), "# Own plan\n\n## Phase 1: A\n- [ ] **S1.1** x\n  - Accept: a\n");
+  fs.writeFileSync(path.join(proj, "OPTIMIZE_PLAN.md"), [
+    "# Optimization 2026-10-02", "", "## Phase 1: Optimizations in src (medium)",
+    "- [x] **OF1.1** Pin the current behaviour around finding OPT-001", "  - Accept: pinned", "  - Test: test/characterization/opt-001.test.js",
+    "- [ ] **OF1.2** Merge the two copies (OPT-001)", "  - Accept: unchanged", "  - Test: test/characterization/opt-001.test.js", "  - Depends: OF1.1", ""
+  ].join("\n"));
+  setRunPlan(proj, "OPTIMIZE_PLAN.md");
+  const script = fileURLToPath(new URL("../../plugins/autoclaude/scripts/tool-guard.js", import.meta.url));
+  const env = { ...process.env, CLAUDE_CONFIG_DIR: fs.mkdtempSync(path.join(os.tmpdir(), "autoclaude-guard-cfg-")) };
+  delete env.AUTOCLAUDE_ROLE;
+  delete env.AUTOCLAUDE_BUILDER;
+  const hook = (file) => {
+    const r = spawnSync(process.execPath, [script], { input: JSON.stringify({ tool_name: "Write", tool_input: { file_path: path.join(proj, file) }, cwd: proj }), env, encoding: "utf8" });
+    return r.stdout ? JSON.parse(r.stdout).hookSpecificOutput.permissionDecisionReason : null;
+  };
+  saveState(proj, { ...defaultState(), status: "running", currentStep: "OF1.2" });
+  assert.match(hook("test/characterization/opt-001.test.js"), PINNED);
+  assert.equal(hook("src/price.js"), null);
+  assert.deepEqual(await pinnedStep(proj, { plan: "OPTIMIZE_PLAN.md" }, { currentStep: "OF1.2" }), { step: "OF1.2", dir: "test/characterization", pinStep: "OF1.1" });
+  saveState(proj, { ...defaultState(), status: "running", currentStep: "OF1.1" });
+  assert.equal(hook("test/characterization/opt-001.test.js"), null, "the pin step writes the tests");
+  assert.equal(await pinnedStep(proj, { plan: "missing.md" }, { currentStep: "OF1.2" }), null, "an unreadable plan leaves the step unpinned");
+});
+
+test("the hook itself follows the run-plan override through loadConfig and guards both plans", async () => {
+  const fs = await import("node:fs");
+  const { spawnSync } = await import("node:child_process");
+  const { fileURLToPath } = await import("node:url");
+  const { saveState, defaultState } = await import("../../plugins/autoclaude/lib/state.js");
+  const { setRunPlan } = await import("../../plugins/autoclaude/lib/config.js");
+  const proj = fs.mkdtempSync(path.join(os.tmpdir(), "autoclaude-guard-"));
+  fs.writeFileSync(path.join(proj, "autoclaude.config.json"), JSON.stringify({ version: 1, plan: "PLAN.md" }));
+  saveState(proj, { ...defaultState(), status: "running", currentStep: "S1.1" });
+  const script = fileURLToPath(new URL("../../plugins/autoclaude/scripts/tool-guard.js", import.meta.url));
+  const env = { ...process.env, CLAUDE_CONFIG_DIR: fs.mkdtempSync(path.join(os.tmpdir(), "autoclaude-guard-cfg-")) };
+  delete env.AUTOCLAUDE_ROLE;
+  delete env.AUTOCLAUDE_BUILDER;
+  const hook = (file) => {
+    const r = spawnSync(process.execPath, [script], { input: JSON.stringify({ tool_name: "Edit", tool_input: { file_path: path.join(proj, file) }, cwd: proj }), env, encoding: "utf8" });
+    return r.stdout ? JSON.parse(r.stdout).hookSpecificOutput.permissionDecisionReason : null;
+  };
+  assert.match(hook("PLAN.md"), /Only the gate ticks PLAN\.md/);
+  assert.equal(hook("SECURITY_PLAN.md"), null, "without the override the generated plan is an ordinary file");
+  setRunPlan(proj, "SECURITY_PLAN.md");
+  assert.match(hook("SECURITY_PLAN.md"), /Only the gate ticks SECURITY_PLAN\.md/);
+  assert.match(hook("PLAN.md"), /the project's own plan/);
+  assert.match(hook("autoclaude.accepted.json"), /accepted risks/);
+  // A broken override: the run's plan falls back to the project's own, which stays guarded.
+  fs.writeFileSync(path.join(proj, ".autoclaude", "run-plan.json"), "{ broken");
+  assert.match(hook("PLAN.md"), /Only the gate ticks PLAN\.md/);
+});

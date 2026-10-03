@@ -32,11 +32,26 @@ export function buildArgs({ model = null, effort = null, maxTurns = null, schema
   return args;
 }
 
+// A `claude -p` result that ended because a usage limit was hit, told apart from any other
+// error. Headless runs disable hooks, so stop-failure.js (the supervisor's only rate-limit
+// signal) never fires for a checker or a sweep agent; the sweep's agent pool needs this flag
+// to know when to wait out the 5-hour window (P10.1). The exact wording in the JSON output is
+// confirmed on a live run; this matches the known forms (subtype, terminal_reason, result).
+// No word boundaries: in the JSON these appear as error_usage_limit, quota_exhausted and the
+// like, where an underscore is a word character and \b would not match at the seam.
+const RATE_LIMIT_RE = /(rate[\s_-]?limit|usage[\s_-]?limit|usage cap|quota|too many requests|resets? at|5[\s-]?hour limit|weekly limit|\b429\b)/i;
+export function isRateLimit({ subtype = null, terminal_reason = null, result = null } = {}) {
+  const hay = [subtype, terminal_reason, typeof result === "string" ? result : null].filter(Boolean).join(" ");
+  return RATE_LIMIT_RE.test(hay);
+}
+
 // Turns the raw process result into { ok, infra, error, structured, output, costUsd, numTurns,
-// sessionId, denials, durationMs, timedOut, code }. `infra` means the run itself did not produce
-// a usable answer (timeout, crash, unreadable output, an error result, no structured output).
+// sessionId, denials, rateLimited, durationMs, timedOut, code }. `infra` means the run itself did
+// not produce a usable answer (timeout, crash, unreadable output, an error result, no structured
+// output). `rateLimited` is true only when the error is a usage limit, so the caller can wait it
+// out instead of counting it as a failure.
 export function interpret({ stdout = "", stderr = "", code = null, timedOut = false, durationMs = 0, spawnError = null, expectStructured = true }) {
-  const base = { ok: false, infra: true, structured: null, output: null, costUsd: null, numTurns: null, sessionId: null, subtype: null, denials: [], durationMs, timedOut, code };
+  const base = { ok: false, infra: true, structured: null, output: null, costUsd: null, numTurns: null, sessionId: null, subtype: null, denials: [], rateLimited: false, durationMs, timedOut, code };
   if (spawnError) return { ...base, error: `could not start claude: ${spawnError}` };
   if (timedOut) return { ...base, error: `timed out after ${Math.round(durationMs / 1000)} s` };
   const text = String(stdout).trim();
@@ -59,7 +74,7 @@ export function interpret({ stdout = "", stderr = "", code = null, timedOut = fa
   };
   if (out.is_error) {
     const kind = out.subtype || out.terminal_reason || "error";
-    return { ...base, ...meta, error: `claude ended with ${kind}: ${String(out.result || "").slice(0, 400)}` };
+    return { ...base, ...meta, rateLimited: isRateLimit(out), error: `claude ended with ${kind}: ${String(out.result || "").slice(0, 400)}` };
   }
   if (expectStructured && (out.structured_output === undefined || out.structured_output === null)) {
     return { ...base, ...meta, error: "the run finished without a structured verdict" };

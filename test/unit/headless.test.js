@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { buildArgs, interpret, runHeadless, hitTurnLimit, wrapUpArgs, runWithWrapUp, WRAP_UP_PROMPT, agentBody, buildDeciderPrompt, validDecision, runDecider, DECIDER_SCHEMA, DECIDER_TIMEOUT_MS } from "../../plugins/autoclaude/lib/headless.js";
+import { buildArgs, interpret, isRateLimit, runHeadless, hitTurnLimit, wrapUpArgs, runWithWrapUp, WRAP_UP_PROMPT, agentBody, buildDeciderPrompt, validDecision, runDecider, DECIDER_SCHEMA, DECIDER_TIMEOUT_MS } from "../../plugins/autoclaude/lib/headless.js";
 
 const fake = fileURLToPath(new URL("../fixtures/fake-claude.mjs", import.meta.url));
 const run = (mode, extra = {}) => runHeadless({ prompt: "check the page", args: ["-p", "--x"], bin: process.execPath, binArgs: [fake], env: { ...process.env, FAKE_CLAUDE_MODE: mode }, role: "tester", timeoutMs: 20000, ...extra });
@@ -39,6 +39,38 @@ test("interpret: good, error result, missing verdict, garbage, timeout, spawn er
   assert.match(r.error, /timed out after 5 s/);
   r = interpret({ spawnError: "ENOENT" });
   assert.match(r.error, /could not start claude: ENOENT/);
+});
+
+test("interpret flags a usage-limit result as rateLimited, and nothing else (P10.1)", () => {
+  // A good result and ordinary failures are never rate-limited.
+  let r = interpret({ stdout: JSON.stringify({ is_error: false, structured_output: { verdict: "pass" } }) });
+  assert.equal(r.rateLimited, false);
+  r = interpret({ stdout: JSON.stringify({ is_error: true, subtype: "error_max_turns", result: "ran out of turns" }) });
+  assert.equal(r.rateLimited, false);
+  r = interpret({ timedOut: true, durationMs: 1000 });
+  assert.equal(r.rateLimited, false);
+  r = interpret({ spawnError: "ENOENT" });
+  assert.equal(r.rateLimited, false);
+  // The known forms of a usage limit in the JSON output.
+  for (const out of [
+    { is_error: true, subtype: "error_usage_limit", result: "" },
+    { is_error: true, subtype: "error_during_execution", result: "5-hour limit reached; resets at 1790479800" },
+    { is_error: true, terminal_reason: "rate_limit", result: "" },
+    { is_error: true, result: "Too many requests (429); your weekly limit will reset" }
+  ]) {
+    r = interpret({ stdout: JSON.stringify(out) });
+    assert.equal(r.ok, false);
+    assert.equal(r.infra, true);
+    assert.equal(r.rateLimited, true, JSON.stringify(out));
+  }
+});
+
+test("isRateLimit matches the usage-limit wording in any of subtype, terminal_reason or result", () => {
+  assert.equal(isRateLimit({ subtype: "error_rate_limit" }), true);
+  assert.equal(isRateLimit({ result: "usage limit reached" }), true);
+  assert.equal(isRateLimit({ terminal_reason: "quota_exhausted" }), true);
+  assert.equal(isRateLimit({ subtype: "error_max_turns", result: "done" }), false);
+  assert.equal(isRateLimit({}), false);
 });
 
 test("runHeadless sends the prompt on stdin, sets AUTOCLAUDE_ROLE and parses the result", async () => {

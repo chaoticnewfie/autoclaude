@@ -8,6 +8,27 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { readText } from "./fsatomic.js";
 import { progress } from "./plan.js";
+import { runPlanOverride } from "./config.js";
+
+export const HANDOFF_FILE = "HANDOFF.md";
+
+// The hand-back of a run on a generated plan (`autoclaude run --plan`, P10.7) gets its own name,
+// so the project's own HANDOFF.md is left alone: SECURITY_PLAN.md -> HANDOFF-SECURITY.md,
+// OPTIMIZE_PLAN.md -> HANDOFF-OPTIMIZE.md, fixes.md -> HANDOFF-FIXES.md.
+export function handoffFileFor(planFile) {
+  const base = path.basename(String(planFile || "")).replace(/[.]md$/i, "").replace(/[-_. ]?plan$/i, "");
+  const name = base.toUpperCase().replace(/[^A-Z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "RUN";
+  return `HANDOFF-${name}.md`;
+}
+
+// The hand-back file of the run on config.plan: its own name while a run-plan override points
+// config.plan at a generated plan, HANDOFF.md otherwise. Project-relative. Shared by
+// lib/handoff.js (which writes it), the alerts here and the builder's session context.
+export function handoffFileName(root, config) {
+  let over = null;
+  try { over = runPlanOverride(root); } catch { over = null; }
+  return over && config && over === config.plan ? handoffFileFor(over) : HANDOFF_FILE;
+}
 
 // PROGRESS.md lines look like "- 2026-09-27 S1.2 Title (attempt 2)". A built step's line
 // ("... (built; verified with Phase 1)") is not an entry: the step gets its attempt line when its
@@ -158,19 +179,29 @@ const RANK = { high: 3, medium: 2, low: 1 };
 // or a row whose Owner column says owner).
 const LEFT_RE = /^\s*left for (the )?owner\b/i;
 
+// A findings file under docs/private/ is gitignored and never committed (P10.10, D58).
+export function isPrivateDoc(rel) {
+  return /^docs\/private\//i.test(String(rel || "").replace(/\\/g, "/").replace(/^(\.\/)+/, ""));
+}
+
 // Rows of the security findings file and the blockers file that are not closed, most severe
 // first: [{ source: "security" | "follow-up", file, date, step, severity, text, status,
-// leftForOwner }].
+// leftForOwner, private }]. A row of a private findings file (docs/private/) carries no detail:
+// its text names only the severity and the file, so HANDOFF.md (committed and pushed) and the
+// alerts never repeat what the file keeps out of git.
 export function unresolvedRows(root, config) {
   const out = [];
   const docs = (config && config.docs) || {};
-  const sec = docs.security || "docs/SECURITY-FINDINGS.md";
+  const sec = docs.security || "docs/private/SECURITY-FINDINGS.md";
   const blk = docs.blockers || "docs/BLOCKERS.md";
+  const secret = isPrivateDoc(sec);
   for (const r of parseTableRows(readText(path.join(root, sec), ""), SECURITY_COLUMNS)) {
     if (!isOpenStatus(r.status)) continue;
     const c = r.cells;
     const severity = String(c.severity || "").trim().toLowerCase();
-    out.push({ source: "security", file: sec, date: c.date || null, step: null, severity: RANK[severity] ? severity : null, text: [c.severity, c.file, c.issue].filter(Boolean).join(" ").trim(), fix: c.fix || "", status: r.status, leftForOwner: LEFT_RE.test(r.status) });
+    const sev = RANK[severity] ? severity : null;
+    const text = secret ? `${sev ? `${sev} ` : ""}security finding, details in ${sec} (kept out of git)` : [c.severity, c.file, c.issue].filter(Boolean).join(" ").trim();
+    out.push({ source: "security", file: sec, date: c.date || null, step: null, severity: sev, text, fix: secret ? "" : c.fix || "", status: secret ? (LEFT_RE.test(r.status) ? "left for the owner" : "open") : r.status, leftForOwner: LEFT_RE.test(r.status), private: secret });
   }
   for (const r of parseTableRows(readText(path.join(root, blk), ""), BLOCKER_COLUMNS)) {
     if (!isOpenStatus(r.status)) continue;
@@ -330,8 +361,8 @@ export function buildSummary({ root, config, state, parsed, usage = null, now = 
   } else {
     lines.push("Open items: none.");
   }
-  if (s) lines.push(`Hand-back: ${path.basename(handoff.path || "HANDOFF.md")} in the project folder.`);
-  else if (complete && handoffIsFresh(root, state)) lines.push("Hand-back: HANDOFF.md in the project folder.");
+  if (s) lines.push(`Hand-back: ${path.basename(handoff.path || handoffFileName(root, config))} in the project folder.`);
+  else if (complete && handoffIsFresh(root, config, state)) lines.push(`Hand-back: ${handoffFileName(root, config)} in the project folder.`);
   lines.push(pushLine(s ? s.push : state.pushState, config));
   if (s && s.footprint) {
     const f = s.footprint;
@@ -353,10 +384,11 @@ export function buildSummary({ root, config, state, parsed, usage = null, now = 
   return lines.join("\n");
 }
 
-// HANDOFF.md written during this run (not one left from an earlier run).
-function handoffIsFresh(root, state) {
+// The run's hand-back (HANDOFF.md, or HANDOFF-<NAME>.md for a run on a generated plan) written
+// during this run (not one left from an earlier run).
+function handoffIsFresh(root, config, state) {
   try {
-    const st = fs.statSync(path.join(root, "HANDOFF.md"));
+    const st = fs.statSync(path.join(root, handoffFileName(root, config)));
     const started = state.startedAt ? Date.parse(state.startedAt) : NaN;
     return !(started > st.mtimeMs);
   } catch {

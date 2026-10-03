@@ -5,8 +5,9 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { findProjectRoot, projectPaths, pluginRoot, binDir, machinePaths, isWindows } from "./paths.js";
-import { loadConfig, formatConfigErrors } from "./config.js";
-import { loadState, updateState, describeState, STATUS } from "./state.js";
+import { loadConfig, formatConfigErrors, readRunPlan, clearRunPlan, resolveRunPlanSource, runPlanFile } from "./config.js";
+import { loadState, updateState, describeState, STATUS, hasMainStateKept, readMainStateKept, restoreMainState, finishRunPlan, beginRunPlan, mainStateFile } from "./state.js";
+import { handoffFileFor } from "./handoff.js";
 import { parsePlan, lintPlan, formatLint, stepById, nextStep, progress } from "./plan.js";
 import { readUsage, formatUsage } from "./usage.js";
 import { notify, readMachineNotify, writeMachineNotify, resolveChannel } from "./notify.js";
@@ -39,11 +40,40 @@ Project commands (run inside a project):
                         Set the project up (the current folder unless one is given): config, doc
                         set, .gitignore, browser-tester config, machine registry, statusline
                         bridge. Never overwrites existing files.
-  run [--check]         Preflight, then open the ac-<project> window where the supervisor runs the
+  run [--check] [--plan <file>]
+                        Preflight, then open the ac-<project> window where the supervisor runs the
                         build. A finished plan with new steps added starts a fresh run. Records
                         this terminal's PATH, which the gate and \`autoclaude checks\` then use.
-                        --check: only run and print the preflight; opens no window
-  status [--all]        State, current step, attempts, usage, last progress (--all: every registered project)
+                        --check: only run and print the preflight; opens no window.
+                        --plan <file>: run a generated plan instead of the project's own: a
+                        sweep's SECURITY_PLAN.md or OPTIMIZE_PLAN.md, from the sweep's folder
+                        (.autoclaude/sweeps/<id>/) or committed in the project. Once the preflight
+                        passes: a new branch from this commit, the plan committed there, and the
+                        project's own plan and run state kept aside until this run completes.
+                        Refused while another run is running or paused; changes nothing on --check
+  security [options]    Run a security sweep in its own window (whole-codebase review, secret and
+                        dependency scans, config and live checks), every finding independently
+                        verified. Writes a report, a fix plan (--plan), or fixes through a gated
+                        run (--fix). Options below
+  optimize [options]    Run an optimize sweep (unused code and packages, duplicates, performance,
+                        poorly built features, test-suite speed). Same report/plan/fix options
+                        --report | --plan | --fix   what happens after the sweep (default: config)
+                        --depth thorough|standard|quick   how hard each finding is checked
+                        --modules a,b,c    only these modules (default: all for the kind)
+                        --no-browser       no browser session (security: no live checks;
+                                           optimize: no page timings, its code review stays)
+                        --url <target>     add a target URL (the local dev server is added by default)
+                        --exclude <glob>   leave files out (repeatable)
+                        --no-advisories    do not send package names to npm/OSV
+                        --writes           allow write tests (only on a throwaway database)
+                        --reset "<cmd>"    the command that resets that database
+                        --options <file>   a JSON file of the full options (flags win over it)
+                        --estimate         print the sessions and rough time only; starts nothing
+  sweep-run <id>        (internal) Drive or resume the sweep <id>; the sweep window runs this and
+                        it picks up where it left off after a crash or restart
+  sweep-status          This project's sweeps (running, waiting, paused, done, failed); one whose
+                        window is gone shows as stopped, with the command that carries it on
+  status [--all]        State, current step, attempts, usage, a running sweep, a run-plan override, last progress (--all: every registered project)
   config                Open the settings page in your browser, served from this computer only:
                         this project's settings, this computer's defaults, the alert channel,
                         the watchdog and the status line
@@ -103,7 +133,7 @@ class Io {
 }
 
 // Every command runCli knows, for `<command> --help`.
-export const COMMANDS = ["help", "version", "init", "status", "config", "run", "checks", "guard-test", "supervise", "nudge", "watchdog", "uninstall", "start", "ready", "blocked", "decide", "answer", "pause", "note", "resume", "lint-plan", "usage", "install-cli", "notify-setup", "notify-test"];
+export const COMMANDS = ["help", "version", "init", "status", "config", "run", "security", "optimize", "sweep-run", "sweep-status", "checks", "guard-test", "supervise", "nudge", "watchdog", "uninstall", "start", "ready", "blocked", "decide", "answer", "pause", "note", "resume", "lint-plan", "usage", "install-cli", "notify-setup", "notify-test"];
 // Commands whose arguments are free text: only a first argument of --help or -h asks for help,
 // so a note or a question that mentions -h is left alone.
 const TEXT_COMMANDS = ["nudge", "blocked", "decide", "answer", "note", "guard-test", "notify-test"];
@@ -142,9 +172,13 @@ export async function runCli(argv, rawIo = {}) {
       // Async commands are awaited, so one that throws (a bad option, say) ends in the catch
       // below with a message instead of escaping as a rejected promise.
       case "init": return cmdInit(rest, io);
-      case "status": return cmdStatus(rest, io);
+      case "status": return await cmdStatus(rest, io);
       case "config": return await cmdConfig(rest, io);
       case "run": return await cmdRun(rest, io);
+      case "security": return await cmdSweepStart("security", rest, io);
+      case "optimize": return await cmdSweepStart("optimize", rest, io);
+      case "sweep-run": return await cmdSweepRun(rest, io);
+      case "sweep-status": return await cmdSweepStatus(rest, io);
       case "checks": return await cmdChecks(rest, io);
       case "guard-test": return await cmdGuardTest(rest, io);
       case "supervise": return await cmdSupervise(rest, io);
@@ -198,7 +232,9 @@ function requireProject(io, { needConfig = true } = {}) {
   // a command whose stdout is data (decide prints JSON) stays parseable.
   const warnings = cfg.warnings || [];
   if (warnings.length) io.err(`autoclaude: note: ${warnings.length} setting(s) in this computer's defaults were ignored (${warnings.map((w) => w.path || "file").join(", ")}); \`autoclaude config\` shows why`);
-  return { root, config: cfg.config, paths: projectPaths(root) };
+  // mainPlan: the project's own plan, also while a run-plan override (`run --plan`) points
+  // config.plan at a generated one.
+  return { root, config: cfg.config, paths: projectPaths(root), mainPlan: cfg.mainPlan || cfg.config.plan, runPlan: cfg.runPlan || null };
 }
 
 function loadPlan(project) {
@@ -265,7 +301,7 @@ function cmdInit(args, io) {
 
 // ---------- status ----------
 
-function cmdStatus(args, io) {
+async function cmdStatus(args, io) {
   if (args.includes("--all")) return statusAll(io);
   const project = requireProject(io);
   if (!project) return 1;
@@ -289,6 +325,23 @@ function cmdStatus(args, io) {
     io.out(`  plan: ${plan.problems[0].message}`);
   }
   if (state.pendingNotes.length) io.out(`  review notes waiting: ${state.pendingNotes.length}`);
+  // An active run-plan override (a sweep's generated plan is the one `autoclaude run` uses, P10.7).
+  try {
+    const runPlanOverride = await optional(io, "./fixplan.js", "runPlanOverride");
+    const over = runPlanOverride ? runPlanOverride(root) : null;
+    if (over) io.out(`  run plan override: ${over} (\`autoclaude run\` uses this plan, not ${project.mainPlan || config.plan})`);
+  } catch {}
+  const last = state.lastRunPlan;
+  if (last && last.plan) {
+    const at = Date.parse(last.completedAt);
+    io.out(`  last run on a generated plan: ${last.plan}${last.branch ? ` on ${last.branch}` : ""}, completed ${Number.isFinite(at) ? fmtAge(io.now().getTime() - at) : "earlier"}; its hand-back is ${handoffFileFor(last.plan)}`);
+  }
+  // A sweep still going in this project (P10.1); one whose window is gone shows as stopped, with
+  // the command that carries it on.
+  try {
+    const { findActiveSweeps } = await import("./sweep.js");
+    for (const s of findActiveSweeps(root, { isAlive: io.deps.isPidAlive })) io.out(`  ${describeSweepLine(s, io)}`);
+  } catch {}
   io.out(`  last progress: ${fmtAge(ageMs(paths.heartbeatFile, io.now().getTime()))}`);
   if (state.supervisorPid) io.out(`  supervisor: pid ${state.supervisorPid} ${isPidAlive(state.supervisorPid) ? "alive" : "not running"}`);
   io.out(`  ${formatUsage(readUsage({ staleAfterMin: config.usage.staleAfterMin, now: io.now().getTime() }), io.now().getTime())}`);
@@ -357,16 +410,63 @@ function hasUnfinishedStep(project) {
   return !!(plan.parsed && firstUnfinished(plan.parsed));
 }
 
+// What a plain `autoclaude run` does with a run-plan override (P10.7) before it starts:
+// "hand-back" when the run on the generated plan completed (the gate does this itself; this is for
+// a gate cut off before it), "drop" for an override with no run behind it (idle, and no state of
+// the project's own kept aside: only `run --plan` sets both), "restore" for a kept state with no
+// override at all (the override was deleted by hand), "keep" to bring back or start the run on the
+// generated plan, and null when there is nothing to settle.
+function runPlanSettlement(root) {
+  const over = readRunPlan(root);
+  const st = loadState(root);
+  const kept = hasMainStateKept(root);
+  if (over.plan) {
+    if (st.status === STATUS.complete) return { action: "hand-back", plan: over.plan, kept };
+    if (st.status === STATUS.idle && !kept) return { action: "drop", plan: over.plan, kept };
+    return { action: "keep", plan: over.plan, kept };
+  }
+  if (!over.exists && kept && st.status !== STATUS.running && st.status !== STATUS.paused) return { action: "restore", plan: null, kept };
+  return null;
+}
+
 async function cmdRun(args, io) {
   let checkOnly = false;
-  for (const a of args) {
+  let planFile = null;
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
     if (a === "--check") checkOnly = true;
+    else if (a === "--plan") { planFile = args[++i]; if (!planFile) throw new Error("--plan needs a file"); }
     else throw new Error(`unknown option ${a}`);
+  }
+  if (planFile) return cmdRunPlan(planFile, { checkOnly }, io);
+  // Settled before the config is read, so loadConfig (and every reader) sees the plan the run will
+  // really work. --check changes nothing: it judges the project as the real run would find it.
+  const found = findProjectRoot(io.cwd);
+  const settle = found ? runPlanSettlement(found) : null;
+  if (settle && !checkOnly) {
+    if (settle.action === "hand-back") {
+      const r = finishRunPlan(found, { completed: true, now: io.now() });
+      io.out(`autoclaude: the run on ${settle.plan} is complete; the project's own plan${r.restored ? " and its run state are" : " is"} back`);
+    } else if (settle.action === "drop") {
+      clearRunPlan(found);
+      io.out(`autoclaude: dropped the run plan override to ${settle.plan}: no run on it was started; the project's own plan is back`);
+    } else if (settle.action === "restore") {
+      restoreMainState(found);
+      io.out("autoclaude: the project's own run state, kept aside for a run on a generated plan, is back (that run's override is gone)");
+    }
   }
   const project = requireProject(io);
   if (!project) return 1;
   const { root } = project;
-  const state = loadState(root);
+  let state = loadState(root);
+  if (settle && checkOnly && settle.action !== "keep") {
+    // The real run would settle first: judge the project's own plan and state, as it would.
+    project.config = { ...project.config, plan: project.mainPlan };
+    state = (settle.kept && readMainStateKept(root)) || state;
+    io.out(`autoclaude: \`autoclaude run\` would first hand the project back to its own plan, ${project.mainPlan}${settle.plan ? ` (the run plan override to ${settle.plan} ${settle.action === "drop" ? "has no run behind it" : "is complete"})` : ""}`);
+  } else if (settle && settle.action === "keep") {
+    io.out(`autoclaude: run plan override: this run works ${settle.plan} (set by \`autoclaude run --plan\`); the project's own plan, ${project.mainPlan}, and its state come back when it completes`);
+  }
   const pid = supervisorPid(root);
   if (pid && pidAlive(pid)) {
     io.out(`autoclaude: this project already has a supervisor (pid ${pid}, window ${state.windowTitle || "?"}). Watch it with \`autoclaude status\`.`);
@@ -406,27 +506,337 @@ async function cmdRun(args, io) {
       s.haltSession = false; s.builderSessionId = null;
     });
   }
+  const w = openRunWindow(root, io);
+  if (!w.ok) {
+    io.out(`autoclaude: ${w.error}`);
+    io.out("  Nothing is running. Fix that and run `autoclaude run` again.");
+    return 1;
+  }
+  io.out(`autoclaude: ${continuing ? "continuing the finished plan with its new steps" : fresh ? "starting the run" : `bringing back the ${state.status} run`} in a new window, ${w.title} (${w.method}).`);
+  printRunHelp(io);
+  return 0;
+}
+
+function printRunHelp(io) {
+  io.out("  Watch:  the window, or `autoclaude status` from any terminal. Leave the window open; an RDP disconnect is fine, logging off is not.");
+  io.out("  Stop:   `autoclaude pause` (after the current step is committed) or `autoclaude pause --now`.");
+  io.out("  Notes:  `autoclaude note \"...\"` any time; they reach Claude at the next step or resume.");
+}
+
+// Registers the project, records this terminal's PATH for the checks, and opens the ac-<project>
+// window running the supervisor. { ok, title, method } or { ok: false, title, error }.
+function openRunWindow(root, io) {
   registerProject(root);
   recordRunEnv(root, io.env, { now: io.now });
   const title = `ac-${path.basename(root).toLowerCase().replace(/[^a-z0-9]+/g, "-")}`;
   const open = io.deps.openConsoleWindow || openConsoleWindow;
-  const r = open({
-    title,
-    cwd: root,
-    program: process.execPath,
-    args: [path.join(pluginRoot(), "bin", "autoclaude.js"), "supervise"],
-    logFile: path.join(projectPaths(root).logsDir, "supervisor.log"),
-    env: io.env
-  });
-  if (r.method === "tmux" && r.ok === false) {
-    io.out(`autoclaude: could not start the tmux session ${title}: ${String(r.stderr || "").trim() || "tmux failed"}`);
-    io.out("  Nothing is running. Fix that and run `autoclaude run` again.");
+  let r;
+  try {
+    r = open({
+      title,
+      cwd: root,
+      program: process.execPath,
+      args: [path.join(pluginRoot(), "bin", "autoclaude.js"), "supervise"],
+      logFile: path.join(projectPaths(root).logsDir, "supervisor.log"),
+      env: io.env
+    });
+  } catch (e) {
+    return { ok: false, title, error: `could not open the window ${title}: ${e && e.message ? e.message : e}` };
+  }
+  if (r && r.method === "tmux" && r.ok === false) return { ok: false, title, error: `could not start the tmux session ${title}: ${String(r.stderr || "").trim() || "tmux failed"}` };
+  return { ok: true, title, method: r && r.method };
+}
+
+// ---------- run --plan (P10.7) ----------
+
+// Plan paths compared the way the file system may: case and slashes aside.
+function samePlanPath(a, b) {
+  const norm = (p) => String(p || "").replace(/\\/g, "/").replace(/^[.]\//, "").toLowerCase();
+  return !!a && !!b && norm(a) === norm(b);
+}
+
+// The run branch for a generated plan, from its H1 like any run branch (config.branch's
+// {planSlug}; autoclaude/{planSlug} when the project's template has none).
+function runPlanBranchBase(config, parsed) {
+  const template = typeof config.branch === "string" && config.branch.includes("{planSlug}") ? config.branch : "autoclaude/{planSlug}";
+  return template.replace("{planSlug}", planSlug(parsed));
+}
+
+// The first of base, base-2, base-3 ... that is not a branch yet: a run on a generated plan always
+// starts a new branch from the current commit, never an old branch tip. null when 99 are taken.
+async function freeBranchName(root, base, env) {
+  for (let n = 1; n < 100; n++) {
+    const name = n === 1 ? base : `${base}-${n}`;
+    if (!(await git.branchExists(root, name, { env }))) return name;
+  }
+  return null;
+}
+
+// The run files `run --plan` changes, as they are now, so a failure can put them back exactly.
+function runFilesSnapshot(root) {
+  const files = [runPlanFile(root), projectPaths(root).stateFile, mainStateFile(root)];
+  return files.map((file) => ({ file, text: readText(file, null) }));
+}
+
+function restoreRunFiles(snapshot) {
+  for (const { file, text } of snapshot) {
+    try {
+      if (text === null) fs.rmSync(file, { force: true });
+      else writeFileAtomic(file, text);
+    } catch {}
+  }
+}
+
+// `autoclaude run --plan <file>`: work a generated plan (a sweep's SECURITY_PLAN.md or
+// OPTIMIZE_PLAN.md, left in the sweep's folder or committed in the project) instead of the
+// project's own. Refused while another run is running or paused. Nothing changes until the
+// preflight passes on a clean tree; then: a new branch from the current commit, named from the
+// plan's H1; the plan copied to the project root under its own name and committed there (when it
+// came from a sweep's folder); the project's own run state kept aside; the run-plan override set;
+// the window opened. A failure on the way undoes all of it, and --check changes nothing, so a
+// refused or failed `run --plan` leaves no override, no branch and no state behind.
+async function cmdRunPlan(planFile, { checkOnly }, io) {
+  const found = findProjectRoot(io.cwd);
+  if (!found) { io.out("autoclaude: not in a project (no autoclaude.config.json and no git repository found)"); return 1; }
+  const abs = path.resolve(io.cwd, planFile);
+  let isFile = false;
+  try { isFile = fs.statSync(abs).isFile(); } catch {}
+  if (!isFile) { io.out(`autoclaude: --plan file not found: ${abs}`); return 1; }
+  const where = resolveRunPlanSource(found, abs);
+  if (where.error) { io.out(`autoclaude: cannot run on that plan: it ${where.error}`); return 1; }
+  const project = requireProject(io);
+  if (!project) return 1;
+  const { root } = project;
+  const { source, target, sweepId } = where;
+  const mainPlan = project.mainPlan || project.config.plan;
+  if (samePlanPath(target, mainPlan)) {
+    io.out(`autoclaude: not running ${source}: ${target} is the project's own plan, which \`autoclaude run\` runs`);
     return 1;
   }
-  io.out(`autoclaude: ${continuing ? "continuing the finished plan with its new steps" : fresh ? "starting the run" : `bringing back the ${state.status} run`} in a new window, ${title} (${r.method}).`);
-  io.out("  Watch:  the window, or `autoclaude status` from any terminal. Leave the window open; an RDP disconnect is fine, logging off is not.");
-  io.out("  Stop:   `autoclaude pause` (after the current step is committed) or `autoclaude pause --now`.");
-  io.out("  Notes:  `autoclaude note \"...\"` any time; they reach Claude at the next step or resume.");
+  // Another run going: the override would switch its gate and hooks to this plan at once, and the
+  // new branch would move the working tree from under it.
+  const current = readRunPlan(root).plan;
+  const st = loadState(root);
+  const spid = supervisorPid(root);
+  const live = st.status === STATUS.running || st.status === STATUS.paused;
+  if (live || (spid && pidAlive(spid))) {
+    const same = current && samePlanPath(current, target) ? ` To carry that run on, \`autoclaude run\`${st.status === STATUS.paused ? " (or `autoclaude resume`)" : ""}.` : "";
+    io.out(`autoclaude: not running ${source}: a run of ${current || "the project's own plan"} is ${live ? st.status : "under way"} in this project. Let it finish (or pause it and finish it later), then run \`autoclaude run --plan ${source}\` again.${same}`);
+    return 1;
+  }
+  const text = readText(path.join(root, source), "") || "";
+  const parsed = parsePlan(text);
+  // The preflight judges this plan, applied in memory only; the full preflight, as for a new run.
+  const planProject = { ...project, config: { ...project.config, plan: source } };
+  const gitBashCheck = checkOnly && !!io.env.MSYSTEM;
+  const pf = await preflight(planProject, { env: io.env, checksEnv: gitBashCheck ? checksEnv(null, io.env).env : io.env, devServer: true, skip: [] });
+  io.out(`autoclaude: preflight for ${source}`);
+  if (gitBashCheck) io.out("  PATH for the checks: this shell's PATH without Git Bash's own folders, as `autoclaude run` from PowerShell or cmd would see it");
+  io.out(formatPreflight(pf));
+  const base = runPlanBranchBase(project.config, parsed);
+  if (checkOnly) {
+    io.out(pf.ok
+      ? `autoclaude: preflight passed; \`autoclaude run --plan ${source}\` would create a new branch from this commit (${base}, or ${base}-2 and on when that exists), ${source !== target ? `commit the plan there as ${target}, ` : ""}and start the run on it; ${mainPlan} and its run state are left alone`
+      : `autoclaude: preflight failed; fix the FAIL lines above before \`autoclaude run --plan ${source}\``);
+    return pf.ok ? 0 : 1;
+  }
+  if (!pf.ok) { io.out("autoclaude: not starting; fix the FAIL lines above and run it again"); return 1; }
+
+  const gitEnv = { ...io.env, PATH: io.env.PATH || io.env.Path || process.env.PATH };
+  const startBranch = await git.currentBranch(root, { env: gitEnv });
+  const startHead = await git.head(root, { env: gitEnv });
+  const back = startBranch && startBranch !== "HEAD" ? startBranch : startHead;
+  const branch = await freeBranchName(root, base, gitEnv);
+  if (!branch) { io.out(`autoclaude: not starting: ${base} and ${base}-2 to ${base}-99 are all branches already; delete the old ones you have merged, then run it again`); return 1; }
+  const made = await git.git(root, ["checkout", "-q", "-b", branch], { env: gitEnv });
+  if (!made.ok) { io.out(`autoclaude: not starting: could not create the branch ${branch}: ${String(made.stderr || "").trim()}`); return 1; }
+
+  const snapshot = runFilesSnapshot(root);
+  const targetAbs = path.join(root, target);
+  const targetExisted = fs.existsSync(targetAbs);
+  let wrote = false;
+  let committed = false;
+  const undo = async (why) => {
+    io.out(`autoclaude: not starting: ${why}`);
+    restoreRunFiles(snapshot);
+    // The plan file as this commit has it, then the starting branch back and the new one gone.
+    if (wrote && !committed) {
+      await git.git(root, ["reset", "-q", "--", target], { env: gitEnv });
+      if (targetExisted) await git.git(root, ["checkout", "-q", "--", target], { env: gitEnv });
+      else { try { fs.rmSync(targetAbs, { force: true }); } catch {} }
+    }
+    const co = back ? await git.git(root, ["checkout", "-q", back], { env: gitEnv }) : { ok: false, stderr: "no commit to go back to" };
+    const del = co.ok ? await git.git(root, ["branch", "-q", "-D", branch], { env: gitEnv }) : { ok: false };
+    if (co.ok && del.ok) io.out(`  Nothing is left behind: back on ${startBranch === "HEAD" ? String(back).slice(0, 7) : back}, the branch ${branch} is deleted, and no run plan is set.`);
+    else io.out(`  No run plan is set, but the branch ${branch} is still there (${co.ok ? "it could not be deleted" : `could not go back to ${back}: ${String(co.stderr || "").trim()}`}). Remove it with \`git checkout ${back}\` and \`git branch -D ${branch}\`.`);
+    return 1;
+  };
+  try {
+    if (source !== target) {
+      // The very text the preflight judged, committed where the gate can tick it.
+      writeFileAtomic(targetAbs, text);
+      wrote = true;
+      const c = await git.commitAll(root, `autoclaude: fix plan from sweep ${sweepId}\n\nCopied from ${source} for \`autoclaude run --plan\`. The details of each finding stay in the sweep's gitignored report.\n`, { env: gitEnv });
+      if (!c.ok) return await undo(`could not commit ${target} on ${branch}: ${String(c.stderr || "").trim()}`);
+      committed = true;
+    }
+    const tracked = await git.git(root, ["ls-files", "--error-unmatch", "--", target], { env: gitEnv });
+    if (!tracked.ok) return await undo(`${target} is not in git (a .gitignore rule?); the gate commits the plan's ticks, so the plan must be tracked`);
+    beginRunPlan(root, target, { branch, source, sweepId }, { now: io.now() });
+  } catch (e) {
+    return await undo(e && e.message ? e.message : String(e));
+  }
+  const w = openRunWindow(root, io);
+  if (!w.ok) return await undo(w.error);
+  io.out(`autoclaude: running ${target} on the new branch ${branch} (from ${startBranch === "HEAD" ? String(startHead || "").slice(0, 7) : startBranch})${source !== target ? `, where ${target} is committed from ${source}` : ""}, in a new window, ${w.title} (${w.method}).`);
+  io.out(`  ${mainPlan} and its run state are kept aside, and come back when this run completes. Its hand-back is ${handoffFileFor(target)}.`);
+  printRunHelp(io);
+  return 0;
+}
+
+// ---------- security / optimize sweeps ----------
+
+// Parses the sweep flags shared by `security` and `optimize` into an options object for
+// sweep.startSweep (which normalizes and validates it). --options <file> supplies the full
+// object the skill wrote; flags override it.
+function parseSweepArgs(args, io) {
+  const opts = {};
+  let fromFile = {};
+  const exclude = [];
+  const urls = [];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    const next = () => { const v = args[++i]; if (v === undefined) throw new Error(`${a} needs a value`); return v; };
+    if (a === "--report" || a === "--plan" || a === "--fix") opts.after = a.slice(2);
+    else if (a === "--after") opts.after = next();
+    else if (a === "--depth") opts.depth = next();
+    else if (a === "--modules") opts.modules = next().split(",").map((s) => s.trim()).filter(Boolean);
+    else if (a === "--no-browser") opts._noBrowser = true;
+    else if (a === "--url") urls.push({ url: next(), mode: "readonly" });
+    else if (a === "--exclude") exclude.push(next());
+    else if (a === "--no-advisories") opts.advisories = false;
+    else if (a === "--writes") opts.writesAllowed = true;
+    else if (a === "--reset") opts.resetCommand = next();
+    else if (a === "--options") {
+      const file = path.resolve(io.cwd, next());
+      const raw = readJson(file, null);
+      if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error(`--options file is not a JSON object: ${file}`);
+      fromFile = raw;
+    } else if (a === "--yes" || a === "-y") { /* the skill already confirmed; accepted */ }
+    else if (a === "--estimate") opts._estimate = true;
+    else throw new Error(`unknown option ${a}`);
+  }
+  // The file gives the full set; a flag wins over it wherever both say something, wherever the
+  // flag stands. --url and --exclude add to the file's lists.
+  const merged = { ...fromFile, ...opts };
+  if (urls.length) merged.targets = [...(Array.isArray(fromFile.targets) ? fromFile.targets : []), ...urls];
+  if (exclude.length) merged.exclude = [...(Array.isArray(fromFile.exclude) ? fromFile.exclude : []), ...exclude];
+  return merged;
+}
+
+// `autoclaude security` / `autoclaude optimize`: build the options, then start the sweep in its
+// own window. The skills gather the options and call this; a person can also call it with flags.
+async function cmdSweepStart(kind, args, io) {
+  const project = requireProject(io);
+  if (!project) return 1;
+  let opts;
+  try { opts = parseSweepArgs(args, io); } catch (e) { io.err(`autoclaude: ${e.message}`); return 2; }
+  const noBrowser = opts._noBrowser; delete opts._noBrowser;
+  const estimateOnly = !!opts._estimate; delete opts._estimate;
+  if (noBrowser) {
+    // No browser session: security drops its live checks; optimize keeps its code-level
+    // performance review and skips only the browser walk and the page timings.
+    opts.browser = false;
+    if (kind === "security") {
+      const { MODULES } = await import("./sweep.js");
+      opts.modules = (Array.isArray(opts.modules) ? opts.modules : (MODULES[kind] || [])).filter((m) => m !== "live");
+    }
+  }
+  const startSweep = await optional(io, "./sweep.js", "startSweep");
+  if (!startSweep) { io.out("autoclaude: this install cannot run sweeps (lib/sweep.js is missing)"); return 1; }
+  // --estimate: the sessions and rough time this sweep would take; nothing is written or started.
+  const r = await startSweep({ root: project.root, kind, options: opts, config: project.config, io, deps: io.deps, estimateOnly });
+  if (!r.ok) { io.out(`autoclaude: could not ${estimateOnly ? "estimate" : "start"} the ${kind} sweep: ${r.error}`); return 1; }
+  if (estimateOnly) return 0;
+  // In the machine registry, so the watchdog can bring the sweep's window back (P10.1).
+  try { registerProject(project.root); } catch {}
+  io.out(`autoclaude: ${kind} sweep ${r.id} is running in a new window (${r.window && r.window.method}).`);
+  io.out("  Watch:  the window, or `autoclaude sweep-status` from any terminal. Leave the window open; an RDP disconnect is fine, logging off is not.");
+  io.out(`  Report: .autoclaude/sweeps/${r.id}/report.md when it finishes (gitignored).`);
+  return 0;
+}
+
+// The internal command the sweep window runs: drive (or resume) the sweep, then, in "fix" mode,
+// start the normal run on the generated plan.
+async function cmdSweepRun(args, io) {
+  const id = args.find((a) => !a.startsWith("-"));
+  if (!id) { io.err("autoclaude: usage: autoclaude sweep-run <id>"); return 2; }
+  const project = requireProject(io);
+  if (!project) return 1;
+  const runSweep = await optional(io, "./sweep.js", "runSweep");
+  if (!runSweep) { io.out("autoclaude: this install cannot run sweeps (lib/sweep.js is missing)"); return 1; }
+  const r = await runSweep({ root: project.root, id, io, deps: io.deps });
+  if (!r.ok) { io.out(`autoclaude: sweep ${id} ${r.status || "failed"}${r.error ? `: ${r.error}` : ""}`); return 1; }
+  if (r.status === "paused") {
+    io.out(`autoclaude: sweep ${id} paused: ${r.reason}. Rerun \`autoclaude sweep-run ${id}\` when usage allows.`);
+    if (/weekly/i.test(String(r.reason || ""))) io.out("  After the weekly reset the watchdog carries it on by itself when usage.autoResumeAfterWeeklyReset is on and the watchdog is installed (`autoclaude watchdog --install`).");
+    return 0;
+  }
+  io.out(`autoclaude: sweep ${id} ${r.status}${typeof r.confirmed === "number" ? ` (${r.confirmed} confirmed)` : ""}.`);
+  // A check the green-baseline test could not judge (it needs a dev server that did not start).
+  if (r.checksNote) io.out(`  note: ${r.checksNote}`);
+  const planRel = r.planFile ? (path.isAbsolute(r.planFile) ? path.relative(project.root, r.planFile) : r.planFile).replace(/\\/g, "/") : null;
+  if (r.startRun && planRel) {
+    // `run --plan` makes the branch, commits the plan there and starts the run (P10.7).
+    io.out(`autoclaude: starting the fix run on ${planRel}`);
+    const code = await cmdRun(["--plan", path.resolve(project.root, planRel)], { ...io, cwd: project.root, out: (s) => io.out(s), err: (s) => io.err(s) });
+    if (code !== 0) {
+      // The finished alert said the run starts; say that it did not (the reason is in this
+      // window, and never in the alert).
+      const notifyEvent = await optional(io, "./notify.js", "notifyEvent");
+      const name = path.basename(project.root);
+      if (notifyEvent) await notifyEvent(project.root, project.config, "sweepFixNotStarted", { title: `AutoClaude: the fix run did not start (${name})`, message: `The fix plan is ${planRel}, but \`autoclaude run --plan ${planRel}\` stopped and changed nothing; the sweep window says why. Fix that, then run it again.`, priority: "high" }, { env: io.env, notify: io.deps.notify });
+    }
+    return code;
+  }
+  if (planRel && !(r.already && r.after === "fix")) {
+    io.out(`  fix plan written: ${planRel}${r.fixRefused ? ` (fix right away was refused: ${r.fixRefused})` : ""}`);
+    io.out(`  review it (edit it if you like), then \`autoclaude run --plan ${planRel}\` makes a new branch from the current commit, commits the plan there and starts the run; ${project.mainPlan || project.config.plan} and its run state are left alone`);
+  }
+  if (r.already && r.after === "fix" && planRel) io.out(`  this sweep finished earlier; if its fix run is not running (\`autoclaude status\`), start it with \`autoclaude run --plan ${planRel}\``);
+  if (r.reportFile) io.out(`  report: ${(path.isAbsolute(r.reportFile) ? path.relative(project.root, r.reportFile) : r.reportFile).replace(/\\/g, "/")}`);
+  return 0;
+}
+
+// One sweep as `status` shows it (sweep.describeSweep's displayStatus: a sweep whose window is
+// gone reads "stopped (window gone)"), with the command that carries a stopped or paused one on.
+function describeSweepLine(s, io) {
+  const started = Date.parse(s.startedAt);
+  const resume = s.resumeCommand ? `; carry it on with \`${s.resumeCommand}\`` : "";
+  return `sweep: ${s.kind} ${s.displayStatus || s.status}${sweepStageText(s)}${Number.isFinite(started) ? `, started ${fmtAge(io.now().getTime() - started)}` : ""}${resume}`;
+}
+
+// " (stage review)" for a sweep going, " at stage review" for one whose window is gone.
+function sweepStageText(s) {
+  if (s.status !== "running" && s.status !== "waiting") return "";
+  return s.liveness === "dead" ? ` at stage ${s.stage}` : ` (stage ${s.stage})`;
+}
+
+async function cmdSweepStatus(args, io) {
+  if (args.length) throw new Error(`unknown option ${args[0]}`);
+  const project = requireProject(io, { needConfig: false });
+  if (!project) return 1;
+  const { sweepStatus } = await import("./sweep.js");
+  const { sweeps } = sweepStatus(project.root, { isAlive: io.deps.isPidAlive });
+  if (!sweeps.length) { io.out("autoclaude: no sweeps in this project yet (`autoclaude security` or `autoclaude optimize` starts one)"); return 0; }
+  for (const s of sweeps) {
+    const counts = s.result && typeof s.result.confirmed === "number" ? `, ${s.result.confirmed} confirmed` : "";
+    // The real verification count, known once the findings are merged (scanner hits included).
+    const verify = typeof s.verifySessions === "number" && s.status !== "done" ? `, ${s.verifySessions} verification session${s.verifySessions === 1 ? "" : "s"}` : "";
+    io.out(`  ${s.id}: ${s.displayStatus || s.status}${sweepStageText(s)}${counts}${verify}${s.error ? ` - ${s.error}` : ""}`);
+    if (s.resumeCommand) io.out(`    carry it on with \`${s.resumeCommand}\`${s.liveness === "dead" ? " (its window is gone: closed, logged off or restarted)" : ""}`);
+    if (s.status === "done" && s.result && s.result.runCommand && s.result.after === "plan") io.out(`    fix plan: ${s.result.planFile}; run it with \`${s.result.runCommand}\``);
+  }
   return 0;
 }
 
@@ -641,7 +1051,7 @@ async function cmdWatchdog(args, io) {
     return 0;
   }
   const results = await w.watchdogPass({ env: io.env });
-  for (const r of results) if (r.action !== "not-running") io.out(`${r.root}: ${r.action}${r.error ? ` (${r.error})` : ""}`);
+  for (const r of results) if (r.action !== "not-running") io.out(`${r.root}${r.sweep ? ` (sweep ${r.sweep})` : ""}: ${r.action}${r.error ? ` (${r.error})` : ""}`);
   return 0;
 }
 
@@ -675,11 +1085,14 @@ async function cmdStart(args, io) {
     io.out(formatPreflight(pf));
     if (!pf.ok) { io.out("autoclaude: not starting; fix the FAIL lines above and run it again"); return 1; }
   }
-  const branch = config.branch.replace("{planSlug}", planSlug(plan.parsed));
+  // A run on a generated plan works on the new branch `run --plan` made for it (P10.7).
+  const over = readRunPlan(root);
+  const runPlanBranch = over.plan && over.plan === config.plan && over.branch ? over.branch : null;
+  const branch = runPlanBranch || config.branch.replace("{planSlug}", planSlug(plan.parsed));
   // A finished plan continued with new steps finds the run branch of the last run still there.
   // Checking it out as it is would drop steps committed elsewhere (say, on main after a merge).
   const onBranch = await git.currentBranch(root, { env: gitEnv });
-  if (onBranch !== branch && (await git.branchExists(root, branch, { env: gitEnv }))) {
+  if (!runPlanBranch && onBranch !== branch && (await git.branchExists(root, branch, { env: gitEnv }))) {
     const merged = await git.git(root, ["merge-base", "--is-ancestor", branch, "HEAD"], { env: gitEnv });
     if (merged.ok) {
       // Everything on the old run branch is already here, so moving it forward loses nothing.
@@ -717,7 +1130,7 @@ async function cmdStart(args, io) {
     s.attempts = {}; s.infraFailures = {}; s.outOfTime = {}; s.noProgress = 0; s.recoveries = 0; s.tickedByGate = ticked; s.startedAt = now; s.stepStartedAt = now;
     s.headAtLastGate = null; s.toolCallsAtLastGate = 0; s.baseCommit = baseCommit; s.ownerAnswer = null; s.lastBlockedQuestion = null;
     s.usageAtStart = usage.sevenDay && !usage.stale ? usage.sevenDay.pct : null; s.weeklyResetsAt = null; s.decisionsAtStart = decisionsAtStart;
-    s.uncommitted = []; s.uncommittedMessages = {};
+    s.uncommitted = []; s.uncommittedMessages = {}; s.lastRunPlan = null;
     // Nothing of an earlier run's feature carries over (D49), except the tags it could not push.
     s.fixup = null; s.freshSession = false; s.phaseBaseCommit = null; s.phaseStartedAt = null; s.closing = null; s.completing = null;
     s.pushState = leftTags.length ? { branch: null, remote: null, ok: false, skipped: false, at: (s.pushState && s.pushState.at) || null, error: (s.pushState && s.pushState.error) || "not pushed by the last run", unpushedCommits: null, unpushedTags: leftTags } : null;

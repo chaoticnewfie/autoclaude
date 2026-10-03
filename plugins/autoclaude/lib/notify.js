@@ -136,6 +136,112 @@ export function eventEnabled(config, event) {
   return typeof v === "boolean" ? v : EVENT_DEFAULTS[event];
 }
 
+// ---------- the sweep-finished alert (PLAN.md P10.1, D58) ----------
+
+// Always sent: it is not in SWITCHABLE_EVENTS, so eventEnabled() is true for it.
+export const SWEEP_FINISHED_EVENT = "sweepFinished";
+export const SWEEP_SEVERITIES = Object.freeze(["critical", "high", "medium", "low"]);
+const SWEEP_PLAN_FILES = Object.freeze({ security: "SECURITY_PLAN.md", optimize: "OPTIMIZE_PLAN.md" });
+
+const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
+const count = (v) => (Array.isArray(v) ? v.length : Number.isFinite(Number(v)) && Number(v) > 0 ? Math.floor(Number(v)) : 0);
+
+// { critical, high, medium, low } from either such an object or a list of findings (counted by
+// their severity field; anything else is ignored).
+export function severityCounts(input) {
+  const out = { critical: 0, high: 0, medium: 0, low: 0 };
+  if (Array.isArray(input)) {
+    for (const f of input) if (f && SWEEP_SEVERITIES.includes(f.severity)) out[f.severity]++;
+  } else if (input && typeof input === "object") {
+    for (const s of SWEEP_SEVERITIES) out[s] = count(input[s]);
+  }
+  return out;
+}
+
+function durationText(ms) {
+  if (!Number.isFinite(ms) || ms < 0) return null;
+  const min = Math.round(ms / 60000);
+  if (min < 60) return `${min} min`;
+  return `${Math.floor(min / 60)} h${min % 60 ? ` ${min % 60} min` : ""}`;
+}
+
+// Project-relative with forward slashes, the way the run's other alerts name files.
+function shownPath(root, file) {
+  if (!file) return null;
+  const s = String(file);
+  if (!root || !path.isAbsolute(s)) return s.split(path.sep).join("/");
+  const rel = path.relative(root, s);
+  const outside = !rel || rel === ".." || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel);
+  return outside ? s : rel.split(path.sep).join("/");
+}
+
+// The title and message of the alert a sweep sends when it ends. Counts, the report's path and
+// what happens next only: never a finding's text, file, evidence or an error message, because an
+// alert channel (an ntfy topic) may be readable by others. fixRefused is the one free text, and
+// the engine's reasons name a state (a paused run, a dirty tree, a red check), never a finding.
+// info: { kind: "security" | "optimize", project, root (to show paths relative to it),
+//   status: "done" (default) | "failed", counts (confirmed: { critical, high, medium, low } or the
+//   confirmed findings), uncertain, refuted, accepted (numbers or lists), reportFile,
+//   after: "report" | "plan" | "fix", planFile (the generated plan), fixRefused (the engine's
+//   reason when "fix" could not start the run), durationMs, cli }
+// Returns { title, message, priority, tags }.
+export function sweepFinishedAlert(info = {}) {
+  const kind = info.kind === "optimize" ? "optimize" : "security";
+  const project = String(info.project || (info.root ? path.basename(info.root) : "") || "this project");
+  const cli = info.cli || "autoclaude";
+  const failed = info.status === "failed";
+  const c = severityCounts(info.counts);
+  const confirmed = SWEEP_SEVERITIES.reduce((n, s) => n + c[s], 0);
+  const report = shownPath(info.root, info.reportFile);
+  const plan = shownPath(info.root, info.planFile) || SWEEP_PLAN_FILES[kind];
+  const took = durationText(info.durationMs);
+  const lines = [];
+
+  if (failed) {
+    lines.push(`The ${kind} sweep stopped before it finished${took ? `, after ${took}` : ""}.`);
+    lines.push(`${report ? `What it found so far: ${report}. ` : ""}Its state and log are in the sweep folder under .autoclaude/sweeps/. \`${cli} status\` shows where it stopped.`);
+  } else {
+    lines.push(`The ${kind} sweep finished${took ? ` in ${took}` : ""}.`);
+    lines.push(confirmed
+      ? `Confirmed: ${plural(confirmed, "finding")} (${SWEEP_SEVERITIES.map((s) => `${c[s]} ${s}`).join(", ")}).`
+      : "Confirmed: no findings.");
+    const other = [];
+    if (count(info.uncertain)) other.push(`${count(info.uncertain)} uncertain (never fixed automatically)`);
+    if (count(info.refuted)) other.push(`${count(info.refuted)} disproved`);
+    if (count(info.accepted)) other.push(`${count(info.accepted)} accepted earlier`);
+    if (other.length) lines.push(`Also: ${other.join(", ")}.`);
+    if (report) lines.push(`Report: ${report} (not committed).`);
+    if (info.after === "fix" && confirmed && info.fixRefused) {
+      // The engine's own reason (a run is paused, the tree is dirty, a check is red), one line.
+      const why = String(info.fixRefused).replace(/\s+/g, " ").trim().slice(0, 160);
+      lines.push(`Next: the fix run did not start (${why}). Review ${plan}, then \`${cli} run --plan ${plan}\`.`);
+    } else if (info.after === "fix") {
+      lines.push(confirmed
+        ? `Next: the fix run starts on its own branch in a new window, working through ${plan}; its own alerts follow.`
+        : "Next: nothing to fix, so no fix run starts.");
+    } else if (info.after === "plan") {
+      lines.push(confirmed
+        ? `Next: review ${plan}, then \`${cli} run --plan ${plan}\` to fix the findings.`
+        : "Next: nothing to fix, so no plan was written.");
+    } else {
+      lines.push("Next: read the report. Nothing in the project was changed.");
+    }
+  }
+  const urgent = failed || (kind === "security" && c.critical + c.high > 0);
+  return {
+    title: `AutoClaude: ${kind} sweep ${failed ? "stopped" : "finished"} (${project})`,
+    message: lines.join("\n"),
+    priority: urgent ? PRIORITY.high : PRIORITY.default,
+    tags: [failed ? "warning" : kind === "security" ? "lock" : "white_check_mark"]
+  };
+}
+
+// Sends the sweep-finished alert through notifyEvent (always on; logged in the project). Never
+// throws. opts as for notifyEvent.
+export async function notifySweepFinished(root, config, info = {}, opts = {}) {
+  return notifyEvent(root, config, SWEEP_FINISHED_EVENT, sweepFinishedAlert({ root, ...info }), opts);
+}
+
 // Sends one alert for a named event when the owner wants it, and otherwise only logs that it was
 // skipped. message is a string (the event's own title is used) or { title, message, priority,
 // tags }. opts go to notify(); opts.notify replaces the sender (tests, the gate's own notifier).

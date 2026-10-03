@@ -1,4 +1,5 @@
-// The hand-back (PLAN.md P8.5, D49): HANDOFF.md in the project root, written at plan completion
+// The hand-back (PLAN.md P8.5, D49): HANDOFF.md in the project root (HANDOFF-<NAME>.md for a run
+// on a generated plan, handoffFileFor), written at plan completion
 // for the owner in plain language. What was built (with commits), what is left for the owner
 // with exact commands, secrets the run created (names only, never values), open findings,
 // decisions to review, the run's own decisions, the push state and what the run left on this
@@ -8,9 +9,11 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { writeFileAtomic } from "./fsatomic.js";
 import { MARKERS } from "./plan.js";
-import { collectHandback, pushLine, pushStatus } from "./summary.js";
+import { collectHandback, pushLine, pushStatus, handoffFileName } from "./summary.js";
 
-export const HANDOFF_FILE = "HANDOFF.md";
+// The hand-back's file name lives in lib/summary.js, which the alerts share with this module:
+// HANDOFF.md, or HANDOFF-<NAME>.md for a run on a generated plan (`autoclaude run --plan`).
+export { HANDOFF_FILE, handoffFileFor, handoffFileName } from "./summary.js";
 
 // Runs git synchronously; { ok, stdout }. Never throws.
 function gitSync(root, args, env) {
@@ -152,7 +155,7 @@ export function writeHandoff({ root, config, state, parsed, footprint = null, no
   const committed = tracked(root, secretsCreated, env);
   const exposed = notIgnored(root, secretsCreated, env).filter((f) => !committed.includes(f));
   const text = renderHandoff({ config, state: st, parsed, got, summary, branch, exposed, committed, now });
-  const file = path.join(root, HANDOFF_FILE);
+  const file = path.join(root, handoffFileName(root, config));
   try {
     writeFileAtomic(file, text);
   } catch (e) {

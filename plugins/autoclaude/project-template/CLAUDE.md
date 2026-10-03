@@ -177,7 +177,7 @@ Anything that cost more than five minutes to work out goes here, with the fix. E
 | `docs/DEFERRED.md` | Something seems to be missing |
 | `docs/SESSION_LOG.md` | You want to know what happened when |
 | `docs/BLOCKERS.md` | A step is stuck, or you are picking up follow-ups |
-| `docs/SECURITY-FINDINGS.md` | Touching auth, input handling or anything a row there names |
+| `docs/private/SECURITY-FINDINGS.md` (the `docs.security` path; gitignored, never committed) | Touching auth, input handling or anything a row there names |
 | `docs/REVIEW_NOTES.md` | Resuming after a pause |
 | `HANDOFF.md` | A run has finished: what it built and what it left for the owner |
 | `autoclaude.config.json` | The gate ran a command you did not expect |

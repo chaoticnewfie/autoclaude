@@ -1,7 +1,12 @@
 // .autoclaude/state.json: the run state every hook and the supervisor read.
 // PLAN.md sections 4.3 and 4.8.3. Node built-ins only. All writes are atomic.
-import { readJson, writeJsonAtomic, ensureDir } from "./fsatomic.js";
+// A run on a generated plan (`autoclaude run --plan`, P10.7) gets a state of its own: the
+// project's own run state is kept aside in state.main.json while it goes, and put back when it
+// completes (beginRunPlan / finishRunPlan below).
+import path from "node:path";
+import { readJson, writeJsonAtomic, ensureDir, removeIfExists } from "./fsatomic.js";
 import { projectPaths } from "./paths.js";
+import { readRunPlan, setRunPlan, clearRunPlan } from "./config.js";
 
 export const STATUS = Object.freeze({ idle: "idle", running: "running", paused: "paused", complete: "complete" });
 // Every pauseReason the gate, the CLI and the supervisor set.
@@ -75,6 +80,9 @@ export function defaultState() {
     ownerAnswer: null,
     lastBlockedQuestion: null,
     usageStaleWarned: false,
+    // The last run on a generated plan, recorded when it handed the project back to its own plan
+    // and state: { plan, branch, sweepId, since, completedAt }. Cleared when a run starts.
+    lastRunPlan: null,
     updatedAt: null
   };
 }
@@ -104,6 +112,72 @@ export function updateState(root, mutate) {
   const state = loadState(root);
   const replaced = mutate(state);
   return saveState(root, replaced && typeof replaced === "object" ? replaced : state);
+}
+
+// ---------- the project's own state, kept aside during a run on a generated plan ----------
+
+export const MAIN_STATE_FILE = "state.main.json";
+
+export function mainStateFile(root) {
+  return path.join(projectPaths(root).runtimeDir, MAIN_STATE_FILE);
+}
+
+export function hasMainStateKept(root) {
+  try { return readJson(mainStateFile(root), null) !== null; } catch { return true; }
+}
+
+// The kept state with the defaults filled in, or null when none is kept (or it cannot be read).
+export function readMainStateKept(root) {
+  let kept = null;
+  try { kept = readJson(mainStateFile(root), null); } catch { kept = null; }
+  return kept && typeof kept === "object" ? { ...defaultState(), ...kept } : null;
+}
+
+// Keeps state.json aside as state.main.json. A state already kept stays as it is: then the state
+// in state.json is an earlier generated-plan run's, not the project's own. True when it kept one.
+export function keepMainState(root) {
+  if (hasMainStateKept(root)) return false;
+  const p = projectPaths(root);
+  ensureDir(p.runtimeDir);
+  let stored = null;
+  try { stored = readJson(p.stateFile, null); } catch { stored = null; }
+  writeJsonAtomic(mainStateFile(root), stored && typeof stored === "object" ? stored : defaultState());
+  return true;
+}
+
+// Puts the kept state back in state.json (with `patch` over it) and removes the copy. False when
+// none is kept; a copy that cannot be read is left where it is, for the owner.
+export function restoreMainState(root, patch = {}) {
+  const kept = readMainStateKept(root);
+  if (!kept) return false;
+  saveState(root, { ...kept, ...patch });
+  removeIfExists(mainStateFile(root));
+  return true;
+}
+
+// Sets the project up for a run on the generated plan `file` (project-relative): the project's own
+// state is kept aside, the run gets a fresh idle state (so the supervisor launches
+// /autoclaude:start), and the run-plan override points every reader at the plan. `record` carries
+// { branch, source, sweepId } into the override. Returns the override's project-relative path.
+export function beginRunPlan(root, file, record = {}, { now = new Date() } = {}) {
+  keepMainState(root);
+  saveState(root, defaultState());
+  return setRunPlan(root, file, { now, ...record });
+}
+
+// Hands the project back to its own plan and state after a run on a generated plan: the kept
+// state goes back to state.json and the override is cleared. With `completed`, the restored state
+// records the run in lastRunPlan. Returns { plan, restored, cleared }; with no override set (or a
+// broken one) plan is null and nothing is touched. Never throws for a missing file.
+export function finishRunPlan(root, { completed = false, now = new Date() } = {}) {
+  const over = readRunPlan(root);
+  if (!over.plan) return { plan: null, restored: false, cleared: false };
+  const patch = completed
+    ? { lastRunPlan: { plan: over.plan, branch: over.branch, sweepId: over.sweepId, since: over.since, completedAt: new Date(now).toISOString() } }
+    : {};
+  const restored = restoreMainState(root, patch);
+  const cleared = clearRunPlan(root);
+  return { plan: over.plan, restored, cleared };
 }
 
 export function isRunning(state) {

@@ -496,17 +496,23 @@ test("security review at a phase end: a high finding fails the attempt; three fa
   assert.deepEqual([s.status, s.pauseReason], ["paused", "security"]);
 });
 
-test("security review passing with low findings files them in SECURITY-FINDINGS.md inside the step commit", async () => {
+test("security review passing with low findings files them in the private findings file, kept out of the step commit", async () => {
   const root = scratch("broken", PASS);
   const { runSecurity } = fakeSecurity([secLow]);
   writeReady(root, "S1.1");
   const r = await gate(root, { runSecurity });
   assert.equal(r.decision, "allow");
   assert.equal(loadState(root).status, "complete");
-  const text = fs.readFileSync(path.join(root, "docs", "SECURITY-FINDINGS.md"), "utf8");
+  // The default findings file is docs/private/SECURITY-FINDINGS.md: gitignored, never committed
+  // (P10.10).
+  const text = fs.readFileSync(path.join(root, "docs", "private", "SECURITY-FINDINGS.md"), "utf8");
   assert.match(text, /\| \d{4}-\d\d-\d\d \| low \| server\.js:3 \| no rate limit on POST \/api\/todos \(found at S1\.1\) \| add a simple limiter \| open \|/);
   const files = spawnSync("git", ["show", "--name-only", "--format=", "HEAD"], { cwd: root, encoding: "utf8", env }).stdout;
-  assert.match(files, /docs\/SECURITY-FINDINGS\.md/);
+  assert.match(files, /PLAN\.md/, "the step commit itself is there");
+  assert.doesNotMatch(files, /SECURITY-FINDINGS/i, "the findings stay out of the commit");
+  const tracked = spawnSync("git", ["ls-files"], { cwd: root, encoding: "utf8", env }).stdout;
+  assert.doesNotMatch(tracked, /docs\/private/i);
+  assert.ok(treeClean(root), "gitignored, so the tree stays clean");
 });
 
 test("security runs mid-phase only for a step tagged security, and its infra failure is not an attempt", async () => {
@@ -684,7 +690,7 @@ const withFollowUp = { status: "passed", sections: [{ title: "Browser tester: pa
 
 // The builder's side of a fix-up pass: every open findings row gets an outcome.
 function settleFindings(root, status = "fixed") {
-  for (const rel of ["docs/BLOCKERS.md", "docs/SECURITY-FINDINGS.md"]) {
+  for (const rel of ["docs/BLOCKERS.md", "docs/private/SECURITY-FINDINGS.md"]) {
     const file = path.join(root, rel);
     if (fs.existsSync(file)) fs.writeFileSync(file, fs.readFileSync(file, "utf8").replace(/\| open \|$/gm, `| ${status} |`));
   }
@@ -800,7 +806,7 @@ test("verifyAt phase: non-blocking findings get a fix-up pass; the next ready ru
   let r = await gate(root, d);
   assert.equal(r.decision, "block", JSON.stringify(r.events));
   assert.match(r.reason, /^Phase 1 passed its verification, with 2 non-blocking findings to handle before the feature closes\./);
-  assert.match(r.reason, /1\. \[browser tester, medium\] the two is hard to read \(docs\/BLOCKERS\.md\)\n2\. \[security review, low\] server\.js:3: no rate limit on POST \/api\/todos \(docs\/SECURITY-FINDINGS\.md\)/);
+  assert.match(r.reason, /1\. \[browser tester, medium\] the two is hard to read \(docs\/BLOCKERS\.md\)\n2\. \[security review, low\] server\.js:3: no rate limit on POST \/api\/todos \(docs\/private\/SECURITY-FINDINGS\.md\)/);
   assert.match(r.reason, /ready S1\.3`: the checks run once more/);
   assert.deepEqual(secCalls, ["S1.3#1"]);
   assert.equal(gitLog(root)[0], "autoclaude(S1.2): Two", "not committed yet");
@@ -1265,14 +1271,14 @@ test("the last failed attempt marks [!] on the plan as it is now, keeping what t
 });
 
 test("step mode: findings filed after the checks are checked again before the commit; a failure takes the rows out with the ticks", async () => {
-  const noFindings = { name: "docs-lint", command: `${node} -e "process.exit(require('fs').existsSync('docs/SECURITY-FINDINGS.md') ? 1 : 0)"`, timeoutSec: 60 };
+  const noFindings = { name: "docs-lint", command: `${node} -e "process.exit(require('fs').existsSync('docs/private/SECURITY-FINDINGS.md') ? 1 : 0)"`, timeoutSec: 60 };
   const root = scratch("broken", [noFindings]);
   const { runSecurity } = fakeSecurity([secLow]);
   writeReady(root, "S1.1");
   const r = await gate(root, { runSecurity });
   assert.equal(r.decision, "block", JSON.stringify(r.events));
-  assert.match(r.reason, /^S1\.1 attempt 1\/3 failed: check "docs-lint" failed once the findings were filed in docs\/SECURITY-FINDINGS\.md\./);
-  assert.equal(fs.existsSync(path.join(root, "docs", "SECURITY-FINDINGS.md")), false, "the rows came out with the ticks");
+  assert.match(r.reason, /^S1\.1 attempt 1\/3 failed: check "docs-lint" failed once the findings were filed in docs\/private\/SECURITY-FINDINGS\.md\./);
+  assert.equal(fs.existsSync(path.join(root, "docs", "private", "SECURITY-FINDINGS.md")), false, "the rows came out with the ticks");
   assert.equal(stepById(planOf(root), "S1.1").marker, " ");
   assert.equal(loadState(root).attempts["S1.1"], 1);
   assert.equal(gitLog(root)[0], "fixture: verify per step", "nothing committed");

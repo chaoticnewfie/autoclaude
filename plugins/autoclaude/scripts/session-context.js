@@ -16,6 +16,7 @@ import { parsePlan, stepById, nextStep, stepText, isFinished } from "../lib/plan
 import { readText, appendLine } from "../lib/fsatomic.js";
 import { readMachineNotify, writeMachineNotify } from "../lib/notify.js";
 import { isBuilderSession } from "../lib/builder.js";
+import { handoffFileName } from "../lib/summary.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
@@ -36,7 +37,11 @@ export function mirrorNotifyConfig(env) {
 export function buildContext({ root, state, config, planText, progressText, promptTemplate, cli = "autoclaude", now = new Date() }) {
   const parsed = parsePlan(planText || "");
   const step = (state.currentStep && stepById(parsed, state.currentStep)) || nextStep(parsed);
+  // HANDOFF.md, or HANDOFF-SECURITY.md (and so on) for a run on a generated plan.
+  let handoffFile = "HANDOFF.md";
+  try { handoffFile = handoffFileName(root, config); } catch {}
   const fill = (s) => s
+    .replace(/\{\{HANDOFF_FILE\}\}/g, handoffFile)
     .replace(/\{\{AUTOCLAUDE_CMD\}\}/g, cli)
     .replace(/\{\{DATE\}\}/g, now.toISOString().slice(0, 10))
     .replace(/\{\{PROJECT_ROOT\}\}/g, root)

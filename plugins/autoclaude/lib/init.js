@@ -3,7 +3,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
-import { configTemplate } from "./config.js";
+import { configTemplate, loadConfig, DEFAULTS } from "./config.js";
 import { writeJsonAtomic, writeFileAtomic, readText, readJson, ensureDir } from "./fsatomic.js";
 import { projectPaths, pluginRoot, homeDir, isWindows, CONFIG_FILE } from "./paths.js";
 import { findOnPath } from "./proc.js";
@@ -19,6 +19,10 @@ export function templateDir() {
 // test) land in every project as AUTOCLAUDE.md. Claude Code only loads files named CLAUDE.md, so
 // this one costs the builder nothing (D46). The copy is stamped with the version that wrote it.
 export const GUIDE_FILE = "AUTOCLAUDE.md";
+// The template's security findings file, which init writes to the project's docs.security path.
+// It cannot live under docs/private/ in the template: the template's own .gitignore would keep it
+// out of this repository.
+export const TEMPLATE_SECURITY_DOC = "docs/SECURITY-FINDINGS.md";
 
 export function pluginVersion(template = templateDir()) {
   try { return JSON.parse(fs.readFileSync(path.join(template, "..", ".claude-plugin", "plugin.json"), "utf8")).version || "?"; } catch { return "?"; }
@@ -130,10 +134,27 @@ function walk(dir, rel = "", out = []) {
   return out;
 }
 
+// The Playwright MCP release every browser checker runs (P10.10, closes DEFERRED 17). Pinned, not
+// @latest: @latest fetched whatever was published that day, so a release could change a
+// checker's tools between two steps of one run, and the arbitrary-code tool the checkers must
+// never have (tester.js PLAYWRIGHT_DISALLOWED) is named per release. 0.0.83 is the version the
+// tester, the bug bash and the practice runs used on the development machine (October 2026).
+// Raise it only after a live check of the tester and the bug bash on the new release.
+export const PLAYWRIGHT_MCP_VERSION = "0.0.83";
+export const PLAYWRIGHT_MCP_PACKAGE = `@playwright/mcp@${PLAYWRIGHT_MCP_VERSION}`;
+
 export function playwrightMcpConfig() {
   return isWindows
-    ? { mcpServers: { playwright: { command: "cmd", args: ["/c", "npx", "-y", "@playwright/mcp@latest", "--headless"] } } }
-    : { mcpServers: { playwright: { command: "npx", args: ["-y", "@playwright/mcp@latest", "--headless"] } } };
+    ? { mcpServers: { playwright: { command: "cmd", args: ["/c", "npx", "-y", PLAYWRIGHT_MCP_PACKAGE, "--headless"] } } }
+    : { mcpServers: { playwright: { command: "npx", args: ["-y", PLAYWRIGHT_MCP_PACKAGE, "--headless"] } } };
+}
+
+// An MCP server's arguments with an unpinned Playwright MCP (`@playwright/mcp@latest`, or the
+// bare package name, which npx also resolves to the newest) replaced by the pinned release. A
+// project config written before the pin gets it without a new init; a version the owner chose
+// on purpose is kept.
+export function pinPlaywrightArgs(args) {
+  return (Array.isArray(args) ? args : []).map((a) => (/^@playwright\/mcp(@latest)?$/i.test(String(a)) ? PLAYWRIGHT_MCP_PACKAGE : a));
 }
 
 export function nativeClaudePath() {
@@ -172,15 +193,21 @@ export function initProject(root, options = {}) {
     report.created.push(CONFIG_FILE);
   }
 
-  // 2. template files (never overwrite)
+  // 2. template files (never overwrite). The security findings file goes where the project's
+  // config says (docs.security): the gitignored docs/private/ for a new project (P10.10), the
+  // committed path an older project's config names.
   if (fs.existsSync(template)) {
     const name = projectName(root);
     const date = now.toISOString().slice(0, 10);
-    for (const rel of walk(template)) {
+    let securityDoc = DEFAULTS.docs.security;
+    try { const d = loadConfig(root).config.docs; if (d && typeof d.security === "string" && d.security.trim()) securityDoc = d.security.trim(); } catch {}
+    for (const tplRel of walk(template)) {
+      const rel = tplRel === TEMPLATE_SECURITY_DOC ? securityDoc.replace(/\\/g, "/") : tplRel;
       const target = path.join(root, rel);
       if (fs.existsSync(target)) { report.skipped.push(rel); continue; }
-      let src = fs.readFileSync(path.join(template, rel), "utf8");
+      let src = fs.readFileSync(path.join(template, tplRel), "utf8");
       if (rel === GUIDE_FILE) src = stampGuide(src, pluginVersion(template), date);
+      ensureDir(path.dirname(target));
       writeFileAtomic(target, src.replace(/\{\{PROJECT_NAME\}\}/g, name).replace(/\{\{DATE\}\}/g, date));
       report.created.push(rel);
     }
@@ -189,12 +216,14 @@ export function initProject(root, options = {}) {
   }
 
   // 3. .gitignore
-  // The runtime folder, and secrets/, where a run generates the secrets it needs (D49).
+  // The runtime folder, secrets/, where a run generates the secrets it needs (D49), and
+  // docs/private/, where security findings are kept out of the history (P10.10, D58).
   const gi = path.join(root, ".gitignore");
   const giText = readText(gi, null);
   const ignores = [
     { re: /^\s*\/?\.autoclaude\/?\s*$/m, block: "# AutoClaude runtime state\n.autoclaude/\n", name: ".autoclaude/" },
-    { re: /^\s*\/?secrets(\/\*{0,2})?\s*$/m, block: "# Secrets an AutoClaude run generates. Never committed.\nsecrets/\n", name: "secrets/" }
+    { re: /^\s*\/?secrets(\/\*{0,2})?\s*$/m, block: "# Secrets an AutoClaude run generates. Never committed.\nsecrets/\n", name: "secrets/" },
+    { re: /^\s*\/?docs\/private(\/\*{0,2})?\s*$/m, block: "# Security findings and other notes that must not be published. Never committed.\ndocs/private/\n", name: "docs/private/" }
   ];
   if (giText === null) {
     writeFileAtomic(gi, ignores.map((i) => i.block).join(""));
@@ -203,7 +232,8 @@ export function initProject(root, options = {}) {
     const missing = ignores.filter((i) => !i.re.test(giText));
     if (missing.length) {
       writeFileAtomic(gi, giText.replace(/\s*$/, "") + "\n\n" + missing.map((i) => i.block).join(""));
-      report.notes.push(`.gitignore: added ${missing.map((i) => i.name).join(" and ")}`);
+      const names = missing.map((i) => i.name);
+      report.notes.push(`.gitignore: added ${names.length > 1 ? `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}` : names[0]}`);
     }
   }
 

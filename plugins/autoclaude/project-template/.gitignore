@@ -4,6 +4,9 @@
 # Secrets an AutoClaude run generates, one file each. Never committed.
 secrets/
 
+# Security findings and other notes that must not be published. Never committed.
+docs/private/
+
 # Dependencies and build output
 node_modules/
 dist/

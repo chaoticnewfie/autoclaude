@@ -1,10 +1,12 @@
 // autoclaude.config.json: defaults, layers, merge, validation. Node built-ins only.
 // The shape is PLAN.md section 4.8.2. Secrets never live here (they are plugin userConfig or
 // notify.json). Settings resolve in layers (D49): the built-in DEFAULTS, then this computer's
-// defaults file (<claude config dir>/autoclaude/defaults.json), then the project's file.
+// defaults file (<claude config dir>/autoclaude/defaults.json), then the project's file. A run
+// on a generated plan (`run --plan`, P10.7) overrides `plan` from .autoclaude/run-plan.json,
+// applied in loadConfig only, so every reader of config.plan follows it.
 import path from "node:path";
-import { readText, writeJsonAtomic, ensureDir } from "./fsatomic.js";
-import { CONFIG_FILE, machinePaths } from "./paths.js";
+import { readText, writeJsonAtomic, ensureDir, removeIfExists } from "./fsatomic.js";
+import { CONFIG_FILE, RUNTIME_DIR, machinePaths } from "./paths.js";
 
 export const DEFAULTS = Object.freeze({
   version: 1,
@@ -34,6 +36,12 @@ export const DEFAULTS = Object.freeze({
   supervisor: { pollSec: 60, idleRelaunchMin: 15, stallMin: 45, resumeGraceMin: 2, rateLimitGraceMin: 10, maxRecoveries: 2 },
   // Remove unused Docker things the run created, at plan completion (P8.5).
   footprint: { docker: true },
+  // Security and optimize sweeps (P10, D58): read-only headless sessions, at most `concurrency`
+  // at a time, on Opus at checkers.effort. depth "thorough" has every finding checked by three
+  // independent sessions, "standard" by one. advisories: package names and versions may go to
+  // npm and OSV. The sweep waits for the 5-hour reset above waitAt5hPct. after: what follows the
+  // report: "report" only, a fix "plan" to review, or "fix" right away.
+  sweep: { concurrency: 3, depth: "thorough", advisories: true, waitAt5hPct: 90, maxTurnsPerAgent: 40, timeoutSecPerAgent: 900, after: "fix" },
   // Extra Bash commands a run may never execute in this project, on top of the built-in list
   // (D37). Each rule: { "pattern": "<regular expression, case-insensitive>", "reason": "..." }.
   guard: { deny: [] },
@@ -45,7 +53,9 @@ export const DEFAULTS = Object.freeze({
     continueHere: "CONTINUE_HERE.md",
     decisions: "docs/DECISIONS.md",
     blockers: "docs/BLOCKERS.md",
-    security: "docs/SECURITY-FINDINGS.md",
+    // Gitignored by init and never staged by git.commitAll (P10.10, D58): security findings
+    // stay out of commits and pushes. Older projects keep the committed path their file names.
+    security: "docs/private/SECURITY-FINDINGS.md",
     reviewNotes: "docs/REVIEW_NOTES.md",
     sessionLog: "docs/SESSION_LOG.md"
   }
@@ -55,8 +65,9 @@ export const DEFAULTS = Object.freeze({
 export const PROJECT_ONLY_KEYS = Object.freeze(["plan", "branch", "devServer", "checks", "guard", "docs", "permissions"]);
 
 // Dotted-path prefixes that may change while a run is going: none of them changes how a step
-// is built or checked. Everything else is locked until the run is paused (P8.7).
-export const SAFE_LIVE_KEYS = Object.freeze(["notify", "usage", "review.pauseAt", "supervisor", "git.push", "git.tagPhaseEnds", "footprint"]);
+// is built or checked. Everything else is locked until the run is paused (P8.7). A run never
+// reads the sweep settings, and a running sweep keeps its options in its own sweep.json.
+export const SAFE_LIVE_KEYS = Object.freeze(["notify", "usage", "review.pauseAt", "supervisor", "git.push", "git.tagPhaseEnds", "footprint", "sweep"]);
 
 export function isSafeLiveKey(dotted) {
   return SAFE_LIVE_KEYS.some((k) => dotted === k || dotted.startsWith(k + "."));
@@ -72,6 +83,13 @@ const PAUSE_AT = ["never", "phase-end", "every-step"];
 export const MAX_GATE_TIMEOUT_SEC = 1800;
 const BLOCK_ON = ["high", "medium", "low", "none"];
 const SECURITY_WHEN = ["phase-end", "tag:security", "every-step", "never"];
+export const SWEEP_DEPTHS = Object.freeze(["thorough", "standard", "quick"]);
+export const SWEEP_AFTER = Object.freeze(["report", "plan", "fix"]);
+export const MAX_SWEEP_CONCURRENCY = 8;
+// The owner's committed list of accepted risks and false alarms from sweeps (P10.2): fingerprints
+// and reasons only. Read-only for a run's builder (scripts/tool-guard.js); lib/findings.js reads
+// and writes it.
+export const ACCEPTED_FILE = "autoclaude.accepted.json";
 // A Claude Code permission rule: a tool name, optionally with a specifier in parentheses.
 const PERMISSION_RULE = /^[A-Za-z_][A-Za-z0-9_-]*(\(.+\))?$/s;
 
@@ -226,6 +244,16 @@ export function validateConfig(cfg) {
     for (const k of ["pollSec", "idleRelaunchMin", "stallMin", "resumeGraceMin", "rateLimitGraceMin", "maxRecoveries"]) positive(`supervisor.${k}`, cfg.supervisor[k]);
   }
   if (expect("footprint", cfg.footprint, "object")) expect("footprint.docker", cfg.footprint.docker, "boolean");
+  if (expect("sweep", cfg.sweep, "object")) {
+    const s = cfg.sweep;
+    if (!Number.isInteger(s.concurrency) || s.concurrency < 1 || s.concurrency > MAX_SWEEP_CONCURRENCY) err("sweep.concurrency", `expected a whole number from 1 to ${MAX_SWEEP_CONCURRENCY}, got ${JSON.stringify(s.concurrency)}`);
+    oneOf("sweep.depth", s.depth, SWEEP_DEPTHS);
+    expect("sweep.advisories", s.advisories, "boolean");
+    if (typeof s.waitAt5hPct !== "number" || s.waitAt5hPct < 1 || s.waitAt5hPct > 100) err("sweep.waitAt5hPct", `expected a number from 1 to 100, got ${JSON.stringify(s.waitAt5hPct)}`);
+    positive("sweep.maxTurnsPerAgent", s.maxTurnsPerAgent);
+    positive("sweep.timeoutSecPerAgent", s.timeoutSecPerAgent);
+    oneOf("sweep.after", s.after, SWEEP_AFTER);
+  }
   if (expect("guard", cfg.guard, "object") && expect("guard.deny", cfg.guard.deny, "array")) {
     cfg.guard.deny.forEach((rule, i) => {
       const p = `guard.deny[${i}]`;
@@ -400,17 +428,114 @@ export function loadLayers(root, { machineFile = machineDefaultsFile() } = {}) {
 
 // Reads <root>/autoclaude.config.json over this computer's defaults. Never throws for a missing or
 // broken file: { exists, file, config (merged, or the lower layers when broken), errors[],
-// warnings[] }. errors are the project's own problems (the shape callers have always had);
-// warnings are problems in this computer's defaults file, which are ignored.
+// warnings[], mainPlan, runPlan }. errors are the project's own problems (the shape callers have
+// always had); warnings are problems in this computer's defaults file, which are ignored.
+// With a run-plan override (.autoclaude/run-plan.json, P10.7) config.plan is the override's file;
+// mainPlan is always the plan the project's config names, and runPlan the override or null. A
+// broken override is an error with the path RUN_PLAN_ERROR_PATH, and config.plan stays the main
+// plan, so nothing ever acts on a plan nobody chose.
 export function loadConfig(root, { machineFile = machineDefaultsFile() } = {}) {
   const file = path.join(root, CONFIG_FILE);
   const m = readMachineDefaults(machineFile);
   const warnings = m.problems.map(({ path: p, message }) => ({ path: p, message: `${machineFile}: ${message}` }));
   const p = readProjectConfig(root);
-  if (!p.exists) return { exists: false, file, config: mergeLayers(m.values), errors: [], warnings };
-  if (p.error) return { exists: true, file, config: mergeLayers(m.values), errors: [{ path: "", message: p.error }], warnings };
+  const over = readRunPlan(root);
+  const withOverride = (config, errors) => {
+    const mainPlan = config.plan;
+    if (over.error) return { config, errors: [...errors, { path: RUN_PLAN_ERROR_PATH, message: over.error }], mainPlan, runPlan: null };
+    return { config: over.plan ? { ...config, plan: over.plan } : config, errors, mainPlan, runPlan: over.plan };
+  };
+  if (!p.exists) return { exists: false, file, ...withOverride(mergeLayers(m.values), []), warnings };
+  if (p.error) return { exists: true, file, ...withOverride(mergeLayers(m.values), [{ path: "", message: p.error }]), warnings };
   const config = mergeLayers(m.values, p.raw);
-  return { exists: true, file, config, errors: validateConfig(config), warnings };
+  return { exists: true, file, ...withOverride(config, validateConfig(config)), warnings };
+}
+
+// ---------- the run-plan override (P10.7) ----------
+
+export const RUN_PLAN_FILE = "run-plan.json";
+// The error path loadConfig gives a broken override, so a reader can tell it from config errors.
+export const RUN_PLAN_ERROR_PATH = `${RUNTIME_DIR}/${RUN_PLAN_FILE}`;
+
+export function runPlanFile(root) {
+  return path.join(root, RUNTIME_DIR, RUN_PLAN_FILE);
+}
+
+// A plan file the override may name, as a project-relative path with forward slashes: inside the
+// project and outside .autoclaude/ (the gate commits plan ticks, and that folder is never
+// committed). { rel, error }.
+function planPathIn(root, file) {
+  if (typeof file !== "string" || file.trim() === "") return { rel: null, error: "names no plan file" };
+  const abs = path.resolve(root, file.trim());
+  const rel = path.relative(path.resolve(root), abs);
+  if (!rel || rel === ".." || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel)) return { rel: null, error: `${file} is not inside the project` };
+  const posix = rel.split(path.sep).join("/");
+  if (posix.toLowerCase() === RUNTIME_DIR || posix.toLowerCase().startsWith(`${RUNTIME_DIR}/`)) return { rel: null, error: `${file} is inside ${RUNTIME_DIR}/, which is never committed; put the plan in the project` };
+  return { rel: posix, error: null };
+}
+
+// Where `autoclaude run --plan <file>` takes its plan from, and where the run works it: a plan a
+// sweep left in its gitignored folder (.autoclaude/sweeps/<id>/<NAME>.md) is copied to the
+// project root under its own name and committed there; any other plan in the project is worked
+// where it is. { source, target, sweepId, error }: source and target project-relative with
+// forward slashes, sweepId the sweep's id or null. Never throws.
+export function resolveRunPlanSource(root, file) {
+  const none = { source: null, target: null, sweepId: null };
+  if (typeof file !== "string" || file.trim() === "") return { ...none, error: "names no plan file" };
+  const abs = path.resolve(root, file.trim());
+  const rel = path.relative(path.resolve(root), abs);
+  if (!rel || rel === ".." || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel)) return { ...none, error: `${file} is not inside the project` };
+  const posix = rel.split(path.sep).join("/");
+  const m = posix.match(new RegExp(`^${RUNTIME_DIR.replace(/[.]/g, "[.]")}/sweeps/([^/]+)/([^/]+[.]md)$`, "i"));
+  if (m) return { source: posix, target: m[2], sweepId: m[1], error: null };
+  const { rel: target, error } = planPathIn(root, file);
+  if (error) return { ...none, error: `${error} (only a plan a sweep wrote in ${RUNTIME_DIR}/sweeps/<id>/ is taken from there)` };
+  return { source: target, target, sweepId: null, error: null };
+}
+
+const strOrNull = (v) => (typeof v === "string" && v.trim() ? v : null);
+
+// The override as written: { exists, plan (project-relative) or null, since, branch, source,
+// sweepId, error }. branch is the run branch `run --plan` made for it, source where the plan was
+// taken from (a sweep's folder, or the plan itself), sweepId the sweep's id; each null when not
+// recorded. Never throws.
+export function readRunPlan(root) {
+  const file = runPlanFile(root);
+  const empty = { plan: null, since: null, branch: null, source: null, sweepId: null };
+  let text;
+  try { text = readText(file, null); } catch (e) { return { exists: true, ...empty, error: `${RUN_PLAN_ERROR_PATH} could not be read: ${e.message}` }; }
+  if (text === null) return { exists: false, ...empty, error: null };
+  let raw;
+  try { raw = JSON.parse(text); } catch (e) { return { exists: true, ...empty, error: `${RUN_PLAN_ERROR_PATH} is not valid JSON (${e.message}); delete it to go back to the project's own plan, or start the run on the generated plan again` }; }
+  const named = isPlainObject(raw) ? raw.plan : undefined;
+  const { rel, error } = planPathIn(root, named);
+  if (error) return { exists: true, ...empty, error: `${RUN_PLAN_ERROR_PATH}: the plan it ${error}` };
+  const o = isPlainObject(raw) ? raw : {};
+  return { exists: true, plan: rel, since: strOrNull(o.since), branch: strOrNull(o.branch), source: strOrNull(o.source), sweepId: strOrNull(o.sweepId), error: null };
+}
+
+// The plan file a run works on instead of config.plan, or null (none, or a broken override).
+export function runPlanOverride(root) {
+  return readRunPlan(root).plan;
+}
+
+// Points every run reader at `file` (absolute, or relative to the project). Throws on a file
+// outside the project or inside .autoclaude/. Returns the project-relative path written. branch,
+// source and sweepId are recorded when given (`autoclaude start` runs on that branch).
+export function setRunPlan(root, file, { now = new Date(), branch = null, source = null, sweepId = null } = {}) {
+  const { rel, error } = planPathIn(root, file);
+  if (error) throw new Error(`cannot run on that plan: it ${error}`);
+  const record = { plan: rel, since: new Date(now).toISOString() };
+  if (strOrNull(branch)) record.branch = branch;
+  if (strOrNull(source)) record.source = source;
+  if (strOrNull(sweepId)) record.sweepId = sweepId;
+  writeJsonAtomic(runPlanFile(root), record);
+  return rel;
+}
+
+// Back to the project's own plan. True when an override was removed.
+export function clearRunPlan(root) {
+  return removeIfExists(runPlanFile(root));
 }
 
 // Writes the project's file as given (the caller passes the whole object it read and changed).

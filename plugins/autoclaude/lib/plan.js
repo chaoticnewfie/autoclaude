@@ -97,7 +97,9 @@ export function parsePlan(text) {
   return { title, lines, phases, steps, problems };
 }
 
-export const TAGS = Object.freeze(["ui", "no-ui", "security", "db"]);
+// "pinned": a change step working under characterization tests an earlier step wrote (a generated
+// optimize plan's tier B pair, lib/fixplan.js); the tool guard keeps the builder's hands off them.
+export const TAGS = Object.freeze(["ui", "no-ui", "security", "db", "pinned"]);
 // Sentences the project template ships in place of real content; a plan still holding one was
 // never finished by /autoclaude:plan.
 export const TEMPLATE_PLACEHOLDERS = Object.freeze(["Not written yet.", "Nothing decided yet."]);

@@ -11,7 +11,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import {
-  DEFAULTS, PROJECT_ONLY_KEYS, EFFORTS, CHECKER_EFFORTS, isSafeLiveKey, loadLayers, readMachineDefaults, readProjectConfig,
+  DEFAULTS, PROJECT_ONLY_KEYS, EFFORTS, CHECKER_EFFORTS, MAX_SWEEP_CONCURRENCY, isSafeLiveKey, loadLayers, readMachineDefaults, readProjectConfig,
   writeProjectConfig, writeMachineDefaults, validateConfig, mergeLayers, settingPathOf, getPath, setPath,
   deletePath, machineDefaultsFile, cleanMachineDefaults
 } from "./config.js";
@@ -37,7 +37,14 @@ export const CRITICAL_ALERTS = Object.freeze([
   "Verified work could not be committed, or a push failed",
   "Paused for your review, for a security finding, or at the weekly usage limit",
   "The session is waiting for a person",
-  "The plan is complete"
+  "The plan is complete",
+  "A security or optimize sweep finished (counts and the report's path only, never the findings)"
+]);
+
+// The sweep settings (D58), in page order. Each takes effect at the next sweep; the skills'
+// questions (/autoclaude:security, /autoclaude:optimize) can still choose differently per sweep.
+export const SWEEP_FIELD_PATHS = Object.freeze([
+  "sweep.depth", "sweep.after", "sweep.concurrency", "sweep.advisories", "sweep.waitAt5hPct", "sweep.maxTurnsPerAgent", "sweep.timeoutSecPerAgent"
 ]);
 
 // Every setting the page shows, in page order. section: run | alerts | project. type drives the
@@ -68,6 +75,13 @@ export const FIELDS = Object.freeze([
   f("git.push", "run", "bool", "Push after each feature", "Push the run branch and the feature's tag after each verified feature, retrying once. A failed push is alerted and listed in HANDOFF.md."),
   f("git.tagPhaseEnds", "run", "bool", "Tag each finished feature", "Tag the commit that completes a feature."),
   f("footprint.docker", "run", "bool", "Clean up Docker at the end", "When the plan is complete, remove stopped containers, unused volumes and unused networks the run created for this project. Anything new it cannot tie to this project is left alone and listed in HANDOFF.md; nothing that was there before the run is touched."),
+  f("sweep.depth", "run", "enum", "Sweep depth", "How closely a security or optimize sweep reads the project and checks what it finds. thorough: small areas per session, and every finding checked by 3 independent sessions that try to disprove it, kept only when most of them cannot. standard: larger areas, 1 check each. quick: the largest areas and no second check, so expect more false alarms. The sweep's questions offer this as the recommendation.", { options: ["thorough", "standard", "quick"], group: "Sweeps" }),
+  f("sweep.after", "run", "enum", "After a sweep", "What happens to the confirmed findings. fix: a fix plan is written and a normal run fixes it at once on its own branch, every fix verified like any feature. plan: the fix plan is written for you to review, then autoclaude run --plan starts it. report: only the report, nothing changes. The sweep's questions offer this as the recommendation.", { options: ["fix", "plan", "report"], group: "Sweeps" }),
+  f("sweep.concurrency", "run", "int", "Sessions at once", `How many read-only Claude sessions a sweep runs at the same time, from 1 to ${MAX_SWEEP_CONCURRENCY}. More finishes sooner and uses your 5-hour usage faster.`, { group: "Sweeps" }),
+  f("sweep.advisories", "run", "bool", "Look up package advisories", "Send the project's package names and versions to npm's audit service and the OSV database to find known vulnerabilities. Off: no package list leaves this computer, and the report says packages were not checked.", { group: "Sweeps" }),
+  f("sweep.waitAt5hPct", "run", "int", "Wait at 5-hour usage (%)", "Before starting another session, a sweep waits for the 5-hour window to reset once your usage reaches this percent, so some is left for you. From 1 to 100. The weekly pause above still applies to sweeps.", { group: "Sweeps" }),
+  f("sweep.maxTurnsPerAgent", "run", "int", "Turns per sweep session", "How many tool calls one sweep session may make before it has to report what it found.", { group: "Sweeps" }),
+  f("sweep.timeoutSecPerAgent", "run", "int", "Time limit per sweep session (seconds)", "How long one sweep session may take before it is stopped; what it saved so far is kept.", { group: "Sweeps" }),
   f("gate.timeoutSec", "run", "int", "Verification time limit (seconds)", "How long one verification may take, at most 1800 (Claude Code's limit for the Stop hook).", { group: "Advanced" }),
   f("supervisor.pollSec", "run", "int", "Supervisor check interval (seconds)", "How often the supervisor looks at the builder session.", { group: "Advanced" }),
   f("supervisor.idleRelaunchMin", "run", "int", "Restart an idle session after (minutes)", "A builder session that sits waiting this long is restarted.", { group: "Advanced" }),

@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
-import { initProject, detectProject, formatInitReport, playwrightMcpConfig, existingProjectSignals, serverEntry, projectName, GUIDE_FILE, pluginVersion, stampGuide } from "../../plugins/autoclaude/lib/init.js";
+import { initProject, detectProject, formatInitReport, playwrightMcpConfig, existingProjectSignals, serverEntry, projectName, GUIDE_FILE, pluginVersion, stampGuide, PLAYWRIGHT_MCP_VERSION, PLAYWRIGHT_MCP_PACKAGE, pinPlaywrightArgs } from "../../plugins/autoclaude/lib/init.js";
 import { gitEnv } from "../fixtures/prepare.js";
 
 const tmp = (p) => fs.mkdtempSync(path.join(os.tmpdir(), p));
@@ -130,7 +130,8 @@ test("initProject on an existing project keeps its files, appends to .gitignore,
     assert.equal(r.existingProject, true);
     assert.ok(r.skipped.includes("PLAN.md"));
     assert.equal(fs.readFileSync(path.join(root, "PLAN.md"), "utf8"), "# Their own plan\n");
-    assert.match(fs.readFileSync(path.join(root, ".gitignore"), "utf8"), /^node_modules\/\n\n# AutoClaude runtime state\n\.autoclaude\/\n# Secrets an AutoClaude run generates\. Never committed\.\nsecrets\/\n$/);
+    assert.match(fs.readFileSync(path.join(root, ".gitignore"), "utf8"), /^node_modules\/\n\n# AutoClaude runtime state\n\.autoclaude\/\n# Secrets an AutoClaude run generates\. Never committed\.\nsecrets\/\n# Security findings and other notes that must not be published\. Never committed\.\ndocs\/private\/\n$/);
+    assert.ok(r.notes.includes(".gitignore: added .autoclaude/, secrets/ and docs/private/"), r.notes.join("\n"));
     const cfg = JSON.parse(fs.readFileSync(path.join(root, "autoclaude.config.json"), "utf8"));
     assert.equal(cfg.devServer.command, "npm run dev");
     assert.equal(cfg.devServer.url, "http://127.0.0.1:3005");
@@ -203,6 +204,65 @@ test("init keeps the owner's CLAUDE.md and says /autoclaude:plan adds an AutoCla
     const again = initProject(root, { template, statusline: false });
     assert.equal(again.keptOwnClaudeMd, false);
     assert.match(formatInitReport(again), /already had code or a plan/);
+  });
+});
+
+test("Playwright MCP is pinned to a tested release: the config init writes, and pinPlaywrightArgs for older configs", () => {
+  assert.match(PLAYWRIGHT_MCP_VERSION, /^\d+\.\d+\.\d+$/);
+  assert.equal(PLAYWRIGHT_MCP_PACKAGE, `@playwright/mcp@${PLAYWRIGHT_MCP_VERSION}`);
+  const args = playwrightMcpConfig().mcpServers.playwright.args;
+  assert.ok(args.includes(PLAYWRIGHT_MCP_PACKAGE));
+  assert.ok(!args.some((a) => /@latest/.test(a)), "never @latest");
+  assert.deepEqual(pinPlaywrightArgs(["/c", "npx", "-y", "@playwright/mcp@latest", "--headless"]), ["/c", "npx", "-y", PLAYWRIGHT_MCP_PACKAGE, "--headless"]);
+  assert.deepEqual(pinPlaywrightArgs(["-y", "@playwright/mcp"]), ["-y", PLAYWRIGHT_MCP_PACKAGE]);
+  assert.deepEqual(pinPlaywrightArgs(["-y", "@playwright/mcp@0.0.70"]), ["-y", "@playwright/mcp@0.0.70"], "an owner's own pin stays");
+  assert.deepEqual(pinPlaywrightArgs(["--output-dir", "@playwright/mcp-notes"]), ["--output-dir", "@playwright/mcp-notes"]);
+  assert.deepEqual(pinPlaywrightArgs(undefined), []);
+});
+
+test("init keeps security findings out of git: docs/private/ is ignored in new and existing projects, never twice", () => {
+  withConfigDir(() => {
+    const tpl = fs.readFileSync(path.resolve("plugins/autoclaude/project-template/.gitignore"), "utf8");
+    assert.match(tpl, /^docs\/private\/$/m, "the template ignores it for new projects");
+    const template = fakeTemplate();
+    const root = tmp("autoclaude-init-private-");
+    fs.writeFileSync(path.join(root, ".gitignore"), "node_modules/\n.autoclaude/\nsecrets/\n");
+    const r = initProject(root, { template, statusline: false });
+    assert.ok(r.notes.includes(".gitignore: added docs/private/"), r.notes.join("\n"));
+    assert.match(fs.readFileSync(path.join(root, ".gitignore"), "utf8"), /^docs\/private\/$/m);
+    const before = fs.readFileSync(path.join(root, ".gitignore"), "utf8");
+    initProject(root, { template, statusline: false });
+    assert.equal(fs.readFileSync(path.join(root, ".gitignore"), "utf8"), before, "already there: left alone");
+    // Other spellings of the same rule count.
+    for (const line of ["/docs/private/", "docs/private", "docs/private/**"]) {
+      const other = tmp("autoclaude-init-private-");
+      fs.writeFileSync(path.join(other, ".gitignore"), `.autoclaude/\nsecrets/\n${line}\n`);
+      const again = initProject(other, { template, statusline: false });
+      assert.ok(!again.notes.some((n) => /^\.gitignore: added/.test(n)), line);
+    }
+    // The runtime MCP config init writes is the pinned one.
+    assert.deepEqual(JSON.parse(fs.readFileSync(path.join(root, ".autoclaude", "mcp.playwright.json"), "utf8")), playwrightMcpConfig());
+  });
+});
+
+test("init writes the template's findings file to the project's docs.security path: docs/private/ for a new project, the committed path an older config names", () => {
+  withConfigDir(() => {
+    const template = fakeTemplate();
+    fs.writeFileSync(path.join(template, "docs", "SECURITY-FINDINGS.md"), "# SECURITY-FINDINGS of {{PROJECT_NAME}}\n");
+    const root = tmp("autoclaude-init-secdoc-");
+    const r = initProject(root, { template, statusline: false });
+    assert.ok(r.created.includes("docs/private/SECURITY-FINDINGS.md"), r.created.join(", "));
+    assert.equal(fs.existsSync(path.join(root, "docs", "SECURITY-FINDINGS.md")), false, "nothing at the committed path");
+    assert.match(fs.readFileSync(path.join(root, "docs", "private", "SECURITY-FINDINGS.md"), "utf8"), /^# SECURITY-FINDINGS of /);
+    // An older project whose config names the committed file keeps it there.
+    const old = tmp("autoclaude-init-secdoc-old-");
+    fs.writeFileSync(path.join(old, "autoclaude.config.json"), JSON.stringify({ version: 1, docs: { security: "docs/SECURITY-FINDINGS.md" } }));
+    const r2 = initProject(old, { template, statusline: false });
+    assert.ok(r2.created.includes("docs/SECURITY-FINDINGS.md"), r2.created.join(", "));
+    assert.equal(fs.existsSync(path.join(old, "docs", "private")), false);
+    // The real template keeps the file outside docs/private/, which its own .gitignore ignores.
+    assert.ok(fs.existsSync(path.resolve("plugins/autoclaude/project-template/docs/SECURITY-FINDINGS.md")));
+    assert.ok(!fs.existsSync(path.resolve("plugins/autoclaude/project-template/docs/private")));
   });
 });
 

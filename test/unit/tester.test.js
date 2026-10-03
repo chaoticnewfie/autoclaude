@@ -5,7 +5,8 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { buildPrompt, evaluateVerdict, mcpConfigFor, testChanges, runBrowserCheck, verdictSection, turnScale, acceptCount, VERDICT_SCHEMA, ALLOWED_TOOLS } from "../../plugins/autoclaude/lib/tester.js";
+import { buildPrompt, evaluateVerdict, mcpConfigFor, testChanges, runBrowserCheck, verdictSection, turnScale, acceptCount, VERDICT_SCHEMA, ALLOWED_TOOLS, PLAYWRIGHT_DISALLOWED, playwrightGuardArgs, listImages, SWEEP_CHROMIUM_ARGS } from "../../plugins/autoclaude/lib/tester.js";
+import { PLAYWRIGHT_MCP_PACKAGE } from "../../plugins/autoclaude/lib/init.js";
 import { parsePlan, stepById } from "../../plugins/autoclaude/lib/plan.js";
 import { mergeConfig } from "../../plugins/autoclaude/lib/config.js";
 import { prepareFixture, gitEnv } from "../fixtures/prepare.js";
@@ -70,17 +71,121 @@ test("verdictSection lists criteria with evidence, bugs, concerns and screenshot
   assert.match(s.body, /Run: model sonnet, 7 turns, 42 s/);
 });
 
-test("mcpConfigFor keeps the project's server, adds headless, isolated and the output dir", () => {
+test("mcpConfigFor keeps the project's server, pins an unpinned Playwright MCP, adds headless, isolated and the output dir", () => {
   const root = tmp();
   fs.mkdirSync(path.join(root, ".autoclaude"));
   fs.writeFileSync(path.join(root, ".autoclaude", "mcp.playwright.json"), JSON.stringify({ mcpServers: { pw: { command: "cmd", args: ["/c", "npx", "-y", "@playwright/mcp@latest", "--headless", "--viewport-size", "1280x800"] } } }));
   const file = mcpConfigFor(root, "C:/r/shots");
+  assert.equal(file, path.join(root, ".autoclaude", "mcp.playwright.run.json"));
   const cfg = JSON.parse(fs.readFileSync(file, "utf8"));
   assert.deepEqual(Object.keys(cfg.mcpServers), ["playwright"]);
-  assert.deepEqual(cfg.mcpServers.playwright.args, ["/c", "npx", "-y", "@playwright/mcp@latest", "--headless", "--viewport-size", "1280x800", "--isolated", "--output-dir", "C:/r/shots"]);
+  assert.deepEqual(cfg.mcpServers.playwright.args, ["/c", "npx", "-y", PLAYWRIGHT_MCP_PACKAGE, "--headless", "--viewport-size", "1280x800", "--isolated", "--output-dir", "C:/r/shots"]);
+  assert.match(PLAYWRIGHT_MCP_PACKAGE, /^@playwright\/mcp@\d+\.\d+\.\d+$/, "an exact release, never @latest");
   const bare = tmp();
   const cfg2 = JSON.parse(fs.readFileSync(mcpConfigFor(bare, "d"), "utf8"));
-  assert.ok(cfg2.mcpServers.playwright.args.includes("@playwright/mcp@latest"));
+  assert.ok(cfg2.mcpServers.playwright.args.includes(PLAYWRIGHT_MCP_PACKAGE));
+  assert.ok(!cfg2.mcpServers.playwright.args.some((a) => /@latest/.test(a)));
+  // A release the owner chose on purpose is kept; the bare package name is pinned like @latest.
+  fs.writeFileSync(path.join(root, ".autoclaude", "mcp.playwright.json"), JSON.stringify({ mcpServers: { playwright: { command: "npx", args: ["@playwright/mcp@0.0.70"] } } }));
+  assert.equal(JSON.parse(fs.readFileSync(mcpConfigFor(root, "d"), "utf8")).mcpServers.playwright.args[0], "@playwright/mcp@0.0.70");
+  fs.writeFileSync(path.join(root, ".autoclaude", "mcp.playwright.json"), JSON.stringify({ mcpServers: { playwright: { command: "npx", args: ["-y", "@playwright/mcp"] } } }));
+  assert.equal(JSON.parse(fs.readFileSync(mcpConfigFor(root, "d"), "utf8")).mcpServers.playwright.args[1], PLAYWRIGHT_MCP_PACKAGE);
+  // An empty server list falls back to the built-in config.
+  fs.writeFileSync(path.join(root, ".autoclaude", "mcp.playwright.json"), JSON.stringify({ mcpServers: {} }));
+  assert.ok(JSON.parse(fs.readFileSync(mcpConfigFor(root, "d"), "utf8")).mcpServers.playwright.args.includes(PLAYWRIGHT_MCP_PACKAGE));
+});
+
+test("mcpConfigFor: each named agent gets its own file, so agents side by side never share one", () => {
+  const root = tmp();
+  const a = mcpConfigFor(root, "C:/s/a", { name: "security-browser" });
+  const b = mcpConfigFor(root, "C:/s/b", { name: "perf browser/2" });
+  assert.equal(a, path.join(root, ".autoclaude", "mcp.playwright.security-browser.json"));
+  assert.equal(b, path.join(root, ".autoclaude", "mcp.playwright.perf_browser_2.json"), "the name is made safe for a file name");
+  const out = (f) => { const args = JSON.parse(fs.readFileSync(f, "utf8")).mcpServers.playwright.args; return args[args.indexOf("--output-dir") + 1]; };
+  assert.deepEqual([out(a), out(b)], ["C:/s/a", "C:/s/b"]);
+});
+
+test("mcpConfigFor for a sweep: the proxy, the origin list and the secrets file are the sweep's own; an owner's bypass is dropped", () => {
+  const root = tmp();
+  fs.mkdirSync(path.join(root, ".autoclaude"));
+  fs.writeFileSync(path.join(root, ".autoclaude", "mcp.playwright.json"), JSON.stringify({ mcpServers: { playwright: { command: "npx", args: ["-y", "@playwright/mcp@latest", "--headless", "--proxy-server", "http://elsewhere:1", "--proxy-bypass=<-loopback>", "--allowed-origins", "*", "--viewport-size", "1280x800"] } } }));
+  const file = mcpConfigFor(root, "C:/s/shots", { name: "browser", proxyServer: "http://127.0.0.1:50123", allowedOrigins: ["http://127.0.0.1:4173", "https://staging.example.test"], secretsFile: "C:\\p\\secrets\\sweep-users.env" });
+  const args = JSON.parse(fs.readFileSync(file, "utf8")).mcpServers.playwright.args;
+  const browserFile = path.join(root, ".autoclaude", "mcp.playwright.browser.browser.json").replace(/\\/g, "/");
+  assert.deepEqual(args, ["-y", PLAYWRIGHT_MCP_PACKAGE, "--headless", "--viewport-size", "1280x800", "--isolated", "--output-dir", "C:/s/shots", "--proxy-server", "http://127.0.0.1:50123", "--allowed-origins", "http://127.0.0.1:4173;https://staging.example.test", "--secrets", "C:/p/secrets/sweep-users.env", "--config", browserFile]);
+  assert.ok(!args.some((a) => /proxy-bypass|elsewhere/.test(a)));
+  // Without sweep options the owner's flags are left alone (the tester and the bug bash).
+  const plain = JSON.parse(fs.readFileSync(mcpConfigFor(root, "d"), "utf8")).mcpServers.playwright;
+  assert.ok(plain.args.includes("--proxy-server") && plain.args.includes("--proxy-bypass=<-loopback>"));
+  assert.ok(!plain.args.includes("--config") && plain.env === undefined, "no sweep config for the tester");
+});
+
+test("mcpConfigFor for a sweep: WebRTC kept to the proxy, file access and a running browser refused, the owner's config cleaned", () => {
+  const root = tmp();
+  fs.mkdirSync(path.join(root, ".autoclaude"));
+  fs.writeFileSync(path.join(root, "pw.config.json"), JSON.stringify({
+    allowUnrestrictedFileAccess: true, extension: true,
+    browser: { cdpEndpoint: "http://127.0.0.1:9222", userDataDir: "C:/Users/me/Chrome", launchOptions: { channel: "chrome", proxy: { server: "http://elsewhere:1" }, args: ["--lang=en-GB", "--proxy-server=http://elsewhere:1", "--disable-web-security", "--force-webrtc-ip-handling-policy=default"] }, contextOptions: { proxy: { server: "http://elsewhere:2" }, viewport: { width: 1280, height: 800 } } },
+    network: { allowedOrigins: ["*"] }, timeouts: { action: 9000 }
+  }));
+  fs.writeFileSync(path.join(root, ".autoclaude", "mcp.playwright.json"), JSON.stringify({ mcpServers: { playwright: { command: "npx", env: { OWN: "1", PLAYWRIGHT_MCP_ALLOW_UNRESTRICTED_FILE_ACCESS: "true" },
+    args: ["-y", "@playwright/mcp@latest", "--allow-unrestricted-file-access", "--extension", "--cdp-endpoint", "http://127.0.0.1:9222", "--cdp-header", "a: 1", "b: 2", "--config", "pw.config.json", "--user-data-dir=C:/x", "--viewport-size", "1280x800"] } } }));
+  const file = mcpConfigFor(root, "C:/s/shots", { name: "sweep-browser-0", proxyServer: "http://127.0.0.1:50123", allowedOrigins: ["http://127.0.0.1:4173"] });
+  const server = JSON.parse(fs.readFileSync(file, "utf8")).mcpServers.playwright;
+  for (const gone of ["--allow-unrestricted-file-access", "--extension", "--cdp-endpoint", "http://127.0.0.1:9222", "--cdp-header", "a: 1", "b: 2", "pw.config.json", "--user-data-dir=C:/x"]) assert.ok(!server.args.includes(gone), gone);
+  assert.ok(server.args.includes("--viewport-size"), "the owner's harmless flags stay");
+  assert.equal(server.args.filter((a) => a === "--config").length, 1);
+  const cfgFile = server.args[server.args.indexOf("--config") + 1];
+  assert.equal(cfgFile, file.replace(/\.json$/, ".browser.json").replace(/\\/g, "/"));
+  const cfg = JSON.parse(fs.readFileSync(cfgFile, "utf8"));
+  assert.deepEqual(cfg.browser.launchOptions.args, ["--lang=en-GB", ...SWEEP_CHROMIUM_ARGS]);
+  assert.ok(SWEEP_CHROMIUM_ARGS.includes("--force-webrtc-ip-handling-policy=disable_non_proxied_udp"));
+  assert.equal(cfg.browser.launchOptions.channel, "chrome", "the owner's browser choice stays");
+  for (const k of ["allowUnrestrictedFileAccess", "extension"]) assert.equal(cfg[k], undefined, k);
+  for (const k of ["cdpEndpoint", "userDataDir"]) assert.equal(cfg.browser[k], undefined, k);
+  assert.equal(cfg.browser.launchOptions.proxy, undefined);
+  assert.equal(cfg.browser.contextOptions.proxy, undefined);
+  assert.deepEqual(cfg.browser.contextOptions.viewport, { width: 1280, height: 800 });
+  assert.equal(cfg.network.allowedOrigins, undefined);
+  assert.deepEqual(cfg.timeouts, { action: 9000 });
+  // The environment Playwright MCP reads before its command line is neutral for the sweep.
+  assert.equal(server.env.OWN, "1");
+  assert.equal(server.env.PLAYWRIGHT_MCP_ALLOW_UNRESTRICTED_FILE_ACCESS, "false");
+  assert.equal(server.env.PLAYWRIGHT_MCP_EXTENSION, "false");
+  assert.equal(server.env.PLAYWRIGHT_MCP_CDP_ENDPOINT, "");
+  // No owner config at all: the sweep's file still limits WebRTC.
+  fs.writeFileSync(path.join(root, ".autoclaude", "mcp.playwright.json"), JSON.stringify({ mcpServers: { playwright: { command: "npx", args: ["-y", "@playwright/mcp@latest"] } } }));
+  const bareFile = mcpConfigFor(root, "C:/s/b", { name: "b", proxyServer: "http://127.0.0.1:1" });
+  const bare = JSON.parse(fs.readFileSync(bareFile, "utf8")).mcpServers.playwright;
+  assert.deepEqual(JSON.parse(fs.readFileSync(bare.args[bare.args.indexOf("--config") + 1], "utf8")), { browser: { launchOptions: { args: [...SWEEP_CHROMIUM_ARGS] } } });
+});
+
+test("the arbitrary-code Playwright tool is denied to every browser checker", async () => {
+  assert.ok(PLAYWRIGHT_DISALLOWED.includes("mcp__playwright__browser_run_code_unsafe"));
+  assert.ok(PLAYWRIGHT_DISALLOWED.every((t) => t.startsWith("mcp__playwright__")), "only whole Playwright tools, nothing else");
+  assert.deepEqual(playwrightGuardArgs(), ["--disallowedTools", PLAYWRIGHT_DISALLOWED.join(",")]);
+  for (const kind of ["tester", "bugbash"]) {
+    const { run, calls } = fakeRun([ok(good)]);
+    await runBrowserCheck({ kind, root: tmp(), config, step: stepById(parsed, "S1.2"), parsed, env: process.env, attempt: 1, run });
+    const args = calls[0].args;
+    const i = args.indexOf("--disallowedTools");
+    assert.ok(i > 0, `${kind} passes --disallowedTools`);
+    assert.equal(args[i + 1], PLAYWRIGHT_DISALLOWED.join(","));
+    assert.equal(args[args.indexOf("--allowedTools") + 1], ALLOWED_TOOLS.join(","), "the allowance is unchanged; the deny rule wins over it");
+  }
+  // A wrap-up after the turn limit keeps the deny rule.
+  const limit = { ok: false, infra: true, subtype: "error_max_turns", sessionId: "s-1", error: "claude ended with error_max_turns: ", numTurns: 40, durationMs: 1 };
+  const { run, calls } = fakeRun([limit, ok(good)]);
+  await runBrowserCheck({ kind: "tester", root: tmp(), config, step: stepById(parsed, "S1.2"), parsed, env: process.env, attempt: 1, run });
+  assert.ok(calls[1].args.includes("--disallowedTools"));
+});
+
+test("listImages finds screenshots in subfolders, sorted, and nothing else", () => {
+  const dir = tmp();
+  fs.mkdirSync(path.join(dir, "sub"));
+  for (const f of ["b.png", "a.JPG", "notes.txt", "sub/c.webp", "sub/d.json"]) fs.writeFileSync(path.join(dir, f), "x");
+  assert.deepEqual(listImages(dir).map((f) => path.relative(dir, f).replace(/\\/g, "/")), ["a.JPG", "b.png", "sub/c.webp"]);
+  assert.deepEqual(listImages(path.join(dir, "missing")), []);
 });
 
 test("testChanges shows changed and new test files with the diff of tracked ones", async () => {

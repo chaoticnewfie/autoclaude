@@ -144,6 +144,45 @@ test("commitAll still commits a secrets folder deeper in the tree, which may be 
   assert.deepEqual((await sh("git ls-files", root)).split(/\r?\n/), ["a.txt", "src/secrets/vault.js"]);
 });
 
+test("commitAll never stages docs/private/, where security findings go, even staged beforehand or under another case", async () => {
+  const root = await makeRepo();
+  const write = (rel, text) => { fs.mkdirSync(path.dirname(path.join(root, rel)), { recursive: true }); fs.writeFileSync(path.join(root, rel), text); };
+  write("docs/private/SECURITY-FINDINGS.md", "| 2026-10-02 | high | src/db.js:12 | details | fix | open |\n");
+  write("docs/DECISIONS.md", "# DECISIONS\n");
+  write("secrets/db.env", "PGPASSWORD=hunter2\n");
+  write("src/docs/private/page.js", "export const page = 1;\n");
+  // The builder staged everything itself before the gate commits.
+  await sh("git add -A", root);
+  const c = await commitAll(root, "first", opts);
+  assert.equal(c.ok, true, c.stderr);
+  assert.equal(c.committed, true);
+  assert.deepEqual((await sh("git ls-files", root)).split(/\r?\n/), ["docs/DECISIONS.md", "src/docs/private/page.js"], "a docs/private deeper in the tree is ordinary source");
+  assert.equal(await sh("git diff --cached --name-only", root), "");
+  // Only the findings changed: nothing to commit, and the file stays out.
+  write("docs/private/SECURITY-FINDINGS.md", "| 2026-10-03 | low | a.js | more | fix | open |\n");
+  write("Docs/Private/notes.md", "x\n");
+  assert.deepEqual(await commitAll(root, "only findings", opts), { ok: true, committed: false, sha: c.sha, stderr: "" });
+  assert.deepEqual((await sh("git ls-files", root)).split(/\r?\n/), ["docs/DECISIONS.md", "src/docs/private/page.js"]);
+});
+
+test("commitAll works when .gitignore ignores secrets/ and docs/private/ and both exist (an exclude pathspec on them fails git add)", async () => {
+  const root = await makeRepo();
+  const write = (rel, text) => { fs.mkdirSync(path.dirname(path.join(root, rel)), { recursive: true }); fs.writeFileSync(path.join(root, rel), text); };
+  write(".gitignore", "secrets/\ndocs/private/\n");
+  write("secrets/db.env", "PGPASSWORD=hunter2\n");
+  write("docs/private/SECURITY-FINDINGS.md", "| 2026-10-02 | high | a.js | x | y | open |\n");
+  write("a.txt", "a\n");
+  const c = await commitAll(root, "first", opts);
+  assert.equal(c.ok, true, c.stderr);
+  assert.equal(c.committed, true);
+  assert.deepEqual((await sh("git ls-files", root)).split(/\r?\n/), [".gitignore", "a.txt"]);
+  write("a.txt", "b\n");
+  const again = await commitAll(root, "second", opts);
+  assert.equal(again.ok, true, again.stderr);
+  assert.equal(again.committed, true);
+  assert.equal((await status(root, opts)).clean, true);
+});
+
 test("commitAll uses the AutoClaude identity only when no user.name is configured", async () => {
   const root = await makeRepo({ identity: false });
   const globalConfig = path.join(tmpDir(), "gitconfig");

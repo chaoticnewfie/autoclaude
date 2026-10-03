@@ -106,6 +106,15 @@ Write the plan for this, not for a person:
 Tell the owner you are reviewing the project against the rules for an unattended run. Each item
 ends in a question to the owner and a decision you record.
 
+Tell the owner too, once, that two sweeps exist for an existing project, separate from this plan:
+`/autoclaude:security` (the whole codebase, secrets in the git history, packages, configuration
+and live attacks on the running app) and `/autoclaude:optimize` (unused code and packages,
+duplicates, performance, poorly built features, the test suite). Each asks its own questions,
+runs in its own window, writes a gitignored report, and can fix what it finds through a
+generated plan on its own branch (`autoclaude run --plan`), leaving this plan and its run alone.
+Neither needs this plan first. A sweep's report can feed the stall review below; only when the
+owner asks, offer to run one before or after this planning.
+
 **a. Where the AutoClaude plan lives.** Ask, with your recommendation:
 - The project's own plan can be rewritten into the step format: rewrite it in place.
 - It must stay as it is (other people or tools use it, or it is a narrative document) and it is
@@ -316,7 +325,18 @@ running it with the Bash tool: the gate uses a different shell. Then:
 **c. Runtime output and secrets.** Everything the app, the dev server or the tests write inside
 the project (a local database file, uploads, logs, coverage, test reports, build output) is in
 `.gitignore` before the run, or the gate commits it with `git add -A`. So is `secrets/`, where
-the run generates the secrets it needs.
+the run generates the secrets it needs, and `docs/private/`, where the run files the security
+findings it does not fix (`docs.security`, by default `docs/private/SECURITY-FINDINGS.md`).
+
+The findings file. In an older project `docs.security` may name a committed file (init used to
+write `docs/SECURITY-FINDINGS.md`), and a tracked file is pushed with every verified feature,
+findings and all. When `git ls-files -- <the docs.security file>` lists it, ask: "Move it to
+docs/private/ (Recommended): the findings stay on this computer" or "Keep it where it is". A move
+(not `git mv`, which keeps the file tracked): add `docs/private/` to `.gitignore`, run
+`git rm --cached -- <file>`, move the file on disk to `docs/private/SECURITY-FINDINGS.md`, and set
+`"docs": { "security": "docs/private/SECURITY-FINDINGS.md" }` in `autoclaude.config.json`. Tell
+the owner the old content stays in the git history; only rewriting the history removes it, and
+that is their call. Record the answer in `docs/DECISIONS.md`.
 
 **d. Deny rules (`guard.deny`).** Built in already, while a run is active: no push while
 `git.push` is false (when it is true the gate pushes, and the run rules tell the builder not

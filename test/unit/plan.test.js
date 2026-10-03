@@ -200,7 +200,7 @@ Nothing decided yet.
   const expect = (re) => assert.ok(messages.some((m) => re.test(m)), `expected ${re}, got:\n${messages.join("\n")}`);
   expect(/^5 null: template placeholder "Not written yet\." is still in the plan/);
   expect(/^45 null: template placeholder "Nothing decided yet\." is still in the plan/);
-  expect(/S1\.2: unknown tag "fancy" \(use ui, no-ui, security or db\)/);
+  expect(/S1\.2: unknown tag "fancy" \(use ui, no-ui, security, db or pinned\)/);
   expect(/S1\.1: step id S1\.1 comes after S1\.2; step ids must be in ascending order within a phase/);
   expect(/S1\.1: step is tagged both ui and no-ui/);
   expect(/S1\.1: a no-ui step needs a `- Test:` line/);

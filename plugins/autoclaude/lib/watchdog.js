@@ -5,7 +5,9 @@
 // finds the current plugin install and runs its CLI (D42). One pass looks
 // at every project in the machine registry whose run state is "running" and opens a new supervisor
 // window when the recorded supervisor process is gone (killed, crashed, or the user logged off and
-// back on). A healthy run is never touched, and a pass never throws.
+// back on). A healthy run is never touched, and a pass never throws. The same pass brings back a
+// project's sweeps (P10.1): one whose window died while it was running or waiting, and one paused
+// at the weekly limit once that window has reset, when the project allows it.
 //
 // Scheduling, per platform:
 // - Windows: a Task Scheduler entry made with schtasks, every 5 minutes, only while the user is
@@ -23,6 +25,8 @@ import { binDir, homeDir, machinePaths, projectPaths, pluginRoot } from "./paths
 import { loadRegistry } from "./registry.js";
 import { installLauncher } from "./launcher.js";
 import { loadState, STATUS } from "./state.js";
+import { loadConfig } from "./config.js";
+import { readUsage } from "./usage.js";
 import { readText, readJson, writeJsonAtomic, writeFileAtomic, appendLine, ensureDir, removeIfExists } from "./fsatomic.js";
 
 export const TASK_NAME = "AutoClaude watchdog";
@@ -164,10 +168,124 @@ async function checkProject(entry, { env, nowMs, isAlive, launch, minRelaunchGap
   }
 }
 
+// ---- Sweeps (P10.1) ----
+
+// Opens the ac-sweep-<slug> window for one sweep, running `autoclaude sweep-run <id>`, which
+// picks the sweep up where it stopped. Returns what `open` returns.
+export function launchSweep({ root, id, env = process.env, open = openConsoleWindow, logFile = null } = {}) {
+  const dir = path.join(projectPaths(root).runtimeDir, "sweeps", id);
+  ensureDir(dir);
+  return open({
+    title: `ac-sweep-${projectSlug(root)}`,
+    cwd: root,
+    program: process.execPath,
+    args: [cliPath(), "sweep-run", id],
+    logFile: logFile || path.join(dir, "sweep.log"),
+    env
+  });
+}
+
+// <project>/.autoclaude/watchdog-sweeps.json: { <id>: { lastLaunchAt, reason, method, pid,
+// previousPid, weeklyKey } }, the sweep windows this watchdog opened.
+export function sweepWatchdogFile(root) {
+  return path.join(projectPaths(root).runtimeDir, "watchdog-sweeps.json");
+}
+
+function toMs(v) {
+  const ms = typeof v === "number" ? v : typeof v === "string" ? Date.parse(v) : NaN;
+  return Number.isFinite(ms) ? ms : null;
+}
+
+// A sweep the engine paused at the weekly usage limit.
+export function isWeeklyPause(s) {
+  return !!s && s.status === "paused" && (s.pauseReason === "weekly-limit" || s.pauseReason === "weekly" || s.weekly === true || /weekly usage limit/i.test(String(s.error || s.reason || "")));
+}
+
+// When the weekly window that paused the sweep resets, as far as anything says: the reset the
+// sweep recorded, else the usage reading's own reset when it lies in the past, else a reading
+// taken after the pause that is under the threshold (the window reset and a session refreshed it).
+// Returns { passed, key } with key naming that reset, so one reset resumes a sweep once only.
+export function weeklyResetPassed(s, usage, { nowMs, graceMs, pauseAtPct }) {
+  const recorded = toMs(s && s.weeklyResetsAt);
+  if (recorded !== null) return { passed: nowMs > recorded + graceMs, key: `recorded:${recorded}` };
+  const seven = usage && usage.sevenDay;
+  if (!seven) return { passed: false, key: null };
+  const reset = toMs(seven.resetsAt);
+  if (reset !== null && nowMs > reset + graceMs) return { passed: true, key: `reading:${reset}` };
+  const pausedAt = toMs(s && (s.pausedAt || s.updatedAt));
+  const fetched = toMs(usage.fetchedAt);
+  if (typeof seven.pct === "number" && seven.pct < pauseAtPct && fetched !== null && pausedAt !== null && fetched > pausedAt) return { passed: true, key: `fresh:${fetched}` };
+  return { passed: false, key: null };
+}
+
+async function lazy(spec, name) {
+  try { const m = await import(spec); return typeof m[name] === "function" ? m[name] : null; } catch { return null; }
+}
+
+// The sweeps of one project that the watchdog brings back: a sweep whose driver is gone while it
+// was running or waiting (findDeadSweeps, from the sweep engine) is opened again, unless it has
+// shown no sign of life for a day; a sweep paused at the weekly limit is resumed once the weekly
+// window has reset, and only when the project's usage.autoResumeAfterWeeklyReset is on. Throttled
+// like a supervisor. Results: { root, sweep, action, pid } with action sweep-launched,
+// sweep-resumed, sweep-too-soon, sweep-stale, sweep-paused-weekly, sweep-launch-failed or
+// sweep-error. Never throws.
+async function checkSweeps(root, { env, nowMs, isAlive, minRelaunchGapMs, sweeps }) {
+  const out = [];
+  try {
+    const findDead = sweeps.findDeadSweeps || (await lazy("./sweep.js", "findDeadSweeps"));
+    const findActive = sweeps.findActiveSweeps || (await lazy("./sweep.js", "findActiveSweeps"));
+    const launch = sweeps.launchSweep || launchSweep;
+    const file = sweepWatchdogFile(root);
+    let record = {};
+    try { record = readJson(file, {}) || {}; } catch { record = {}; }
+    const open = async (s, action, extra = {}) => {
+      const last = record[s.id] ? toMs(record[s.id].lastLaunchAt) : null;
+      if (last !== null && nowMs - last >= 0 && nowMs - last < minRelaunchGapMs) return { root, sweep: s.id, action: "sweep-too-soon", pid: s.pid || null, lastLaunchAt: new Date(last).toISOString() };
+      let opened;
+      try { opened = await launch({ root, id: s.id, env }); } catch (e) { return { root, sweep: s.id, action: "sweep-launch-failed", pid: s.pid || null, error: message(e) }; }
+      if (opened && opened.ok === false) return { root, sweep: s.id, action: "sweep-launch-failed", pid: s.pid || null, error: message(opened.stderr || "the launcher reported a failure") };
+      record[s.id] = { lastLaunchAt: new Date(nowMs).toISOString(), reason: action, method: (opened && opened.method) || null, pid: positivePid(opened && opened.pid), previousPid: s.pid || null, ...extra };
+      try { writeJsonAtomic(file, record); } catch {}
+      return { root, sweep: s.id, action, pid: s.pid || null, opened: opened || null };
+    };
+    const dead = findDead ? ((await findDead(root, { isAlive, now: nowMs })) || []) : [];
+    for (const s of dead) {
+      if (!s || typeof s.id !== "string" || !["running", "waiting"].includes(s.status)) continue;
+      const seen = toMs(s.heartbeatAt) ?? toMs(s.updatedAt) ?? toMs(s.startedAt);
+      if (seen === null || nowMs - seen > STALE_RUN_MS) { out.push({ root, sweep: s.id, action: "sweep-stale", pid: s.pid || null }); continue; }
+      out.push(await open(s, "sweep-launched"));
+    }
+    const paused = findActive ? ((await findActive(root)) || []).filter(isWeeklyPause) : [];
+    if (paused.length) {
+      let cfg = null;
+      try { cfg = loadConfig(root).config; } catch { cfg = null; }
+      if (cfg && cfg.usage && cfg.usage.autoResumeAfterWeeklyReset) {
+        const read = sweeps.readUsage || readUsage;
+        let usage = null;
+        try { usage = read({ staleAfterMin: 7 * 24 * 60, now: nowMs }); } catch { usage = null; }
+        const graceMs = ((cfg.supervisor && cfg.supervisor.rateLimitGraceMin) || 10) * 60 * 1000;
+        for (const s of paused) {
+          if (typeof s.id !== "string") continue;
+          if (s.pid && isAlive(s.pid)) continue;
+          const w = weeklyResetPassed(s, usage, { nowMs, graceMs, pauseAtPct: cfg.usage.weeklyPauseAtPct });
+          const tried = record[s.id] && record[s.id].weeklyKey;
+          if (!w.passed || (w.key && tried === w.key)) { out.push({ root, sweep: s.id, action: "sweep-paused-weekly", pid: s.pid || null }); continue; }
+          out.push(await open(s, "sweep-resumed", { weeklyKey: w.key }));
+        }
+      }
+    }
+  } catch (e) {
+    out.push({ root, sweep: null, action: "sweep-error", pid: null, error: message(e) });
+  }
+  return out;
+}
+
 // One watchdog pass. `registry` is { projects: [...] } or a plain array of entries ({ root } or a
 // path string). Each result is { root, action, pid } where pid is the recorded supervisor pid
 // (null when none); "launched" results also carry `opened` (what launch returned), "too-soon"
-// results carry `lastLaunchAt`, "launch-failed" and "error" results carry `error`.
+// results carry `lastLaunchAt`, "launch-failed" and "error" results carry `error`. A project's
+// sweeps that need the watchdog add results with `sweep` (the id) and a sweep-* action; `sweeps`
+// replaces the sweep engine's lookups, the sweep launcher and the usage reader in tests.
 export async function watchdogPass({
   registry = loadRegistry(),
   env = process.env,
@@ -175,7 +293,8 @@ export async function watchdogPass({
   isAlive = isPidAlive,
   launch = launchSupervisor,
   minRelaunchGapMs = 4 * 60 * 1000,
-  logFile = null
+  logFile = null,
+  sweeps = {}
 } = {}) {
   const results = [];
   try {
@@ -183,13 +302,22 @@ export async function watchdogPass({
     const at = new Date(nowMs).toISOString();
     const machineLog = logFile || path.join(machinePaths().logsDir, "watchdog.log");
     const entries = Array.isArray(registry) ? registry : registry && Array.isArray(registry.projects) ? registry.projects : [];
+    const log = (r) => {
+      const via = r.opened && r.opened.method ? ` via=${r.opened.method}` : "";
+      const line = `${at} ${r.action} ${r.root || "(no root in registry entry)"}${r.sweep ? ` sweep=${r.sweep}` : ""}${r.pid ? ` pid=${r.pid}` : ""}${via}${r.error ? ` error=${r.error}` : ""}`;
+      logTo(machineLog, line);
+      if (["launched", "launch-failed", "sweep-launched", "sweep-resumed", "sweep-launch-failed"].includes(r.action) && r.root) logTo(path.join(projectPaths(r.root).logsDir, "watchdog.log"), line);
+    };
     for (const entry of entries) {
       const r = await checkProject(entry, { env, nowMs, isAlive, launch, minRelaunchGapMs });
       results.push(r);
-      const via = r.opened && r.opened.method ? ` via=${r.opened.method}` : "";
-      const line = `${at} ${r.action} ${r.root || "(no root in registry entry)"}${r.pid ? ` pid=${r.pid}` : ""}${via}${r.error ? ` error=${r.error}` : ""}`;
-      logTo(machineLog, line);
-      if ((r.action === "launched" || r.action === "launch-failed") && r.root) logTo(path.join(projectPaths(r.root).logsDir, "watchdog.log"), line);
+      log(r);
+      if (r.root && r.action !== "missing" && isDirectory(r.root)) {
+        for (const s of await checkSweeps(r.root, { env, nowMs, isAlive, minRelaunchGapMs, sweeps })) {
+          results.push(s);
+          log(s);
+        }
+      }
     }
   } catch {}
   return results;

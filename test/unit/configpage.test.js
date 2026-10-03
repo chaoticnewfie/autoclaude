@@ -5,9 +5,9 @@ import os from "node:os";
 import path from "node:path";
 import http from "node:http";
 import vm from "node:vm";
-import { openConfigPage, browserCommand, maskSecret, LOCK_REASON, TOKEN_HEADER, FIELDS } from "../../plugins/autoclaude/lib/configpage.js";
+import { openConfigPage, browserCommand, maskSecret, LOCK_REASON, TOKEN_HEADER, FIELDS, SWEEP_FIELD_PATHS, CRITICAL_ALERTS } from "../../plugins/autoclaude/lib/configpage.js";
 import { writeMachineNotify, readMachineNotify } from "../../plugins/autoclaude/lib/notify.js";
-import { DEFAULTS, PROJECT_ONLY_KEYS } from "../../plugins/autoclaude/lib/config.js";
+import { DEFAULTS, PROJECT_ONLY_KEYS, MAX_SWEEP_CONCURRENCY } from "../../plugins/autoclaude/lib/config.js";
 
 const tmpDir = () => fs.mkdtempSync(path.join(os.tmpdir(), "autoclaude-configpage-"));
 // A throwaway Claude config dir: defaults.json, notify.json and the registry never touch the real ones.
@@ -324,6 +324,101 @@ test("alert channel: secrets are masked, Show fetches one, saving validates, and
   assert.equal(r.status, 200);
   assert.deepEqual(readMachineNotify(NOTIFY_FILE), { ntfy_url: ntfyUrl });
   await pg.finish();
+});
+
+// ---------- sweeps (P10.6, D58) ----------
+
+test("the Sweeps group lists every sweep setting with plain help, ahead of Advanced, with the contract's choices", () => {
+  const byPath = new Map(FIELDS.map((f) => [f.path, f]));
+  assert.deepEqual([...SWEEP_FIELD_PATHS], ["sweep.depth", "sweep.after", "sweep.concurrency", "sweep.advisories", "sweep.waitAt5hPct", "sweep.maxTurnsPerAgent", "sweep.timeoutSecPerAgent"]);
+  const sweeps = FIELDS.filter((f) => f.group === "Sweeps");
+  assert.deepEqual(sweeps.map((f) => f.path), [...SWEEP_FIELD_PATHS], "the group holds exactly the sweep settings, in page order");
+  for (const p of SWEEP_FIELD_PATHS) {
+    const f = byPath.get(p);
+    assert.equal(f.section, "run", p);
+    assert.ok(f.label && f.help.length > 60, `${p} has a label and plain help`);
+    assert.ok(!/\b(TODO|TBD)\b/.test(f.help), p);
+  }
+  assert.deepEqual([byPath.get("sweep.depth").type, [...byPath.get("sweep.depth").options].sort()], ["enum", ["quick", "standard", "thorough"]]);
+  assert.equal(byPath.get("sweep.depth").options[0], "thorough", "the recommended depth comes first");
+  assert.deepEqual([byPath.get("sweep.after").type, byPath.get("sweep.after").options], ["enum", ["fix", "plan", "report"]]);
+  assert.equal(byPath.get("sweep.advisories").type, "bool");
+  for (const p of ["sweep.concurrency", "sweep.waitAt5hPct", "sweep.maxTurnsPerAgent", "sweep.timeoutSecPerAgent"]) assert.equal(byPath.get(p).type, "int", p);
+  assert.match(byPath.get("sweep.concurrency").help, new RegExp(`from 1 to ${MAX_SWEEP_CONCURRENCY}\\b`), "the help names the limit the config enforces");
+  assert.match(byPath.get("sweep.advisories").help, /npm/);
+  assert.match(byPath.get("sweep.advisories").help, /OSV/);
+  // The page lists "sweep finished" among the alerts that are always sent.
+  assert.equal(CRITICAL_ALERTS.filter((c) => /sweep finished/i.test(c)).length, 1);
+  assert.match(CRITICAL_ALERTS.find((c) => /sweep finished/i.test(c)), /never the findings/);
+  // Groups render in the order they first appear: Sweeps before Advanced.
+  const order = [...new Set(FIELDS.filter((f) => f.section === "run" && f.group).map((f) => f.group))];
+  assert.deepEqual(order, ["Sweeps", "Advanced"]);
+  // The page's sweep settings are the config's, no more and no fewer.
+  assert.deepEqual(Object.keys(DEFAULTS.sweep || {}).map((k) => `sweep.${k}`).sort(), [...SWEEP_FIELD_PATHS].sort());
+  // Planning moves a committed findings file to a gitignored default (D58).
+  assert.ok(byPath.has("docs.security"));
+});
+
+// Closes the page even when an assertion fails, so a failure never leaves the server up for
+// its idle time (which would hold the whole test file open).
+async function withPage(opts, body) {
+  const pg = await startPage(opts);
+  try { await body(pg); } finally { await pg.finish(); }
+}
+
+test("sweep settings show their values and save to the project and to this computer, validated like the rest", async () => {
+  const root = makeProject();
+  await withPage({ root }, async (pg) => {
+    let s = (await pg.api("GET", "/api/state")).json;
+    assert.deepEqual(
+      SWEEP_FIELD_PATHS.map((p) => s.sources.project[p]),
+      SWEEP_FIELD_PATHS.map(() => "built-in")
+    );
+    assert.equal(s.merged.sweep.depth, "thorough");
+    assert.equal(s.merged.sweep.after, "fix");
+    assert.equal(s.merged.sweep.concurrency, 3);
+    assert.equal(s.merged.sweep.advisories, true);
+    assert.ok(s.fields.some((f) => f.path === "sweep.depth" && f.group === "Sweeps"));
+    // "sweep finished" is listed as always on, and it is not one of the switches.
+    assert.ok(s.alerts.critical.some((c) => /sweep finished/i.test(c)), s.alerts.critical.join("; "));
+    assert.ok(!s.alerts.switchable.includes("sweepFinished"));
+
+    let r = await pg.api("POST", "/api/save", { project: { set: { "sweep.depth": "standard", "sweep.after": "report" } }, computer: { set: { "sweep.concurrency": 2, "sweep.advisories": false } } });
+    assert.equal(r.status, 200, r.text);
+    assert.deepEqual(readProject(root).sweep, { depth: "standard", after: "report" });
+    assert.deepEqual(readDefaults(), { sweep: { concurrency: 2, advisories: false } });
+    s = (await pg.api("GET", "/api/state")).json;
+    assert.deepEqual(["sweep.depth", "sweep.concurrency", "sweep.waitAt5hPct"].map((p) => s.sources.project[p]), ["project", "computer", "built-in"]);
+    assert.deepEqual([s.merged.sweep.depth, s.merged.sweep.concurrency, s.merged.sweep.advisories], ["standard", 2, false]);
+
+    const before = fs.readFileSync(path.join(root, "autoclaude.config.json"), "utf8");
+    for (const [p, v] of [["sweep.depth", "deep"], ["sweep.after", "later"], ["sweep.concurrency", 0], ["sweep.waitAt5hPct", 150], ["sweep.advisories", "yes"]]) {
+      r = await pg.api("POST", "/api/save", { project: { set: { [p]: v } } });
+      assert.equal(r.status, 400, `${p}=${JSON.stringify(v)}: ${r.text}`);
+      assert.ok(r.json.errors.some((e) => e.setting === p), r.text);
+    }
+    assert.equal(fs.readFileSync(path.join(root, "autoclaude.config.json"), "utf8"), before, "nothing written by a refused save");
+
+    r = await pg.api("POST", "/api/save", { project: { reset: ["sweep.depth", "sweep.after"] }, computer: { reset: ["sweep.concurrency", "sweep.advisories"] } });
+    assert.equal(r.status, 200, r.text);
+    assert.equal(readProject(root).sweep, undefined);
+    assert.deepEqual(readDefaults(), {});
+  });
+});
+
+test("sweep settings stay editable during a run: they never change how a step is built or checked", async () => {
+  const root = makeProject();
+  setStatus(root, "running");
+  await withPage({ root }, async (pg) => {
+    const s = (await pg.api("GET", "/api/state")).json;
+    for (const p of SWEEP_FIELD_PATHS) {
+      assert.equal(s.locked.project[p], undefined, p);
+      assert.equal(s.locked.computer[p], undefined, p);
+    }
+    const r = await pg.api("POST", "/api/save", { project: { set: { "sweep.concurrency": 1 } } });
+    assert.equal(r.status, 200, r.text);
+    assert.equal(readProject(root).sweep.concurrency, 1);
+  });
 });
 
 test("computer tasks go through the injected watchdog and status line helpers", async () => {

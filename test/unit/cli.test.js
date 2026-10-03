@@ -6,6 +6,7 @@ import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { runCli, nextDecisionId, outsideFences, maskNtfyUrl, COMMANDS, commandHelp } from "../../plugins/autoclaude/lib/cli.js";
 import { loadState, saveState, defaultState } from "../../plugins/autoclaude/lib/state.js";
+import { loadConfig } from "../../plugins/autoclaude/lib/config.js";
 import { trustKeyFor } from "../../plugins/autoclaude/lib/paths.js";
 
 class Sink { constructor() { this.text = ""; } write(s) { this.text += s; return true; } }
@@ -813,4 +814,392 @@ test("pause, pause --now and resume send the owner's switchable alerts; off by d
   assert.equal(r.code, 0, r.out);
   assert.doesNotMatch(r.out, /AutoClaude paused/, "never printed as an alert");
   assert.match(fs.readFileSync(path.join(root, ".autoclaude", "logs", "notify.log"), "utf8"), /pausedByOwner/);
+});
+
+// ---------- security / optimize sweeps (P10.1, P10.7) ----------
+
+// A git fake for the sweep commands: ls-files returns the given set; the rest succeed cleanly.
+function sweepGit(files) {
+  return {
+    git: async (r, a) => (a[0] === "ls-files" ? { ok: true, stdout: files.join("\0") } : { ok: true, stdout: "" }),
+    head: async () => "abc1234",
+    status: async () => ({ ok: true, clean: true, entries: [] })
+  };
+}
+const SWEEP_DEPS = (files) => ({ git: sweepGit(files), openConsoleWindow: () => ({ method: "windows-console", pid: 1 }), readUsage: () => ({ fiveHour: { pct: 5 }, sevenDay: { pct: 5 } }) });
+// The sweep folders under .autoclaude/sweeps/ (the engine may keep a .gitignore there too).
+const sweepIds = (root) => fs.readdirSync(path.join(root, ".autoclaude", "sweeps")).filter((n) => !n.startsWith("."));
+
+test("security starts a sweep in its own window and writes sweep.json", async () => {
+  const root = project();
+  fs.writeFileSync(path.join(root, "app.js"), "export const a = 1;\n");
+  const configDir = fs.mkdtempSync(path.join(os.tmpdir(), "autoclaude-cfg-"));
+  const r = await run(["security", "--report", "--modules", "code", "--depth", "standard"], root, { configDir, deps: SWEEP_DEPS(["app.js", "PLAN.md"]) });
+  assert.equal(r.code, 0, r.out + r.err);
+  assert.match(r.out, /security sweep .* is running/);
+  // Registered on this computer, so the watchdog can bring the sweep's window back.
+  const reg = JSON.parse(fs.readFileSync(path.join(configDir, "autoclaude", "registry.json"), "utf8"));
+  assert.deepEqual(reg.projects.map((p) => path.resolve(p.root).toLowerCase()), [path.resolve(root).toLowerCase()]);
+  const ids = sweepIds(root);
+  assert.equal(ids.length, 1);
+  const sweep = JSON.parse(fs.readFileSync(path.join(root, ".autoclaude", "sweeps", ids[0], "sweep.json"), "utf8"));
+  assert.equal(sweep.kind, "security");
+  assert.equal(sweep.status, "running");
+  assert.deepEqual(sweep.options.modules, ["code"]);
+});
+
+test("--no-browser: optimize keeps its code-level performance review and only switches the browser off; security drops its live checks", async () => {
+  const root = project();
+  fs.writeFileSync(path.join(root, "app.js"), "export const a = 1;\n");
+  const r = await run(["optimize", "--report", "--no-browser"], root, { deps: SWEEP_DEPS(["app.js", "PLAN.md"]) });
+  assert.equal(r.code, 0, r.out + r.err);
+  const ids = sweepIds(root);
+  const sweep = JSON.parse(fs.readFileSync(path.join(root, ".autoclaude", "sweeps", ids[0], "sweep.json"), "utf8"));
+  assert.ok(sweep.options.modules.includes("performance"), "N+1 queries and slow paths in code are still reviewed");
+  // What reaches the engine: the browser switch, with every module kept for optimize.
+  const seen = [];
+  const startSweep = async (a) => { seen.push({ kind: a.kind, options: a.options }); return { ok: true, id: "x", window: { method: "fake" } }; };
+  for (const kind of ["optimize", "security"]) {
+    const s = await run([kind, "--report", "--no-browser"], root, { deps: { startSweep } });
+    assert.equal(s.code, 0, s.out + s.err);
+  }
+  assert.equal(seen[0].options.browser, false);
+  assert.equal(seen[0].options.modules, undefined, "optimize: all of its modules, performance included");
+  assert.equal(seen[1].options.browser, false);
+  assert.ok(Array.isArray(seen[1].options.modules) && !seen[1].options.modules.includes("live") && seen[1].options.modules.includes("code"));
+  const m = await run(["optimize", "--report", "--no-browser", "--modules", "unused,performance"], root, { deps: { startSweep } });
+  assert.equal(m.code, 0);
+  assert.deepEqual(seen[2].options.modules, ["unused", "performance"]);
+});
+
+test("sweep-status and status list the project's sweeps: a live one by its stage, one whose window is gone as stopped with the command that carries it on", async () => {
+  const root = project();
+  const put = (id, s) => {
+    const dir = path.join(root, ".autoclaude", "sweeps", id);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, "sweep.json"), JSON.stringify({ id, kind: id.endsWith("security") ? "security" : "optimize", startedAt: "2026-10-02T09:05:00Z", ...s }));
+  };
+  const beat = new Date().toISOString();
+  put("20261002-0905-security", { status: "running", stage: "verify", pid: 4242, heartbeatAt: beat, updatedAt: beat, verifySessions: 12 });
+  put("20261002-0800-optimize", { status: "running", stage: "review", pid: 1111, heartbeatAt: beat, updatedAt: beat });
+  const deps = { isPidAlive: (pid) => pid === 4242 };
+  const r = await run(["sweep-status"], root, { deps });
+  assert.equal(r.code, 0, r.out);
+  assert.match(r.out, /20261002-0905-security: running \(stage verify\), 12 verification sessions/);
+  assert.match(r.out, /20261002-0800-optimize: stopped \(window gone\) at stage review\n\s+carry it on with `autoclaude sweep-run 20261002-0800-optimize` \(its window is gone/);
+  const st = await run(["status"], root, { deps });
+  assert.match(st.out, /sweep: security running \(stage verify\)/);
+  assert.match(st.out, /sweep: optimize stopped \(window gone\) at stage review, started .*; carry it on with `autoclaude sweep-run 20261002-0800-optimize`/);
+});
+
+const FIX_PLAN = `# Security fixes 2026-10-02
+
+## Phase 1: Fixes
+
+- [ ] **SEC1.1** Resolve finding SEC-001
+  - Tags: no-ui
+  - Test: test/sec.test.js
+  - Accept: the check passes
+`;
+
+// The run files a refused or failed `run --plan` must leave exactly as they were.
+const runFiles = (root) => ["run-plan.json", "state.json", "state.main.json"].map((f) => {
+  try { return fs.readFileSync(path.join(root, ".autoclaude", f), "utf8"); } catch { return null; }
+});
+
+test("run --plan whose preflight fails, and every run --plan --check, leave no override, no state and no branch behind", async () => {
+  const root = project();
+  fs.writeFileSync(path.join(root, "SECURITY_PLAN.md"), FIX_PLAN);
+  saveState(root, { ...defaultState(), status: "complete", pendingNotes: [{ at: "2026-10-01T00:00:00Z", text: "keep the table" }] });
+  const before = runFiles(root);
+  for (const argv of [["run", "--plan", "SECURITY_PLAN.md", "--check"], ["run", "--plan", "SECURITY_PLAN.md"]]) {
+    const r = await run(argv, root);
+    assert.equal(r.code, 1, argv.join(" "));
+    assert.match(r.out, /preflight for SECURITY_PLAN\.md/);
+    assert.match(r.out, /FAIL trust/);
+    assert.deepEqual(runFiles(root), before, `${argv.join(" ")} changed nothing`);
+  }
+  // So a plain `autoclaude run` afterwards still works the project's own plan.
+  const r = await run(["run", "--check"], root);
+  assert.doesNotMatch(r.out, /SECURITY_PLAN|SEC1\.1/);
+  assert.equal(fs.existsSync(path.join(root, ".autoclaude", "run-plan.json")), false);
+});
+
+test("run --plan refuses a file that does not exist, the project's own plan, and a file outside the project", async () => {
+  const root = project();
+  let r = await run(["run", "--plan", "NOPE.md"], root);
+  assert.equal(r.code, 1);
+  assert.match(r.out, /--plan file not found/);
+  r = await run(["run", "--plan", "PLAN.md"], root);
+  assert.equal(r.code, 1);
+  assert.match(r.out, /not running PLAN\.md: PLAN\.md is the project's own plan, which `autoclaude run` runs/);
+  const outside = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "autoclaude-cli-out-")), "X_PLAN.md");
+  fs.writeFileSync(outside, FIX_PLAN);
+  r = await run(["run", "--plan", outside], root);
+  assert.equal(r.code, 1);
+  assert.match(r.out, /cannot run on that plan: it .* is not inside the project/);
+  // A sweep's plan copied to the root would replace the project's own plan of the same name.
+  fs.mkdirSync(path.join(root, ".autoclaude", "sweeps", "20261002-0905-security"), { recursive: true });
+  fs.writeFileSync(path.join(root, ".autoclaude", "sweeps", "20261002-0905-security", "PLAN.md"), FIX_PLAN);
+  r = await run(["run", "--plan", ".autoclaude/sweeps/20261002-0905-security/PLAN.md"], root);
+  assert.equal(r.code, 1);
+  assert.match(r.out, /PLAN\.md is the project's own plan/);
+  assert.equal(fs.existsSync(path.join(root, ".autoclaude", "run-plan.json")), false);
+});
+
+test("status shows a running sweep and an active run-plan override", async () => {
+  const root = project();
+  const dir = path.join(root, ".autoclaude", "sweeps", "20261002-0905-security");
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, "sweep.json"), JSON.stringify({ id: "20261002-0905-security", kind: "security", status: "running", stage: "review", startedAt: new Date().toISOString() }));
+  const r = await run(["status"], root, { deps: { runPlanOverride: () => "SECURITY_PLAN.md" } });
+  assert.equal(r.code, 0, r.out);
+  assert.match(r.out, /sweep: security running \(stage review\)/);
+  assert.match(r.out, /run plan override: SECURITY_PLAN\.md/);
+});
+
+test("run --plan is refused while another run is running or paused, before any preflight or change", async () => {
+  const root = project();
+  fs.writeFileSync(path.join(root, "SECURITY_PLAN.md"), FIX_PLAN);
+  for (const status of ["running", "paused"]) {
+    saveState(root, { ...defaultState(), status });
+    const before = runFiles(root);
+    const r = await run(["run", "--plan", "SECURITY_PLAN.md"], root);
+    assert.equal(r.code, 1, status);
+    assert.match(r.out, new RegExp(`not running SECURITY_PLAN\\.md: a run of the project's own plan is ${status}`));
+    assert.doesNotMatch(r.out, /preflight/, "the live run's dev server is not touched by a preflight");
+    assert.deepEqual(runFiles(root), before, "the live run's plan and state are never switched");
+  }
+  // A run of that same generated plan, paused: run --plan is refused too, and says how to carry it on.
+  fs.writeFileSync(path.join(root, ".autoclaude", "run-plan.json"), JSON.stringify({ plan: "SECURITY_PLAN.md" }));
+  const r = await run(["run", "--plan", "SECURITY_PLAN.md"], root);
+  assert.equal(r.code, 1);
+  assert.match(r.out, /a run of SECURITY_PLAN\.md is paused in this project.* To carry that run on, `autoclaude run` \(or `autoclaude resume`\)\./);
+});
+
+test("run --plan refuses a plan inside .autoclaude/ with the reason, and status names the project's own plan next to an override", async () => {
+  const root = project();
+  fs.mkdirSync(path.join(root, ".autoclaude"), { recursive: true });
+  fs.writeFileSync(path.join(root, ".autoclaude", "X_PLAN.md"), "# X\n");
+  let r = await run(["run", "--plan", ".autoclaude/X_PLAN.md"], root);
+  assert.equal(r.code, 1);
+  assert.match(r.out, /cannot run on that plan: it .* is inside \.autoclaude\//);
+  fs.writeFileSync(path.join(root, ".autoclaude", "run-plan.json"), JSON.stringify({ plan: "PLAN.md" }));
+  fs.writeFileSync(path.join(root, "SECURITY_PLAN.md"), PLAN.replace("# Demo plan", "# Security fixes"));
+  fs.writeFileSync(path.join(root, ".autoclaude", "run-plan.json"), JSON.stringify({ plan: "SECURITY_PLAN.md" }));
+  r = await run(["status"], root);
+  assert.equal(r.code, 0, r.out);
+  assert.match(r.out, /plan: SECURITY_PLAN\.md/, "the run's plan is the override");
+  assert.match(r.out, /run plan override: SECURITY_PLAN\.md \(`autoclaude run` uses this plan, not PLAN\.md\)/);
+});
+
+test("security --estimate prints the estimate and starts nothing; flags win over the --options file wherever they stand", async () => {
+  const root = project();
+  fs.writeFileSync(path.join(root, "app.js"), "export const a = 1;\n");
+  const opened = [];
+  const deps = { ...SWEEP_DEPS(["app.js", "PLAN.md"]), openConsoleWindow: (o) => { opened.push(o); return { method: "windows-console", pid: 1 }; } };
+  const file = path.join(root, "opts.json");
+  fs.writeFileSync(file, JSON.stringify({ kind: "security", modules: ["code", "secrets"], depth: "thorough", after: "fix", exclude: ["dist/**"], targets: [{ url: "http://127.0.0.1:9000", mode: "readonly" }] }));
+  let r = await run(["security", "--options", file, "--estimate"], root, { deps });
+  assert.equal(r.code, 0, r.out + r.err);
+  assert.match(r.out, /security sweep estimate \(nothing started\)/);
+  assert.match(r.out, /sweep: security, depth thorough, after fix/);
+  assert.equal(opened.length, 0);
+  assert.equal(fs.existsSync(path.join(root, ".autoclaude", "sweeps")) ? sweepIds(root).length : 0, 0, "no sweep folder");
+  // A flag before --options still wins; --url and --exclude add to the file's lists.
+  r = await run(["security", "--depth", "quick", "--options", file, "--exclude", "build/**", "--url", "http://127.0.0.1:9001", "--report"], root, { deps });
+  assert.equal(r.code, 0, r.out + r.err);
+  const ids = sweepIds(root);
+  const sweep = JSON.parse(fs.readFileSync(path.join(root, ".autoclaude", "sweeps", ids[0], "sweep.json"), "utf8"));
+  assert.equal(sweep.options.depth, "quick");
+  assert.equal(sweep.options.after, "report");
+  assert.deepEqual(sweep.options.modules, ["code", "secrets"]);
+  assert.deepEqual(sweep.options.exclude, ["dist/**", "build/**"]);
+  assert.deepEqual(sweep.options.targets.map((t) => t.url), ["http://127.0.0.1:9000", "http://127.0.0.1:9001"]);
+  assert.equal(opened.length, 1);
+});
+
+test("sweep-run on a sweep that already finished in fix mode starts nothing again and says how to start the run", async () => {
+  const root = project();
+  const dir = path.join(root, ".autoclaude", "sweeps", "20261002-0905-security");
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, "sweep.json"), JSON.stringify({ id: "20261002-0905-security", kind: "security", status: "done", stage: "after", startedAt: "2026-10-02T09:05:00Z", options: { kind: "security", after: "fix" }, agents: {}, result: { after: "fix", planFile: "SECURITY_PLAN.md", branch: "autoclaude/security-fixes-2026-10-02", startRun: true, confirmed: 2, reportFile: ".autoclaude/sweeps/20261002-0905-security/report.md" } }));
+  const opened = [];
+  const r = await run(["sweep-run", "20261002-0905-security"], root, { deps: { openConsoleWindow: (o) => { opened.push(o); return { method: "windows-console", pid: 1 }; }, setRunPlan: () => { throw new Error("must not be called"); } } });
+  assert.equal(r.code, 0, r.out + r.err);
+  assert.equal(opened.length, 0);
+  assert.match(r.out, /sweep 20261002-0905-security done \(2 confirmed\)/);
+  assert.match(r.out, /start it with `autoclaude run --plan SECURITY_PLAN\.md`/);
+  assert.match(r.out, /report: \.autoclaude\/sweeps\/20261002-0905-security\/report\.md/);
+});
+
+// ---------- run --plan on a real repository (P10.7) ----------
+
+const SWEEP_ID = "20261002-0905-security";
+
+// A trusted repository whose last security sweep left SECURITY_PLAN.md in its gitignored folder,
+// and an older fix branch of the same name that was never merged.
+function sweptRepo(configDir) {
+  const root = trustedRepo({ plan: PLAN, configDir });
+  const g = (...a) => { const r = spawnSync("git", ["-c", "user.name=t", "-c", "user.email=t@example.com", ...a], { cwd: root, encoding: "utf8" }); assert.equal(r.status, 0, r.stderr); return r.stdout.trim(); };
+  g("branch", "autoclaude/security-fixes-2026-10-02");
+  fs.writeFileSync(path.join(root, "app.js"), "export const a = 2;\n");
+  g("add", "-A");
+  g("commit", "-q", "-m", "work on main after the old fix branch");
+  const dir = path.join(root, ".autoclaude", "sweeps", SWEEP_ID);
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, "SECURITY_PLAN.md"), FIX_PLAN);
+  const main = { ...defaultState(), status: "complete", pendingNotes: [{ at: "2026-10-01T00:00:00Z", text: "keep the table" }], tickedByGate: ["S1.1", "S1.2"] };
+  saveState(root, main);
+  return { root, g, startBranch: g("rev-parse", "--abbrev-ref", "HEAD"), tip: g("rev-parse", "HEAD") };
+}
+
+test("run --plan from a sweep's folder: a new branch from this commit, the plan committed at the root, the project's own state kept aside, then start works that branch", { skip: !gitAvailable() && "git is not installed" }, async () => {
+  const configDir = fs.mkdtempSync(path.join(os.tmpdir(), "autoclaude-cfg-"));
+  const { root, g, startBranch, tip } = sweptRepo(configDir);
+  const source = `.autoclaude/sweeps/${SWEEP_ID}/SECURITY_PLAN.md`;
+  const opened = [];
+  const deps = { openConsoleWindow: (o) => { opened.push(o); return { method: "windows-console", pid: 1 }; } };
+  const before = runFiles(root);
+
+  // --check judges the generated plan and changes nothing.
+  let r = await run(["run", "--plan", source, "--check"], root, { configDir, deps, env: runEnv() });
+  assert.equal(r.code, 0, r.out + r.err);
+  assert.match(r.out, /ok   plan: 1 steps, next SEC1\.1/);
+  assert.match(r.out, /would create a new branch from this commit \(autoclaude\/security-fixes-2026-10-02, or autoclaude\/security-fixes-2026-10-02-2 and on when that exists\), commit the plan there as SECURITY_PLAN\.md, and start the run on it; PLAN\.md and its run state are left alone/);
+  assert.deepEqual(runFiles(root), before);
+  assert.deepEqual([g("rev-parse", "--abbrev-ref", "HEAD"), g("branch", "--list", "autoclaude/security-fixes-2026-10-02-2"), opened.length], [startBranch, "", 0]);
+
+  // A dirty tree fails the preflight: nothing changes.
+  fs.writeFileSync(path.join(root, "stray.txt"), "dirty");
+  r = await run(["run", "--plan", source], root, { configDir, deps, env: runEnv() });
+  assert.equal(r.code, 1);
+  assert.match(r.out, /FAIL git: the working tree has 1 uncommitted change/);
+  assert.deepEqual(runFiles(root), before);
+  assert.equal(g("branch", "--list", "autoclaude/security-fixes-2026-10-02-2"), "");
+  fs.unlinkSync(path.join(root, "stray.txt"));
+
+  r = await run(["run", "--plan", source], root, { configDir, deps, env: runEnv() });
+  assert.equal(r.code, 0, r.out + r.err);
+  assert.equal(opened.length, 1);
+  assert.deepEqual(opened[0].args.slice(-1), ["supervise"]);
+  assert.match(r.out, /running SECURITY_PLAN\.md on the new branch autoclaude\/security-fixes-2026-10-02-2 \(from [^)]+\), where SECURITY_PLAN\.md is committed from \.autoclaude\/sweeps\/20261002-0905-security\/SECURITY_PLAN\.md/);
+  assert.match(r.out, /PLAN\.md and its run state are kept aside, and come back when this run completes\. Its hand-back is HANDOFF-SECURITY\.md\./);
+  // The old branch tip is never reused: the new branch starts at the commit the owner was on.
+  assert.equal(g("rev-parse", "--abbrev-ref", "HEAD"), "autoclaude/security-fixes-2026-10-02-2");
+  assert.equal(g("rev-parse", "HEAD~1"), tip);
+  assert.equal(g("log", "-1", "--format=%s"), `autoclaude: fix plan from sweep ${SWEEP_ID}`);
+  assert.equal(g("show", "HEAD:SECURITY_PLAN.md").replace(/\r\n/g, "\n"), FIX_PLAN.trimEnd());
+  assert.equal(g("status", "--porcelain"), "");
+  // The override, the run's fresh state, and the project's own state kept aside.
+  const over = JSON.parse(fs.readFileSync(path.join(root, ".autoclaude", "run-plan.json"), "utf8"));
+  assert.deepEqual([over.plan, over.branch, over.source, over.sweepId], ["SECURITY_PLAN.md", "autoclaude/security-fixes-2026-10-02-2", source, SWEEP_ID]);
+  const s = loadState(root);
+  assert.deepEqual([s.status, s.pendingNotes, s.tickedByGate], ["idle", [], []]);
+  const kept = JSON.parse(fs.readFileSync(path.join(root, ".autoclaude", "state.main.json"), "utf8"));
+  assert.deepEqual([kept.status, kept.pendingNotes.length, kept.tickedByGate], ["complete", 1, ["S1.1", "S1.2"]]);
+  const cfg = loadConfig(root);
+  assert.deepEqual([cfg.config.plan, cfg.mainPlan], ["SECURITY_PLAN.md", "PLAN.md"]);
+  assert.equal(fs.readFileSync(path.join(root, "PLAN.md"), "utf8"), PLAN, "the project's own plan is untouched");
+
+  // The run's start works on that branch, although an unmerged branch of the plain name exists.
+  const r2 = await run(["start", "--no-preflight"], root, { configDir, env: runEnv(), deps: { recordFootprintStart: async () => ({}), notifyEvent: async () => ({ sent: false }) } });
+  assert.equal(r2.code, 0, r2.out + r2.err);
+  assert.match(r2.out, /running on branch autoclaude\/security-fixes-2026-10-02-2\. First step: SEC1\.1 Resolve finding SEC-001/);
+  assert.equal(g("rev-parse", "--abbrev-ref", "HEAD"), "autoclaude/security-fixes-2026-10-02-2");
+  assert.equal(loadState(root).currentStep, "SEC1.1");
+});
+
+test("run --plan whose window cannot open undoes everything: state, override, plan commit and branch", { skip: !gitAvailable() && "git is not installed" }, async () => {
+  const configDir = fs.mkdtempSync(path.join(os.tmpdir(), "autoclaude-cfg-"));
+  const { root, g, startBranch, tip } = sweptRepo(configDir);
+  const before = runFiles(root);
+  const r = await run(["run", "--plan", `.autoclaude/sweeps/${SWEEP_ID}/SECURITY_PLAN.md`], root, { configDir, deps: { openConsoleWindow: () => ({ method: "tmux", ok: false, stderr: "no server running\n" }) }, env: runEnv() });
+  assert.equal(r.code, 1);
+  assert.match(r.out, /not starting: could not start the tmux session ac-[^:]+: no server running/);
+  assert.match(r.out, /Nothing is left behind: back on .*, the branch autoclaude\/security-fixes-2026-10-02-2 is deleted, and no run plan is set\./);
+  assert.deepEqual(runFiles(root), before);
+  assert.deepEqual([g("rev-parse", "--abbrev-ref", "HEAD"), g("rev-parse", "HEAD"), g("branch", "--list", "autoclaude/security-fixes-2026-10-02-2"), g("status", "--porcelain")], [startBranch, tip, "", ""]);
+  assert.equal(fs.existsSync(path.join(root, "SECURITY_PLAN.md")), false);
+});
+
+test("a plain run hands the project back after a finished run on a generated plan, drops an override no run was started on, and --check only says so", async () => {
+  const root = project();
+  fs.writeFileSync(path.join(root, "SECURITY_PLAN.md"), FIX_PLAN.replace("- [ ]", "- [x]"));
+  const main = { ...defaultState(), status: "complete", pendingNotes: [{ at: "2026-10-01T00:00:00Z", text: "keep the table" }] };
+  fs.mkdirSync(path.join(root, ".autoclaude"), { recursive: true });
+  fs.writeFileSync(path.join(root, ".autoclaude", "state.main.json"), JSON.stringify(main));
+  fs.writeFileSync(path.join(root, ".autoclaude", "run-plan.json"), JSON.stringify({ plan: "SECURITY_PLAN.md", branch: "autoclaude/security-fixes-2026-10-02", since: "2026-10-02T10:00:00.000Z" }));
+  saveState(root, { ...defaultState(), status: "complete", currentStep: null, tickedByGate: ["SEC1.1"] });
+  const before = runFiles(root);
+  let r = await run(["run", "--check"], root, { now: () => new Date("2026-10-02T12:00:00Z") });
+  assert.match(r.out, /`autoclaude run` would first hand the project back to its own plan, PLAN\.md \(the run plan override to SECURITY_PLAN\.md is complete\)/);
+  assert.match(r.out, /preflight/, "then judges the project's own plan, which has steps left");
+  assert.deepEqual(runFiles(root), before, "--check changes nothing");
+
+  r = await run(["run"], root, { now: () => new Date("2026-10-02T12:00:00Z") });
+  assert.match(r.out, /the run on SECURITY_PLAN\.md is complete; the project's own plan and its run state are back/);
+  const s = loadState(root);
+  assert.deepEqual([s.status, s.pendingNotes.length, s.tickedByGate], ["complete", 1, []]);
+  assert.deepEqual({ ...s.lastRunPlan }, { plan: "SECURITY_PLAN.md", branch: "autoclaude/security-fixes-2026-10-02", sweepId: null, since: "2026-10-02T10:00:00.000Z", completedAt: "2026-10-02T12:00:00.000Z" });
+  assert.equal(fs.existsSync(path.join(root, ".autoclaude", "run-plan.json")), false);
+  assert.equal(fs.existsSync(path.join(root, ".autoclaude", "state.main.json")), false);
+  r = await run(["status"], root, { now: () => new Date("2026-10-02T12:30:00Z") });
+  assert.match(r.out, /plan: PLAN\.md/);
+  assert.match(r.out, /last run on a generated plan: SECURITY_PLAN\.md on autoclaude\/security-fixes-2026-10-02, completed 30 min ago; its hand-back is HANDOFF-SECURITY\.md/);
+
+  // An override with no run behind it (idle, nothing kept aside) is dropped; one that run --plan
+  // set up (state kept aside) is kept, and the run says it works that plan.
+  saveState(root, { ...defaultState(), status: "idle" });
+  fs.writeFileSync(path.join(root, ".autoclaude", "run-plan.json"), JSON.stringify({ plan: "SECURITY_PLAN.md" }));
+  r = await run(["run", "--check"], root);
+  assert.match(r.out, /would first hand the project back to its own plan, PLAN\.md \(the run plan override to SECURITY_PLAN\.md has no run behind it\)/);
+  assert.ok(fs.existsSync(path.join(root, ".autoclaude", "run-plan.json")));
+  r = await run(["run"], root);
+  assert.match(r.out, /dropped the run plan override to SECURITY_PLAN\.md: no run on it was started/);
+  assert.equal(fs.existsSync(path.join(root, ".autoclaude", "run-plan.json")), false);
+  fs.writeFileSync(path.join(root, ".autoclaude", "run-plan.json"), JSON.stringify({ plan: "SECURITY_PLAN.md" }));
+  fs.writeFileSync(path.join(root, ".autoclaude", "state.main.json"), JSON.stringify(main));
+  fs.writeFileSync(path.join(root, "SECURITY_PLAN.md"), FIX_PLAN);
+  r = await run(["run"], root);
+  assert.match(r.out, /run plan override: this run works SECURITY_PLAN\.md \(set by `autoclaude run --plan`\); the project's own plan, PLAN\.md, and its state come back when it completes/);
+  assert.ok(fs.existsSync(path.join(root, ".autoclaude", "run-plan.json")));
+  // A state kept aside whose override is gone (deleted by hand) goes back on the next run.
+  fs.unlinkSync(path.join(root, ".autoclaude", "run-plan.json"));
+  r = await run(["run"], root);
+  assert.match(r.out, /the project's own run state, kept aside for a run on a generated plan, is back/);
+  assert.equal(loadState(root).pendingNotes.length, 1);
+  assert.equal(fs.existsSync(path.join(root, ".autoclaude", "state.main.json")), false);
+});
+
+test("sweep-run: fix mode hands the plan in the sweep's folder to run --plan; plan mode says where the plan is and how to run it", async () => {
+  const root = project();
+  const planRel = `.autoclaude/sweeps/${SWEEP_ID}/SECURITY_PLAN.md`;
+  fs.mkdirSync(path.join(root, ".autoclaude", "sweeps", SWEEP_ID), { recursive: true });
+  fs.writeFileSync(path.join(root, planRel), FIX_PLAN);
+  const alerts = [];
+  const notifyEvent = async (at, config, event, message) => { alerts.push([event, message.message]); return { sent: false }; };
+  // Fix mode: the sweep asks for the run; run --plan judges the sweep folder's plan (and, untrusted
+  // here, stops at the preflight, changing nothing), and the owner is told the run did not start.
+  let r = await run(["sweep-run", SWEEP_ID], root, { deps: { notifyEvent, runSweep: async () => ({ ok: true, id: SWEEP_ID, status: "done", after: "fix", planFile: planRel, startRun: true, confirmed: 2 }) } });
+  assert.equal(r.code, 1);
+  assert.match(r.out, /starting the fix run on \.autoclaude\/sweeps\/20261002-0905-security\/SECURITY_PLAN\.md/);
+  assert.match(r.out, /preflight for \.autoclaude\/sweeps\/20261002-0905-security\/SECURITY_PLAN\.md/);
+  assert.equal(fs.existsSync(path.join(root, ".autoclaude", "run-plan.json")), false);
+  assert.equal(fs.existsSync(path.join(root, "SECURITY_PLAN.md")), false);
+  assert.deepEqual(alerts.map((a) => a[0]), ["sweepFixNotStarted"]);
+  assert.match(alerts[0][1], /The fix plan is \.autoclaude\/sweeps\/20261002-0905-security\/SECURITY_PLAN\.md, but `autoclaude run --plan .*` stopped and changed nothing/);
+  // Plan mode (or a refused fix): where the plan is, and the command that runs it.
+  r = await run(["sweep-run", SWEEP_ID], root, { deps: { notifyEvent, runSweep: async () => ({ ok: true, id: SWEEP_ID, status: "done", after: "plan", planFile: planRel, fixRefused: "a run is running; start the fix run when it is idle", confirmed: 2 }) } });
+  assert.equal(r.code, 0, r.out + r.err);
+  assert.match(r.out, /fix plan written: \.autoclaude\/sweeps\/20261002-0905-security\/SECURITY_PLAN\.md \(fix right away was refused: a run is running/);
+  assert.match(r.out, /then `autoclaude run --plan \.autoclaude\/sweeps\/20261002-0905-security\/SECURITY_PLAN\.md` makes a new branch from the current commit, commits the plan there and starts the run; PLAN\.md and its run state are left alone/);
+  // A check the green-baseline test could not judge is named in the window.
+  r = await run(["sweep-run", SWEEP_ID], root, { deps: { notifyEvent, runSweep: async () => ({ ok: true, id: SWEEP_ID, status: "done", after: "plan", planFile: planRel, confirmed: 2, checksNote: "e2e not judged before the fix run: it needs the dev server, which is not configured" }) } });
+  assert.match(r.out, /note: e2e not judged before the fix run: it needs the dev server, which is not configured/);
+  // A weekly pause says how it carries on.
+  r = await run(["sweep-run", SWEEP_ID], root, { deps: { runSweep: async () => ({ ok: true, id: SWEEP_ID, status: "paused", reason: "weekly usage limit reached (91%)" }) } });
+  assert.equal(r.code, 0);
+  assert.match(r.out, /paused: weekly usage limit reached \(91%\)\. Rerun `autoclaude sweep-run 20261002-0905-security`/);
+  assert.match(r.out, /usage\.autoResumeAfterWeeklyReset/);
 });

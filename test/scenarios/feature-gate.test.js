@@ -107,7 +107,7 @@ function hangingAt(kind, pid = DEAD_PID) {
 
 // The builder's side of a fix-up pass: every open findings row gets an outcome.
 function settleFindings(root, status = "fixed") {
-  for (const rel of ["docs/BLOCKERS.md", "docs/SECURITY-FINDINGS.md"]) {
+  for (const rel of ["docs/BLOCKERS.md", "docs/private/SECURITY-FINDINGS.md"]) {
     const file = path.join(root, rel);
     if (fs.existsSync(file)) fs.writeFileSync(file, fs.readFileSync(file, "utf8").replace(/\| open \|$/gm, `| ${status} |`));
   }

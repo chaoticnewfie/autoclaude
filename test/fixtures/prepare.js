@@ -59,7 +59,8 @@ export function prepareFixture({ dest, plan = "happy", git = true, checks = null
   fs.mkdirSync(path.join(dest, "docs"), { recursive: true });
   fs.writeFileSync(path.join(dest, "docs", "DECISIONS.md"), "# DECISIONS\n");
   fs.writeFileSync(path.join(dest, "CONTINUE_HERE.md"), "# CONTINUE_HERE\n\nFresh fixture.\n");
-  fs.writeFileSync(path.join(dest, ".gitignore"), ".autoclaude/\nnode_modules/\n");
+  // docs/private/ as `autoclaude init` writes it: the security findings file stays out of git.
+  fs.writeFileSync(path.join(dest, ".gitignore"), ".autoclaude/\nnode_modules/\ndocs/private/\n");
   if (git) {
     const run = (args) => {
       const r = spawnSync("git", args, { cwd: dest, encoding: "utf8", env: gitEnv(env) });

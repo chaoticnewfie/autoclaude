@@ -1,8 +1,12 @@
 // PreToolUse hook: while a run is active, keep the builder inside the rules (PLAN.md 4.2, 4.7).
 //   - AskUserQuestion is denied with the section 4.5 guidance (no human is there).
-//   - Edits to the plan, autoclaude.config.json and .autoclaude/ are denied, and so are edits to
-//     this computer's settings the run reads (the AutoClaude defaults and notify files, Claude
-//     Code's user settings): the builder must not switch off what verifies it.
+//   - Edits to the plan, autoclaude.config.json, autoclaude.accepted.json (the owner's accepted
+//     risks) and .autoclaude/ (the sweep reports included) are denied, and so are edits to this
+//     computer's settings the run reads (the AutoClaude defaults and notify files, Claude Code's
+//     user settings): the builder must not switch off what verifies it. A run on a generated
+//     plan (`run --plan`, P10.7) protects that plan and the project's own plan alike. While the
+//     current step is a change under pinned tests (fixplan.isPinnedStep, P10.9), any write
+//     under the characterization test folder is denied as well.
 //   - Bash and PowerShell commands that would write, delete or move those files, push while
 //     pushing is off, force-push or delete remote refs, change git aliases or push settings,
 //     hard-reset, commit or tag, or delete recursively outside the project and the temp folder
@@ -21,7 +25,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { findProjectRoot, claudeConfigDir } from "../lib/paths.js";
 import { loadState, STATUS } from "../lib/state.js";
-import { loadConfig } from "../lib/config.js";
+import { loadConfig, ACCEPTED_FILE, RUN_PLAN_ERROR_PATH } from "../lib/config.js";
 import { recordDenial } from "../lib/denials.js";
 import { notify } from "../lib/notify.js";
 import { isBuilderSession } from "../lib/builder.js";
@@ -34,17 +38,22 @@ function deny(reason) {
 // Windows; the PowerShell tool exists there too and gets exactly the same rules.
 const SHELL_TOOLS = { Bash: "bash", PowerShell: "powershell" };
 
-// ctx: { root, config } plus, for tests, tempDirs (the temp folders; default: this machine's),
-// configDir (the Claude config folder; default: this machine's, CLAUDE_CONFIG_DIR first as in
-// lib/paths.js) and readFile (how package.json is read for `npm run`).
-export function decide(input, { root, config, tempDirs, configDir, readFile }) {
+// ctx: { root, config } plus mainPlan (the project's own plan when the run works on another one,
+// loadConfig's mainPlan), pinned ({ step, dir, pinStep } while the current step must leave the
+// tests in `dir` alone, else null) and, for tests, tempDirs (the temp folders; default: this
+// machine's), configDir (the Claude config folder; default: this machine's, CLAUDE_CONFIG_DIR
+// first as in lib/paths.js) and readFile (how package.json is read for `npm run`).
+export function decide(input, { root, config, mainPlan, pinned = null, tempDirs, configDir, readFile }) {
   const tool = input.tool_name || "";
   const ti = input.tool_input || {};
   const cli = "autoclaude";
   if (tool === "AskUserQuestion") {
     return `No human is available during an AutoClaude run. Decide it yourself: check the plan's Constraints & decisions and ${config.docs.decisions} first, then run \`${cli} decide "<the question and the options>"\` in the foreground (Bash timeout 600000) and wait for its JSON answer; apply a routine answer and log it in ${config.docs.decisions} as D-###. Work the plan allows is routine. Only a critical question (something the plan does not cover that only the owner can decide, or a secret this machine cannot generate) stops the run: \`${cli} blocked <step> "<question with options>"\`.`;
   }
-  const protectedRel = [config.plan, "autoclaude.config.json"].map((f) => path.resolve(root, f).toLowerCase());
+  // The project's own plan, when this run works on a generated one (P10.7): read-only as well.
+  const otherPlan = typeof mainPlan === "string" && mainPlan.trim() && path.resolve(root, mainPlan).toLowerCase() !== path.resolve(root, config.plan).toLowerCase() ? mainPlan : null;
+  const protectedRel = [config.plan, otherPlan, "autoclaude.config.json"].filter(Boolean).map((f) => path.resolve(root, f).toLowerCase());
+  const acceptedAbs = path.resolve(root, ACCEPTED_FILE).toLowerCase();
   const runtimeDir = path.resolve(root, ".autoclaude").toLowerCase();
   const isProtected = (file) => {
     if (!file) return false;
@@ -53,17 +62,35 @@ export function decide(input, { root, config, tempDirs, configDir, readFile }) {
   };
   const P = pathApi(root);
   const cfgDir = configDir || claudeConfigDir();
+  const pin = pinnedTests(root, pinned);
   if (["Edit", "Write", "MultiEdit", "NotebookEdit"].includes(tool)) {
     const file = ti.file_path || ti.notebook_path;
-    if (isProtected(file)) return `${path.basename(String(file))} is managed by the gate during a run. Only the gate ticks ${config.plan}; the config and .autoclaude/ are read-only for you. Continue the current step instead.`;
+    if (file && path.resolve(root, String(file)).toLowerCase() === acceptedAbs) return `${ACCEPTED_FILE} is the owner's list of accepted risks and false alarms; only the owner changes it, never a run. Fix the finding the step names instead.`;
+    if (file && pin) {
+      const abs = path.resolve(root, String(file)).toLowerCase();
+      if (abs === pin.abs.toLowerCase() || abs.startsWith(pin.abs.toLowerCase() + path.sep)) return pin.message;
+    }
+    if (isProtected(file)) return `${path.basename(String(file))} is managed by the gate during a run. Only the gate ticks ${config.plan}${otherPlan ? `, and ${otherPlan} (the project's own plan) is left alone while this run works on ${config.plan}` : ""}; the config and .autoclaude/ are read-only for you. Continue the current step instead.`;
     if (file) {
       const abs = P.resolve(root, String(file));
       if (machineFiles(P, cfgDir).some((m) => sameFile(P, abs, m.abs))) return `${P.basename(abs)} holds this computer's AutoClaude or Claude Code settings, which this run uses; it is read-only during a run. Continue the current step instead.`;
     }
     return null;
   }
-  if (SHELL_TOOLS[tool]) return decideShell(String(ti.command || ""), SHELL_TOOLS[tool], { root, config, cwd: input.cwd, cli, tempDirs, cfgDir, readFile });
+  if (SHELL_TOOLS[tool]) return decideShell(String(ti.command || ""), SHELL_TOOLS[tool], { root, config, otherPlan, pin, cwd: input.cwd, cli, tempDirs, cfgDir, readFile });
   return null;
+}
+
+// The pinned tests' folder as the guard checks it: { abs, rel, message }, or null when the
+// current step is not pinned (or names no folder inside the project).
+function pinnedTests(root, pinned) {
+  if (!pinned || typeof pinned.dir !== "string" || !pinned.dir.trim()) return null;
+  const rel = pinned.dir.trim().replace(/\\/g, "/").replace(/^\.\//, "").replace(/\/+$/, "");
+  const abs = path.resolve(root, rel);
+  const r = path.relative(path.resolve(root), abs);
+  if (!r || r.startsWith("..") || path.isAbsolute(r)) return null;
+  const by = pinned.pinStep ? `the pin step ${pinned.pinStep} wrote` : "an earlier step wrote";
+  return { abs, rel, message: `${rel}/ holds the characterization tests ${by}. Step ${pinned.step || "?"} changes the code under them and must pass them as they are: they are read-only during this step. Change the code, not the pinned tests.` };
 }
 
 // This computer's settings a run reads (D49), in the Claude config folder: the AutoClaude
@@ -86,7 +113,7 @@ function sameFile(P, a, b) {
   return key(a) === key(b) || key(real(P, a)) === key(real(P, b));
 }
 
-function decideShell(cmd, shell, { root, config, cwd, cli, tempDirs, cfgDir, readFile }) {
+function decideShell(cmd, shell, { root, config, otherPlan = null, pin = null, cwd, cli, tempDirs, cfgDir, readFile }) {
   const P = pathApi(root);
   const base = cwd && P.isAbsolute(String(cwd)) ? String(cwd) : root;
 
@@ -109,8 +136,11 @@ function decideShell(cmd, shell, { root, config, cwd, cli, tempDirs, cfgDir, rea
   const machine = machineFiles(P, cfgDir);
   const messages = {
     plan: `Shell writes to ${config.plan} are not allowed; only the gate edits it.`,
+    mainPlan: `Shell writes to ${otherPlan} are not allowed; it is the project's own plan, left alone while this run works on ${config.plan}.`,
+    accepted: `${ACCEPTED_FILE} is the owner's list of accepted risks and false alarms; it is read-only during a run.`,
     config: "autoclaude.config.json is read-only during a run.",
     runtime: ".autoclaude/ is the gate's state; do not write to it.",
+    pinned: pin ? pin.message : "",
     machine: "This computer's AutoClaude and Claude Code settings (autoclaude/defaults.json, autoclaude/notify.json and settings.json in the Claude config folder) are read-only during a run."
   };
 
@@ -155,8 +185,11 @@ function decideShell(cmd, shell, { root, config, cwd, cli, tempDirs, cfgDir, rea
 
   const guarded = [
     { kind: "plan", abs: P.resolve(root, config.plan), name: P.basename(config.plan) },
+    ...(otherPlan ? [{ kind: "mainPlan", abs: P.resolve(root, otherPlan), name: P.basename(otherPlan) }] : []),
     { kind: "config", abs: P.resolve(root, "autoclaude.config.json"), name: "autoclaude.config.json" },
-    { kind: "runtime", abs: runtime, name: ".autoclaude" }
+    { kind: "accepted", abs: P.resolve(root, ACCEPTED_FILE), name: ACCEPTED_FILE },
+    { kind: "runtime", abs: runtime, name: ".autoclaude", dir: true },
+    ...(pin ? [{ kind: "pinned", abs: P.resolve(root, pin.rel), name: pin.rel, dir: true }] : [])
   ];
   for (const w of fx.writes) {
     const abs = where(w);
@@ -170,9 +203,11 @@ function decideShell(cmd, shell, { root, config, cwd, cli, tempDirs, cfgDir, rea
     if (hit) return messages[hit.kind];
     if (machine.some((m) => touches(P, root, abs, { kind: "machine", abs: m.abs }, w.tree, same) || sameFile(P, abs, m.abs))) return messages.machine;
   }
-  // Code run from the command line (node -e, python -c) that writes files and names a protected one.
+  // Code run from the command line (node -e, python -c) that writes files and names a protected
+  // one (a folder's name with either kind of slash).
+  const flat = (s) => String(s).replace(/\\+/g, "/").toLowerCase();
   for (const text of fx.code) {
-    const hit = guarded.find((g) => text.toLowerCase().includes(g.name.toLowerCase()));
+    const hit = guarded.find((g) => text.toLowerCase().includes(g.name.toLowerCase()) || (g.dir && flat(text).includes(flat(g.name))));
     if (hit) return messages[hit.kind];
     if (machine.some((m) => m.code(text))) return messages.machine;
   }
@@ -1417,18 +1452,20 @@ function globRegex(P, pattern) {
 }
 
 // Does writing (or, with tree, deleting or moving) `abs` touch the guarded path g? Anything
-// inside .autoclaude counts; a wildcard counts when it could match.
+// inside a guarded folder (.autoclaude, the pinned tests while they are pinned) counts; a
+// wildcard counts when it could match.
 function touches(P, root, abs, g, tree, same) {
+  const folder = g.dir || g.kind === "runtime";
   const wild = abs.search(/[*?]/);
   if (wild < 0) {
     if (same(abs, g.abs)) return true;
-    if (g.kind === "runtime" && contains(P, g.abs, abs)) return true;
+    if (folder && contains(P, g.abs, abs)) return true;
     return !!tree && contains(P, abs, g.abs);
   }
   // A wildcard: the fixed folder in front of it, then the pattern against the guarded path and,
   // for a delete or a move, against every folder between the root and it.
   const fixedDir = P.dirname(abs.slice(0, wild) + "x");
-  if (g.kind === "runtime" && (same(fixedDir, g.abs) || contains(P, g.abs, fixedDir))) return true;
+  if (folder && (same(fixedDir, g.abs) || contains(P, g.abs, fixedDir))) return true;
   const re = globRegex(P, abs);
   const candidates = [g.abs];
   if (tree) for (let d = P.dirname(g.abs); contains(P, root, d); d = P.dirname(d)) candidates.push(d);
@@ -1447,14 +1484,32 @@ async function main() {
   if (state.status !== STATUS.running) return;
   if (!isBuilderSession(root)) return; // a person's own session in the project: not ours to guard
   const cfg = loadConfig(root);
-  if (cfg.errors.length) return;
-  const reason = decide(input, { root, config: cfg.config });
+  // A broken run-plan override leaves config.plan at the project's own plan: still guard that.
+  if (cfg.errors.some((e) => e.path !== RUN_PLAN_ERROR_PATH)) return;
+  const reason = decide(input, { root, config: cfg.config, mainPlan: cfg.mainPlan, pinned: await pinnedStep(root, cfg.config, state) });
   if (reason) {
     deny(reason);
     const r = recordDenial(root, { kind: "guard", tool: input.tool_name, detail: JSON.stringify(input.tool_input || {}), reason });
     if (r.notify) {
       await notify({ title: `AutoClaude: ${r.count} denials in the last hour`, message: `The run on ${state.currentStep || "?"} keeps trying things the rules forbid (latest: ${input.tool_name}). It may be stuck. Look at .autoclaude/logs/denials.log.`, priority: "high" }, { logFile: path.join(root, ".autoclaude", "logs", "notify.log"), stdout: { write() { return true; } } });
     }
+  }
+}
+
+// The current step, when it is a change under pinned tests: { step, dir, pinStep } for decide,
+// else null. The plan libraries load only here, during a run, so a session with no run never
+// pays for them; anything unreadable leaves the step unpinned (its Accept lines still say the
+// pinned tests are unchanged, and the gate checks them).
+export async function pinnedStep(root, config, state) {
+  if (!state || !state.currentStep) return null;
+  try {
+    const { parsePlan, stepById } = await import("../lib/plan.js");
+    const { isPinnedStep, CHARACTERIZATION_DIR } = await import("../lib/fixplan.js");
+    const step = stepById(parsePlan(fs.readFileSync(path.join(root, config.plan), "utf8")), state.currentStep);
+    if (!step || !isPinnedStep(step)) return null;
+    return { step: step.id, dir: CHARACTERIZATION_DIR, pinStep: step.depends[0] || null };
+  } catch {
+    return null;
   }
 }
 

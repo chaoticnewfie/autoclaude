@@ -22,7 +22,7 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { findProjectRoot, projectPaths, pluginRoot } from "./paths.js";
 import { isBuilderSession, liveSupervisorPid } from "./builder.js";
-import { loadState, saveState, updateState, STATUS } from "./state.js";
+import { loadState, saveState, updateState, STATUS, finishRunPlan } from "./state.js";
 import { loadConfig, MAX_GATE_TIMEOUT_SEC } from "./config.js";
 import { parsePlan, stepById, nextStep, firstUnfinished, isPhaseEnd, isFeatureEnd, isFinished, setMarker, stepText, progress, planSlug, reopenUnverified, MARKERS } from "./plan.js";
 import { readText, writeFileAtomic, writeJsonAtomic, appendLine, ensureDir } from "./fsatomic.js";
@@ -1218,10 +1218,10 @@ async function committedAt(g, rec, step) {
 }
 
 // The tree a commit of the working tree would hold now: staged the way git.commitAll stages it
-// (everything but secrets/), then written with write-tree. A verified close records it, so a
-// close finished by a later stop can tell whether the files are still the verified ones. Staged
-// in a copy of the index (GIT_INDEX_FILE), so the real one is left as it was. null when git
-// cannot say.
+// (git.stageForCommit: everything but secrets/ and docs/private/), then written with write-tree.
+// A verified close records it, so a close finished by a later stop can tell whether the files are
+// still the verified ones. Staged in a copy of the index (GIT_INDEX_FILE), so the real one is left
+// as it was. null when git cannot say.
 async function stagedTree(g) {
   const where = await git.git(g.root, ["rev-parse", "--git-path", "index"], { env: g.env });
   if (!where.ok || !where.stdout.trim()) return null;
@@ -1230,10 +1230,8 @@ async function stagedTree(g) {
   try {
     if (fs.existsSync(real)) fs.copyFileSync(real, copy);
     const opts = { env: { ...g.env, GIT_INDEX_FILE: copy } };
-    const add = await git.git(g.root, ["add", "-A", "--", ".", git.SECRETS_PATHSPEC], opts);
-    if (!add.ok) return null;
-    const unstage = await git.git(g.root, ["reset", "-q", "--", ":(top,icase)secrets"], opts);
-    if (!unstage.ok) return null;
+    const staged = await git.stageForCommit(g.root, opts);
+    if (!staged.ok) return null;
     const r = await git.git(g.root, ["write-tree"], opts);
     return r.ok ? r.stdout.trim() || null : null;
   } catch {
@@ -1460,7 +1458,8 @@ async function finishPlan(g, state, parsed) {
 }
 
 const HANDBACK_SUBJECT = "autoclaude: hand-back";
-const HANDBACK_MESSAGE = `${HANDBACK_SUBJECT}\n\nHANDOFF.md, written when the plan completed: what was built, what is left for the owner, secrets, open findings, decisions for review, push state and the machine footprint.\n`;
+// The body names the file: HANDOFF.md, or HANDOFF-<NAME>.md for a run on a generated plan.
+const handbackMessage = (file) => `${HANDBACK_SUBJECT}\n\n${file || "HANDOFF.md"}, written when the plan completed: what was built, what is left for the owner, secrets, open findings, decisions for review, push state and the machine footprint.\n`;
 
 // Plan complete: clean up the run's machine footprint, write the hand-back (P8.5), commit and
 // push it, send the completion alert, and only then mark the run complete. Each stage records
@@ -1525,7 +1524,7 @@ async function complete(g, state, parsed) {
         logLine(root, `the hand-back was committed (${head.slice(0, 7)}) before its gate was cut off; carrying on from that commit`);
       } else {
         record({ headBefore: head });
-        const r = await git.commitAll(root, HANDBACK_MESSAGE, { env });
+        const r = await git.commitAll(root, handbackMessage(path.basename(handoff.path)), { env });
         if (!r.ok) logLine(root, `hand-back commit failed: ${String(r.stderr || "").trim()}`);
         else pushWanted = !!(r.committed && config.git.push);
       }
@@ -1560,5 +1559,15 @@ async function complete(g, state, parsed) {
   save(g, done);
   ev("complete", { done: p.done, total: p.total, mins });
   logLine(root, `run complete: ${p.done}/${p.total}`);
+  // A run on a generated plan (`autoclaude run --plan`, P10.7) hands the project back to its own
+  // plan and run state once it is complete. A gate cut off before this leaves it to the next plain
+  // `autoclaude run`, which does the same.
+  const handBack = "finishRunPlan" in deps ? deps.finishRunPlan : finishRunPlan;
+  if (handBack) {
+    try {
+      const r = handBack(root, { completed: true, now: new Date(nowMs(deps)) });
+      if (r && r.plan) logLine(root, `the run on ${r.plan} is complete; the project's own plan${r.restored ? " and its run state are" : " is"} back`);
+    } catch (e) { logLine(root, `could not hand the project back to its own plan: ${e && e.message ? e.message : e}`); }
+  }
   return allow(events);
 }

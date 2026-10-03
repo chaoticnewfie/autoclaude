@@ -3,10 +3,15 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   DEFAULTS, mergeConfig, validateConfig, loadConfig, formatConfigErrors, PROJECT_ONLY_KEYS, SAFE_LIVE_KEYS, isSafeLiveKey,
-  machineDefaultsFile, loadLayers, writeProjectConfig, writeMachineDefaults, readMachineDefaults, configTemplate, EFFORTS
+  machineDefaultsFile, loadLayers, writeProjectConfig, writeMachineDefaults, readMachineDefaults, configTemplate, EFFORTS,
+  setRunPlan, clearRunPlan, runPlanOverride, readRunPlan, runPlanFile, RUN_PLAN_ERROR_PATH, ACCEPTED_FILE, resolveRunPlanSource
 } from "../../plugins/autoclaude/lib/config.js";
+import { runCli } from "../../plugins/autoclaude/lib/cli.js";
+import { collectHandback } from "../../plugins/autoclaude/lib/summary.js";
+import { defaultState } from "../../plugins/autoclaude/lib/state.js";
 
 const tmpDir = () => fs.mkdtempSync(path.join(os.tmpdir(), "autoclaude-config-"));
 // Never read or write the real computer's defaults: every test here runs in a throwaway config dir.
@@ -239,4 +244,171 @@ test("SAFE_LIVE_KEYS: alerts, usage, review pauses, supervisor timings, pushes a
 test("checkers.effort: null or low to max; ultracode and other words are refused (D55)", () => {
   for (const e of [null, "low", "medium", "high", "xhigh", "max"]) assert.deepEqual(validateConfig(mergeConfig({ checkers: { effort: e } })), [], String(e));
   for (const e of ["ultracode", "turbo", 3]) assert.equal(validateConfig(mergeConfig({ checkers: { effort: e } }))[0].path, "checkers.effort", String(e));
+});
+
+// ---------- Phase 10: sweeps, the findings file, the run-plan override (D58) ----------
+
+test("the sweep defaults: 3 sessions at once, thorough, advisories on, wait at 90% of the 5-hour window, fix right away", () => {
+  assert.deepEqual(mergeConfig({}).sweep, { concurrency: 3, depth: "thorough", advisories: true, waitAt5hPct: 90, maxTurnsPerAgent: 40, timeoutSecPerAgent: 900, after: "fix" });
+  assert.equal(mergeConfig({ sweep: { depth: "standard" } }).sweep.concurrency, 3, "a partial sweep block keeps the other defaults");
+  assert.equal(PROJECT_ONLY_KEYS.includes("sweep"), false, "a computer may set its own sweep defaults");
+  // A run never reads them, and a running sweep has its options in its own sweep.json.
+  for (const k of ["sweep", "sweep.concurrency", "sweep.after", "sweep.depth", "sweep.advisories"]) assert.equal(isSafeLiveKey(k), true, k);
+});
+
+test("sweep validation: concurrency 1 to 8, depth and after from their lists, waitAt5hPct 1 to 100", () => {
+  for (const ok of [{ concurrency: 1 }, { concurrency: 8 }, { depth: "standard" }, { depth: "quick" }, { after: "report" }, { after: "plan" }, { waitAt5hPct: 1 }, { waitAt5hPct: 100 }, { advisories: false }]) {
+    assert.deepEqual(validateConfig(mergeConfig({ sweep: ok })), [], JSON.stringify(ok));
+  }
+  const bad = [
+    [{ concurrency: 0 }, "sweep.concurrency", /whole number from 1 to 8/], [{ concurrency: 9 }, "sweep.concurrency"], [{ concurrency: 2.5 }, "sweep.concurrency"], [{ concurrency: "3" }, "sweep.concurrency"],
+    [{ depth: "deep" }, "sweep.depth", /thorough, standard, quick/], [{ after: "now" }, "sweep.after", /report, plan, fix/],
+    [{ waitAt5hPct: 0 }, "sweep.waitAt5hPct", /1 to 100/], [{ waitAt5hPct: 101 }, "sweep.waitAt5hPct"], [{ advisories: "yes" }, "sweep.advisories"],
+    [{ maxTurnsPerAgent: 0 }, "sweep.maxTurnsPerAgent"], [{ timeoutSecPerAgent: -5 }, "sweep.timeoutSecPerAgent"]
+  ];
+  for (const [over, p, msg] of bad) {
+    const errs = validateConfig(mergeConfig({ sweep: over }));
+    assert.deepEqual(errs.map((e) => e.path), [p], JSON.stringify(over));
+    if (msg) assert.match(errs[0].message, msg);
+  }
+  assert.deepEqual(validateConfig(mergeConfig({ sweep: "on" })).map((e) => e.path), ["sweep"]);
+  // A bad sweep setting in this computer's defaults is ignored, never fatal.
+  const machineFile = path.join(tmpDir(), "defaults.json");
+  fs.writeFileSync(machineFile, JSON.stringify({ sweep: { concurrency: 20, depth: "standard" } }));
+  const m = readMachineDefaults(machineFile);
+  assert.deepEqual(m.values, { sweep: { depth: "standard" } });
+  assert.deepEqual(m.problems.map((p) => p.path), ["sweep.concurrency"]);
+});
+
+test("docs.security defaults to the gitignored docs/private/SECURITY-FINDINGS.md; a project's own path is kept", () => {
+  assert.equal(DEFAULTS.docs.security, "docs/private/SECURITY-FINDINGS.md");
+  assert.equal(configTemplate({}).docs.security, "docs/private/SECURITY-FINDINGS.md", "a new project's file names the private path");
+  assert.equal(mergeConfig({ docs: { security: "docs/SECURITY-FINDINGS.md" } }).docs.security, "docs/SECURITY-FINDINGS.md");
+  assert.equal(ACCEPTED_FILE, "autoclaude.accepted.json");
+});
+
+function planProject() {
+  const root = tmpDir();
+  writeProjectConfig(root, { version: 1, plan: "PLAN.md" });
+  const plan = (title, step) => `# ${title}\n\n## After the run\n\n- ${title}: left for you\n\n## Phase 1: Work\n\n- [ ] **${step}** Do it\n  - Accept: it is done\n`;
+  fs.writeFileSync(path.join(root, "PLAN.md"), plan("Main plan", "S1.1"));
+  fs.writeFileSync(path.join(root, "SECURITY_PLAN.md"), plan("Security fixes 2026-10-02", "S1.1") + "- [ ] **S1.2** Another\n  - Accept: also done\n");
+  return root;
+}
+
+test("the run-plan override: loadConfig applies it, loadLayers (the settings page) never does, and it clears", () => {
+  const root = planProject();
+  let r = loadConfig(root);
+  assert.deepEqual([r.config.plan, r.mainPlan, r.runPlan], ["PLAN.md", "PLAN.md", null]);
+  assert.equal(runPlanOverride(root), null);
+
+  const at = new Date("2026-10-02T14:30:00Z");
+  assert.equal(setRunPlan(root, path.join(root, "SECURITY_PLAN.md"), { now: at }), "SECURITY_PLAN.md", "an absolute path inside the project is made relative");
+  assert.deepEqual(JSON.parse(fs.readFileSync(runPlanFile(root), "utf8")), { plan: "SECURITY_PLAN.md", since: at.toISOString() });
+  assert.equal(runPlanFile(root), path.join(root, ".autoclaude", "run-plan.json"));
+  r = loadConfig(root);
+  assert.deepEqual(r.errors, []);
+  assert.deepEqual([r.config.plan, r.mainPlan, r.runPlan], ["SECURITY_PLAN.md", "PLAN.md", "SECURITY_PLAN.md"]);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(root, "autoclaude.config.json"), "utf8")).plan, "PLAN.md", "the project's file is untouched");
+  assert.equal(loadLayers(root).merged.plan, "PLAN.md", "the settings page shows the project's own plan");
+  assert.deepEqual(readRunPlan(root), { exists: true, plan: "SECURITY_PLAN.md", since: at.toISOString(), branch: null, source: null, sweepId: null, error: null });
+  // `run --plan` also records the branch it made and where the plan came from.
+  setRunPlan(root, "SECURITY_PLAN.md", { now: at, branch: "autoclaude/security-fixes-2026-10-02-2", source: ".autoclaude/sweeps/s1/SECURITY_PLAN.md", sweepId: "s1" });
+  assert.deepEqual(JSON.parse(fs.readFileSync(runPlanFile(root), "utf8")), { plan: "SECURITY_PLAN.md", since: at.toISOString(), branch: "autoclaude/security-fixes-2026-10-02-2", source: ".autoclaude/sweeps/s1/SECURITY_PLAN.md", sweepId: "s1" });
+  assert.deepEqual(readRunPlan(root), { exists: true, plan: "SECURITY_PLAN.md", since: at.toISOString(), branch: "autoclaude/security-fixes-2026-10-02-2", source: ".autoclaude/sweeps/s1/SECURITY_PLAN.md", sweepId: "s1", error: null });
+  // A sub-folder path keeps forward slashes.
+  assert.equal(setRunPlan(root, "plans\\fix.md"), "plans/fix.md");
+  assert.equal(loadConfig(root).config.plan, "plans/fix.md");
+
+  assert.equal(clearRunPlan(root), true);
+  assert.equal(clearRunPlan(root), false, "clearing twice is harmless");
+  assert.equal(loadConfig(root).config.plan, "PLAN.md");
+  // Without a project file the override still applies over the defaults.
+  const bare = tmpDir();
+  setRunPlan(bare, "OPTIMIZE_PLAN.md");
+  assert.equal(loadConfig(bare).config.plan, "OPTIMIZE_PLAN.md");
+});
+
+test("the run-plan override refuses a plan outside the project or in .autoclaude/, and a broken one is an error, never a guess", () => {
+  const root = planProject();
+  for (const bad of ["", "../other/PLAN.md", path.join(os.tmpdir(), "x.md"), ".autoclaude/sweeps/x/PLAN.md", ".AutoClaude\\p.md", "."]) {
+    assert.throws(() => setRunPlan(root, bad), /cannot run on that plan/, JSON.stringify(bad));
+  }
+  assert.equal(fs.existsSync(runPlanFile(root)), false, "nothing was written");
+  for (const [text, why] of [["{ broken", /not valid JSON/], [JSON.stringify({ plan: "../x.md" }), /not inside the project/], [JSON.stringify({ nope: 1 }), /names no plan file/], ["[]", /names no plan file/]]) {
+    fs.mkdirSync(path.dirname(runPlanFile(root)), { recursive: true });
+    fs.writeFileSync(runPlanFile(root), text);
+    const r = loadConfig(root);
+    assert.equal(r.config.plan, "PLAN.md", "a broken override never points a run at a guessed plan");
+    assert.equal(r.runPlan, null);
+    assert.deepEqual(r.errors.map((e) => e.path), [RUN_PLAN_ERROR_PATH]);
+    assert.match(r.errors[0].message, why);
+    assert.equal(runPlanOverride(root), null);
+  }
+});
+
+test("resolveRunPlanSource: a sweep's plan is copied to the root under its own name; any other plan in the project is worked where it is", () => {
+  const root = planProject();
+  const sweepPlan = path.join(root, ".autoclaude", "sweeps", "20261002-0905-security", "SECURITY_PLAN.md");
+  assert.deepEqual(resolveRunPlanSource(root, sweepPlan), { source: ".autoclaude/sweeps/20261002-0905-security/SECURITY_PLAN.md", target: "SECURITY_PLAN.md", sweepId: "20261002-0905-security", error: null });
+  assert.deepEqual(resolveRunPlanSource(root, ".autoclaude\\sweeps\\20261002-1200-optimize\\OPTIMIZE_PLAN.md"), { source: ".autoclaude/sweeps/20261002-1200-optimize/OPTIMIZE_PLAN.md", target: "OPTIMIZE_PLAN.md", sweepId: "20261002-1200-optimize", error: null });
+  assert.deepEqual(resolveRunPlanSource(root, "SECURITY_PLAN.md"), { source: "SECURITY_PLAN.md", target: "SECURITY_PLAN.md", sweepId: null, error: null });
+  assert.deepEqual(resolveRunPlanSource(root, "plans\\fix.md"), { source: "plans/fix.md", target: "plans/fix.md", sweepId: null, error: null });
+  for (const [bad, why] of [["", /names no plan file/], ["../x.md", /is not inside the project/], [path.join(os.tmpdir(), "x.md"), /is not inside the project/], [".autoclaude/X_PLAN.md", /is inside \.autoclaude\/, which is never committed.*only a plan a sweep wrote in \.autoclaude\/sweeps\/<id>\/ is taken from there/], [".autoclaude/sweeps/x/sub/X.md", /inside \.autoclaude\//], [".autoclaude/sweeps/x/notes.txt", /inside \.autoclaude\//]]) {
+    const r = resolveRunPlanSource(root, bad);
+    assert.equal(r.source, null, JSON.stringify(bad));
+    assert.match(r.error, why, JSON.stringify(bad));
+  }
+});
+
+test("every config.plan reader follows the override: the CLI, the hand-back and the session context read the generated plan", async () => {
+  const root = planProject();
+  setRunPlan(root, "SECURITY_PLAN.md");
+  const out = [];
+  const io = { cwd: root, stdout: { write: (s) => out.push(s) }, stderr: { write: (s) => out.push(s) } };
+  assert.equal(await runCli(["lint-plan"], io), 0, out.join(""));
+  assert.match(out.join(""), /SECURITY_PLAN\.md ok: 2 steps in 1 phases/);
+  const { config } = loadConfig(root);
+  const got = collectHandback({ root, config, state: defaultState(), parsed: null });
+  assert.deepEqual(got.ownerItems.filter((i) => i.from === "plan").map((i) => i.text), ["Security fixes 2026-10-02: left for you"]);
+  const { buildContext } = await import("../../plugins/autoclaude/scripts/session-context.js");
+  const ctx = buildContext({ root, state: { ...defaultState(), status: "running", currentStep: "S1.1" }, config, planText: fs.readFileSync(path.join(root, config.plan), "utf8"), progressText: "", promptTemplate: "Plan: {{PLAN_FILE}}" });
+  assert.match(ctx, /Plan: SECURITY_PLAN\.md/);
+  clearRunPlan(root);
+  out.length = 0;
+  assert.equal(await runCli(["lint-plan"], io), 0);
+  assert.match(out.join(""), /PLAN\.md ok: 1 steps in 1 phases/);
+  assert.equal(out.join("").includes("SECURITY_PLAN"), false);
+});
+
+test("no module reads the project's config except through loadConfig, so the override reaches every config.plan reader", () => {
+  const pluginDir = fileURLToPath(new URL("../../plugins/autoclaude/", import.meta.url));
+  const files = [];
+  const walk = (d) => {
+    for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+      const p = path.join(d, e.name);
+      if (e.isDirectory() && !["node_modules", "project-template", "prompts", "skills", "agents"].includes(e.name)) walk(p);
+      else if (e.isFile() && /\.(m?js)$/.test(e.name)) files.push(p);
+    }
+  };
+  walk(pluginDir);
+  assert.ok(files.length > 20, `found ${files.length} plugin modules`);
+  const rawReaders = /\b(readProjectConfig|loadLayers|mergeLayers|mergeConfig|readMachineDefaults)\s*\(/;
+  const allowed = new Set(["config.js", "configpage.js"]);
+  const readsPlan = /\b(config|cfg|cfgNow\(\))\.plan\b/;
+  for (const f of files) {
+    const text = fs.readFileSync(f, "utf8");
+    const name = path.basename(f);
+    if (!allowed.has(name)) {
+      assert.equal(rawReaders.test(text), false, `${name} builds a config without loadConfig`);
+      for (const line of text.split("\n")) {
+        if (/(CONFIG_FILE|autoclaude\.config\.json)/.test(line) && /\b(readText|readJson|readFileSync|JSON\.parse)\s*\(/.test(line)) assert.fail(`${name} reads the config file directly: ${line.trim()}`);
+      }
+    }
+    // The settings page edits the project's own file and must never act on config.plan.
+    if (name === "configpage.js") assert.equal(readsPlan.test(text), false, "configpage.js reads config.plan");
+  }
+  // The readers named in the plan's research all exist and get their config from loadConfig or a caller that does.
+  const readers = files.filter((f) => readsPlan.test(fs.readFileSync(f, "utf8"))).map((f) => path.basename(f)).sort();
+  for (const want of ["cli.js", "gate.js", "session-context.js", "tool-guard.js"]) assert.ok(readers.includes(want), `${want} reads config.plan: ${readers.join(", ")}`);
 });

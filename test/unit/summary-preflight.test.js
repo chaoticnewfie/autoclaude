@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { buildSummary, progressEntries, parseDecisions, runDecisions, ownerReviewDecisions, decisionsMark, decisionsAtStart, parseTableRows, isOpenStatus, unresolvedRows, afterRunSection, afterRunItems, pushLine, pushStatus } from "../../plugins/autoclaude/lib/summary.js";
+import { buildSummary, progressEntries, parseDecisions, runDecisions, ownerReviewDecisions, decisionsMark, decisionsAtStart, parseTableRows, isOpenStatus, unresolvedRows, isPrivateDoc, afterRunSection, afterRunItems, pushLine, pushStatus } from "../../plugins/autoclaude/lib/summary.js";
 import { preflight, checkRunnable, playwrightBrowsersDir, formatPreflight, checkRequirements } from "../../plugins/autoclaude/lib/preflight.js";
 import { recordRunEnv } from "../../plugins/autoclaude/lib/checks.js";
 import { mergeConfig } from "../../plugins/autoclaude/lib/config.js";
@@ -29,7 +29,8 @@ test("buildSummary (morning): steps, attempts, the run's decisions, open items, 
   fs.writeFileSync(path.join(root, "docs", "SECURITY-FINDINGS.md"), "| 2026-09-27 | low | a.js:1 | i | f | open |\n| 2026-09-27 | low | b.js:2 | i | f | open |\n");
   const parsed = parsePlan("# P\n\n## Phase 1: A\n- [x] **S1.1** One\n  - Accept: a\n- [x] **S1.2** Two\n  - Accept: b\n- [ ] **S1.3** Three\n  - Accept: c\n\n## After the run\n\n- Run deploy.sh on the server\n");
   const now = Date.parse("2026-09-27T06:30:00Z");
-  const text = buildSummary({ root, config: mergeConfig({ git: { push: false } }), state: { status: "running", currentStep: "S1.3", startedAt: "2026-09-27T04:00:00Z", usageAtStart: 11 }, parsed, usage: { sevenDay: { pct: 19.4 } }, now, sinceDate: "2026-09-27" });
+  // An older project whose config names the committed findings file: its rows are quoted.
+  const text = buildSummary({ root, config: mergeConfig({ git: { push: false }, docs: { security: "docs/SECURITY-FINDINGS.md" } }), state: { status: "running", currentStep: "S1.3", startedAt: "2026-09-27T04:00:00Z", usageAtStart: 11 }, parsed, usage: { sevenDay: { pct: 19.4 } }, now, sinceDate: "2026-09-27" });
   assert.match(text, /Steps: 2\/3 verified, 1 since 2026-09-27\./);
   assert.match(text, /Attempts: 3 for 1 step \(0 passed first time\)\./);
   assert.match(text, /Decisions the run made: 2, owner notes handled: 1\./);
@@ -160,10 +161,27 @@ test("parseTableRows and unresolvedRows: headers, escaped pipes, closed statuses
   const root = tmp("autoclaude-sum-rows-");
   fs.mkdirSync(path.join(root, "docs"));
   fs.writeFileSync(path.join(root, "docs", "BLOCKERS.md"), "# BLOCKERS\n\n| Date | Found by | Step | What | Owner | Status |\n|---|---|---|---|---|---|\n| 2026-09-27 | bug bash | S1.2 | low: a typo | Claude | fixed in S1.3 |\n| 2026-09-27 | builder | S1.3 | Add the DNS record for db.lan | owner | left for the owner: needs the router's admin login |\n| 2026-09-28 | tester | S2.1 | high: data lost on reload | Claude | open |\n");
-  fs.writeFileSync(path.join(root, "docs", "SECURITY-FINDINGS.md"), "| Date | Severity | File | Issue | Fix | Status |\n|---|---|---|---|---|---|\n| 2026-09-28 | medium | api.js:9 | no CSRF token | add one | left for the owner: needs a product decision |\n");
+  // The default findings file is the gitignored docs/private/ one (P10.10).
+  fs.mkdirSync(path.join(root, "docs", "private"));
+  fs.writeFileSync(path.join(root, "docs", "private", "SECURITY-FINDINGS.md"), "| Date | Severity | File | Issue | Fix | Status |\n|---|---|---|---|---|---|\n| 2026-09-28 | medium | api.js:9 | no CSRF token | add one | left for the owner: needs a product decision |\n");
   const u = unresolvedRows(root, mergeConfig({}));
   assert.deepEqual(u.map((r) => [r.source, r.severity, r.leftForOwner]), [["follow-up", "high", false], ["security", "medium", true], ["follow-up", null, true]]);
   assert.equal(u[2].text, "S1.3 Add the DNS record for db.lan");
+  // A private row says only its severity and where the details are: nothing of the issue, the
+  // file, the fix or the status reason reaches HANDOFF.md or an alert.
+  assert.equal(u[1].private, true);
+  assert.equal(u[1].text, "medium security finding, details in docs/private/SECURITY-FINDINGS.md (kept out of git)");
+  assert.equal(u[1].fix, "");
+  assert.equal(u[1].status, "left for the owner");
+  assert.doesNotMatch(JSON.stringify(u[1]), /CSRF|api\.js|add one|product decision/);
+  assert.equal(isPrivateDoc("docs/private/SECURITY-FINDINGS.md"), true);
+  assert.equal(isPrivateDoc("./Docs/Private/x.md"), true);
+  assert.equal(isPrivateDoc("docs/SECURITY-FINDINGS.md"), false);
+  // An older project's committed file is quoted as before.
+  fs.writeFileSync(path.join(root, "docs", "SECURITY-FINDINGS.md"), "| Date | Severity | File | Issue | Fix | Status |\n|---|---|---|---|---|---|\n| 2026-09-28 | low | api.js:9 | no CSRF token | add one | open |\n");
+  const old = unresolvedRows(root, mergeConfig({ docs: { security: "docs/SECURITY-FINDINGS.md" } })).find((r) => r.source === "security");
+  assert.equal(old.private, false);
+  assert.equal(old.text, "low api.js:9 no CSRF token");
 });
 
 test("afterRunSection and afterRunItems: the plan's list, fences kept, placeholders and \"Nothing\" skipped", () => {
