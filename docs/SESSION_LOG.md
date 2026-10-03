@@ -423,3 +423,4 @@ One entry per working session: what was done, what was committed. Append only.
 - Last fix round (2 fixers, 12 items) and the user docs: branch at 1.1.0-rc.2, 724 of 724.
   Hotfix 1.0.1 released on main (the secrets/ staging bug); this machine updated to 1.0.1.
   Scott asked for Discord pings when he is needed (saved as a standing preference).
+- P10.13 designed with Scott in two rounds (D60); building on the sweeps branch for 1.1.0.

@@ -940,3 +940,23 @@ it runs only inside the test browser's page); the sweep's browser sessions do no
 answers, recorded here for him to confirm at CHECKPOINT 10.
 
 **Rejected.** Sharing CONTINUE_HERE.md with the fix run; blocking browser_evaluate everywhere.
+
+### D60 Phases that fit their verification (2026-10-03)
+
+**Decision.** All three of: (1) planning sizes phases: it measures the checks, estimates each
+phase's verification, and splits a phase that does not fit by itself, telling Scott; (2)
+`lint-plan` and `run --check` warn about a phase that does not fit; (3) the gate spreads a
+feature's verification over turns, as much as fits per turn and the rest in the next. A phase
+fits when its largest single part needs at most 70% of the verification time (`gate.fitPct`).
+Check times are measured and kept current by every verification. A plan already running out of
+time gets `autoclaude verify-per-step <phase>` (`gate.stepPhases`), named in the out-of-time
+alert. Ships with the sweeps in 1.1.0.
+
+**Why.** Scott: "make sure that the phase is small enough that it'll be able to actually be
+verified in the given time. I'm currently redoing a plan because it keeps running out of time
+on the verification of a phase." The DB run showed the test suite alone taking 10 to 20 of the
+30 minutes.
+
+**Rejected.** Asking before each split (he chose automatic); one part per turn always (extra
+turns for small phases); measuring test times once; 85% or 50% headroom; advice-only for a plan
+already running out of time; a separate 1.0.2 release.
