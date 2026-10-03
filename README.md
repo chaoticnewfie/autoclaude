@@ -41,6 +41,18 @@ Windows Server without WSL. Linux and macOS use the same code but have not been 
 Answering a question or resuming a paused run needs a terminal on the machine, in person or over
 remote desktop. The run waits until you get there.
 
+## Security and optimize sweeps
+
+For an existing project, `/autoclaude:security` runs a full security sweep: a review of the whole
+codebase, secrets in the files and the git history, known-vulnerable packages, config and
+infrastructure, and live attacks on the app with a headless browser, against only the targets
+you allow (the local dev server by default). `/autoclaude:optimize` sweeps for unused code and
+packages, duplicates, slow paths, poorly built features and slow or flaky tests, measuring before
+and after. Both ask their questions first, run unattended in their own window, check every
+finding with independent sessions, and write a report that is never committed. They can stop at
+the report, write a fix plan for you to review, or fix everything right away through a normal,
+verified run on its own branch. [docs/USAGE.md](docs/USAGE.md) section 17 has the details.
+
 ## Requirements
 
 - Claude Code, the native install (`claude --version` in a terminal), signed in with a Claude

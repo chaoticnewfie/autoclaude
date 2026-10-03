@@ -20,6 +20,7 @@ import { runOptimizeScanners, recordBaseline } from "../../plugins/autoclaude/li
 import { runHttpProbe } from "../../plugins/autoclaude/lib/probe.js";
 import { parsePlan, lintPlan } from "../../plugins/autoclaude/lib/plan.js";
 import { runPlanOverride } from "../../plugins/autoclaude/lib/config.js";
+import { STEP_PREFIX } from "../../plugins/autoclaude/lib/fixplan.js";
 import { loadState, saveState, defaultState, readMainStateKept } from "../../plugins/autoclaude/lib/state.js";
 import { trustKeyFor } from "../../plugins/autoclaude/lib/paths.js";
 import { PLAYWRIGHT_DISALLOWED } from "../../plugins/autoclaude/lib/tester.js";
@@ -35,6 +36,8 @@ const node = JSON.stringify(process.execPath);
 // Built at runtime so no key-shaped literal sits in the source (GitHub push protection).
 const PLANTED = ["sk", "live", "Zq81mXvT0pLr5WcY3nKd7HsB2e"].join("_");
 const PASSWORD = "Pw-planted-7781-zebra";
+// The security fix plan's step id letters, whatever fixplan.js names them.
+const SEC = STEP_PREFIX.security;
 const DEV_URL = "http://127.0.0.1:4999";
 
 const PLAN = `# Notes app
@@ -269,7 +272,8 @@ async function sweep(kind, after, { override = {}, trusted = true, wrapRun = nul
   assert.equal(start.code, 0, start.out + start.err);
   assert.equal(windows.length, 1);
   const id = windows[0].args[windows[0].args.length - 1];
-  assert.deepEqual(windows[0].args.slice(-2), ["sweep-run", id]);
+  // --auto: the window leaves a sweep the owner stopped alone.
+  assert.deepEqual(windows[0].args.slice(-3), ["sweep-run", "--auto", id]);
   assert.match(windows[0].title, /^ac-sweep-/);
   assert.match(id, new RegExp(`^\\d{8}-\\d{4}-${kind}$`));
 
@@ -400,7 +404,7 @@ test("security sweep, report and fix plan: every stage runs, findings are verifi
   assert.deepEqual(lintPlan(parsed), []);
   const when = sweepWhen(id);
   assert.equal(parsed.title, `Security fixes ${when.date} ${when.stamp}`, "the title names this sweep");
-  assert.ok(parsed.steps.every((st) => /^SF\d+\.\d+$/.test(st.id)), "step ids of its own, never the project's S or P ids");
+  assert.ok(parsed.steps.every((st) => new RegExp(`^${SEC}\\d+\\.\\d+$`).test(st.id)), "step ids of its own, never the project's S or P ids");
   assert.match(planText, /for `autoclaude run --plan`, which commits it as `SECURITY_PLAN\.md` on a new branch/);
   assert.ok(parsed.steps.every((st) => st.tags.includes("security")));
   assert.match(planText, /The app listens on 127\.0\.0\.1 only, on purpose\./, "the main plan's constraints are copied");
@@ -557,7 +561,7 @@ test("the whole chain: a plan-mode sweep, run --plan refused while the project's
   // naming the run's own hand-back.
   r = await cli(["start", "--no-preflight"], root, { configDir, deps: { recordFootprintStart: async () => {}, notifyEvent: async () => ({ sent: false }) } });
   assert.equal(r.code, 0, r.out);
-  assert.match(r.out, new RegExp(`running on branch ${branch.replace(/[.]/g, "[.]")}( \\(created\\))?\\. First step: SF1\\.1`));
+  assert.match(r.out, new RegExp(`running on branch ${branch.replace(/[.]/g, "[.]")}( \\(created\\))?\\. First step: ${SEC}1\\.1`));
   assert.match(r.out, /the run's hand-back, `HANDOFF-SECURITY\.md`, gathers these rows/);
 
   // 5. The builder works each step; the gate verifies and commits it, and completes the plan.
@@ -586,7 +590,7 @@ test("the whole chain: a plan-mode sweep, run --plan refused while the project's
   assert.equal(g(root, ["show", "--name-only", "--format=", "HEAD"]), "HANDOFF-SECURITY.md");
   assert.equal(fs.existsSync(path.join(root, "HANDOFF.md")), false);
   assert.equal(fs.readFileSync(path.join(root, "PLAN.md"), "utf8"), PLAN);
-  assert.match(fs.readFileSync(path.join(root, "PROGRESS.md"), "utf8"), /SF1\.1 /);
+  assert.match(fs.readFileSync(path.join(root, "PROGRESS.md"), "utf8"), new RegExp(`${SEC}1\\.1 `));
   assert.equal(g(root, ["status", "--porcelain"]), "");
   assert.equal(runPlanOverride(root), null);
   assert.equal(readMainStateKept(root), null, "the kept copy is gone once it is back");

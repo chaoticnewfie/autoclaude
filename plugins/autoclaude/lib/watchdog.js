@@ -170,8 +170,9 @@ async function checkProject(entry, { env, nowMs, isAlive, launch, minRelaunchGap
 
 // ---- Sweeps (P10.1) ----
 
-// Opens the ac-sweep-<slug> window for one sweep, running `autoclaude sweep-run <id>`, which
-// picks the sweep up where it stopped. Returns what `open` returns.
+// Opens the ac-sweep-<slug> window for one sweep, running `autoclaude sweep-run --auto <id>`, which
+// picks the sweep up where it stopped. --auto: a sweep the owner stopped (`autoclaude sweep-stop`)
+// in the meantime is left alone. Returns what `open` returns.
 export function launchSweep({ root, id, env = process.env, open = openConsoleWindow, logFile = null } = {}) {
   const dir = path.join(projectPaths(root).runtimeDir, "sweeps", id);
   ensureDir(dir);
@@ -179,7 +180,7 @@ export function launchSweep({ root, id, env = process.env, open = openConsoleWin
     title: `ac-sweep-${projectSlug(root)}`,
     cwd: root,
     program: process.execPath,
-    args: [cliPath(), "sweep-run", id],
+    args: [cliPath(), "sweep-run", "--auto", id],
     logFile: logFile || path.join(dir, "sweep.log"),
     env
   });
@@ -218,6 +219,11 @@ export function weeklyResetPassed(s, usage, { nowMs, graceMs, pauseAtPct }) {
   return { passed: false, key: null };
 }
 
+// True when the sweep's own record says the owner stopped it (`autoclaude sweep-stop`).
+function ownerStopped(root, id) {
+  try { const s = readJson(path.join(projectPaths(root).runtimeDir, "sweeps", id, "sweep.json"), null); return !!s && s.status === "stopped"; } catch { return false; }
+}
+
 async function lazy(spec, name) {
   try { const m = await import(spec); return typeof m[name] === "function" ? m[name] : null; } catch { return null; }
 }
@@ -225,10 +231,11 @@ async function lazy(spec, name) {
 // The sweeps of one project that the watchdog brings back: a sweep whose driver is gone while it
 // was running or waiting (findDeadSweeps, from the sweep engine) is opened again, unless it has
 // shown no sign of life for a day; a sweep paused at the weekly limit is resumed once the weekly
-// window has reset, and only when the project's usage.autoResumeAfterWeeklyReset is on. Throttled
-// like a supervisor. Results: { root, sweep, action, pid } with action sweep-launched,
-// sweep-resumed, sweep-too-soon, sweep-stale, sweep-paused-weekly, sweep-launch-failed or
-// sweep-error. Never throws.
+// window has reset, and only when the project's usage.autoResumeAfterWeeklyReset is on. A sweep
+// the owner stopped (status "stopped", `autoclaude sweep-stop`) is never brought back, whatever a
+// lookup returns. Throttled like a supervisor. Results: { root, sweep, action, pid } with action
+// sweep-launched, sweep-resumed, sweep-too-soon, sweep-stale, sweep-paused-weekly, sweep-stopped,
+// sweep-launch-failed or sweep-error. Never throws.
 async function checkSweeps(root, { env, nowMs, isAlive, minRelaunchGapMs, sweeps }) {
   const out = [];
   try {
@@ -239,6 +246,8 @@ async function checkSweeps(root, { env, nowMs, isAlive, minRelaunchGapMs, sweeps
     let record = {};
     try { record = readJson(file, {}) || {}; } catch { record = {}; }
     const open = async (s, action, extra = {}) => {
+      // Read afresh just before opening: the owner may have stopped it since the lookup.
+      if (s.status === "stopped" || ownerStopped(root, s.id)) return { root, sweep: s.id, action: "sweep-stopped", pid: s.pid || null };
       const last = record[s.id] ? toMs(record[s.id].lastLaunchAt) : null;
       if (last !== null && nowMs - last >= 0 && nowMs - last < minRelaunchGapMs) return { root, sweep: s.id, action: "sweep-too-soon", pid: s.pid || null, lastLaunchAt: new Date(last).toISOString() };
       let opened;

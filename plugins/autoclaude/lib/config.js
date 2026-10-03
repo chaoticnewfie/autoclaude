@@ -430,10 +430,12 @@ export function loadLayers(root, { machineFile = machineDefaultsFile() } = {}) {
 // broken file: { exists, file, config (merged, or the lower layers when broken), errors[],
 // warnings[], mainPlan, runPlan }. errors are the project's own problems (the shape callers have
 // always had); warnings are problems in this computer's defaults file, which are ignored.
-// With a run-plan override (.autoclaude/run-plan.json, P10.7) config.plan is the override's file;
-// mainPlan is always the plan the project's config names, and runPlan the override or null. A
-// broken override is an error with the path RUN_PLAN_ERROR_PATH, and config.plan stays the main
-// plan, so nothing ever acts on a plan nobody chose.
+// With a run-plan override (.autoclaude/run-plan.json, P10.7) config.plan is the override's file
+// and config.docs.continueHere the run's own resume file (continueHereFor: CONTINUE_HERE.md ->
+// CONTINUE_HERE-SECURITY.md, D59), so the project's resume file is left alone; mainPlan and
+// mainContinueHere are always the files the project's config names, and runPlan the override or
+// null. A broken override is an error with the path RUN_PLAN_ERROR_PATH, and config.plan stays
+// the main plan, so nothing ever acts on a plan nobody chose.
 export function loadConfig(root, { machineFile = machineDefaultsFile() } = {}) {
   const file = path.join(root, CONFIG_FILE);
   const m = readMachineDefaults(machineFile);
@@ -442,8 +444,12 @@ export function loadConfig(root, { machineFile = machineDefaultsFile() } = {}) {
   const over = readRunPlan(root);
   const withOverride = (config, errors) => {
     const mainPlan = config.plan;
-    if (over.error) return { config, errors: [...errors, { path: RUN_PLAN_ERROR_PATH, message: over.error }], mainPlan, runPlan: null };
-    return { config: over.plan ? { ...config, plan: over.plan } : config, errors, mainPlan, runPlan: over.plan };
+    const docs = isPlainObject(config.docs) ? config.docs : null;
+    const mainContinueHere = docs ? docs.continueHere : undefined;
+    if (over.error) return { config, errors: [...errors, { path: RUN_PLAN_ERROR_PATH, message: over.error }], mainPlan, mainContinueHere, runPlan: null };
+    if (!over.plan) return { config, errors, mainPlan, mainContinueHere, runPlan: null };
+    const resume = docs && typeof docs.continueHere === "string" ? { docs: { ...docs, continueHere: continueHereFor(docs.continueHere, over.plan) } } : {};
+    return { config: { ...config, plan: over.plan, ...resume }, errors, mainPlan, mainContinueHere, runPlan: over.plan };
   };
   if (!p.exists) return { exists: false, file, ...withOverride(mergeLayers(m.values), []), warnings };
   if (p.error) return { exists: true, file, ...withOverride(mergeLayers(m.values), [{ path: "", message: p.error }]), warnings };
@@ -459,6 +465,25 @@ export const RUN_PLAN_ERROR_PATH = `${RUNTIME_DIR}/${RUN_PLAN_FILE}`;
 
 export function runPlanFile(root) {
   return path.join(root, RUNTIME_DIR, RUN_PLAN_FILE);
+}
+
+// The name a run on a generated plan gives its own files: SECURITY_PLAN.md -> "SECURITY",
+// OPTIMIZE_PLAN.md -> "OPTIMIZE", anything without a name left -> "RUN" (the same rule as
+// summary.handoffFileFor, which names HANDOFF-SECURITY.md).
+export function runPlanTag(planFile) {
+  const base = path.posix.basename(String(planFile || "").replace(/\\/g, "/")).replace(/[.]md$/i, "").replace(/[-_. ]?plan$/i, "");
+  return base.toUpperCase().replace(/[^A-Z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "RUN";
+}
+
+// The builder's resume file during a run on planFile: the project's own (docs.continueHere) with
+// the plan's tag added, in the same folder. CONTINUE_HERE.md -> CONTINUE_HERE-SECURITY.md,
+// docs/RESUME.md -> docs/RESUME-OPTIMIZE.md. Project-relative, forward slashes.
+export function continueHereFor(continueHere, planFile) {
+  const rel = String(continueHere || DEFAULTS.docs.continueHere).trim().replace(/\\/g, "/").replace(/^(\.\/)+/, "");
+  const dir = path.posix.dirname(rel);
+  const ext = path.posix.extname(rel);
+  const name = `${path.posix.basename(rel, ext)}-${runPlanTag(planFile)}${ext || ".md"}`;
+  return dir === "." ? name : `${dir}/${name}`;
 }
 
 // A plan file the override may name, as a project-relative path with forward slashes: inside the

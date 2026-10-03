@@ -99,6 +99,14 @@ for (const [kind, md] of Object.entries(SKILLS)) {
     assert.match(md, /autoResumeAfterWeeklyReset/);
     assert.match(md, /autoclaude watchdog --install/);
   });
+
+  test(`the ${kind} skill says how to stop a sweep for good, and that a resumable one holds up a new one`, () => {
+    assert.match(md, /closing the window does not stop a\s+sweep; `autoclaude sweep-stop` does/);
+    assert.match(md, /the\s+watchdog leaves a stopped sweep alone;\s+`autoclaude sweep-run <id>` resumes it on purpose/);
+    assert.match(md, new RegExp(`\`autoclaude sweep-stop <id>\` gives it up for good[\\s\\S]*only then can a new ${kind} sweep start`));
+    assert.match(md, /A second sweep of the same\s+kind is refused while one is running, waiting, paused or gone\s+with its window/);
+    assert.ok(cliMentions(md).some((m) => m.cmd === "sweep-stop"));
+  });
 }
 
 test("the security skill: targets, production warning, written permission, throwaway data and test logins", () => {

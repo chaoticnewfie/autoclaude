@@ -190,7 +190,8 @@ test("launchSweep opens ac-sweep-<slug> running sweep-run <id>, logging to the s
   assert.equal(o.cwd, root);
   assert.equal(o.program, process.execPath);
   assert.ok(o.args[0].endsWith(path.join("bin", "autoclaude.js")) && fs.existsSync(o.args[0]));
-  assert.deepEqual(o.args.slice(1), ["sweep-run", "20261002-0905-security"]);
+  // --auto: a sweep the owner stopped in the meantime is left alone by the window.
+  assert.deepEqual(o.args.slice(1), ["sweep-run", "--auto", "20261002-0905-security"]);
   assert.equal(o.logFile, path.join(root, ".autoclaude", "sweeps", "20261002-0905-security", "sweep.log"));
   assert.deepEqual(o.env, { MARKER: "1" });
 });
@@ -282,6 +283,42 @@ test("a sweep paused at the weekly limit resumes after the weekly reset, only wi
   paused = [{ id: "w4", status: "paused", pauseReason: "weekly-limit", pid: 4242, weeklyResetsAt: iso(T - 60 * 60 * 1000) }];
   r = await watchdogPass({ registry: [{ root }], now: T, isAlive: (pid) => pid === 4242, launch: fakeLauncher().launch, logFile, sweeps });
   assert.deepEqual(r.slice(1), []);
+});
+
+test("a sweep the owner stopped with sweep-stop is never brought back: not when its window is gone, not after a weekly reset, not from a stale lookup", async () => {
+  const { stopSweep } = await import("../../plugins/autoclaude/lib/sweep.js");
+  const parent = tmp("stopped");
+  const root = makeProject(parent, "stopped", { status: "idle" });
+  fs.writeFileSync(path.join(root, "autoclaude.config.json"), JSON.stringify({ version: 1, usage: { autoResumeAfterWeeklyReset: true } }));
+  const logFile = path.join(parent, "watchdog.log");
+  const T = Date.now();
+  const iso = (ms) => new Date(ms).toISOString();
+  const put = (id, s) => {
+    const dir = path.join(root, ".autoclaude", "sweeps", id);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, "sweep.json"), JSON.stringify({ id, kind: id.split("-").pop(), startedAt: iso(T - 3600000), stage: "review", ...s }));
+  };
+  put("20261002-0905-security", { status: "running", pid: 71, heartbeatAt: iso(T - 60000), updatedAt: iso(T - 60000) });
+  put("20261002-0800-optimize", { status: "paused", pauseReason: "weekly-limit", weeklyResetsAt: iso(T - 3600000), updatedAt: iso(T - 2 * 86400000) });
+  const launched = [];
+  // The engine's own lookups; only the window is faked.
+  const sweeps = { launchSweep: async (o) => { launched.push(o.id); return { method: "fake" }; }, readUsage: () => null };
+  const pass = () => watchdogPass({ registry: [{ root }], now: T, isAlive: () => false, launch: fakeLauncher().launch, logFile, minRelaunchGapMs: 0, sweeps });
+  // Before the stop, both would come back.
+  let r = await pass();
+  assert.deepEqual(r.slice(1).map((x) => [x.action, x.sweep]).sort(), [["sweep-launched", "20261002-0905-security"], ["sweep-resumed", "20261002-0800-optimize"]]);
+  // Stopped by the owner: neither comes back, pass after pass.
+  for (const id of ["20261002-0905-security", "20261002-0800-optimize"]) assert.equal(stopSweep({ root, id, deps: { isPidAlive: () => false } }).ok, true);
+  launched.length = 0;
+  for (let i = 0; i < 3; i++) {
+    r = await pass();
+    assert.deepEqual(r.slice(1), []);
+  }
+  assert.deepEqual(launched, []);
+  // A lookup that still lists it (read just before the stop) is checked against its record.
+  r = await watchdogPass({ registry: [{ root }], now: T, isAlive: () => false, launch: fakeLauncher().launch, logFile, minRelaunchGapMs: 0, sweeps: { ...sweeps, findDeadSweeps: () => [{ id: "20261002-0905-security", status: "running", pid: 71, heartbeatAt: iso(T - 60000) }], findActiveSweeps: () => [] } });
+  assert.deepEqual(r.slice(1).map((x) => [x.action, x.sweep]), [["sweep-stopped", "20261002-0905-security"]]);
+  assert.deepEqual(launched, []);
 });
 
 test("isWeeklyPause and weeklyResetPassed read the sweep's own record first, then the usage reading", () => {

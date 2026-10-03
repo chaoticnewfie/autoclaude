@@ -22,9 +22,9 @@ import { loadState, STATUS } from "./state.js";
 import { loadConfig } from "./config.js";
 import { parsePlan, lintPlan } from "./plan.js";
 import { readUsage as readUsageDefault } from "./usage.js";
-import { runHeadless, buildArgs } from "./headless.js";
+import { runHeadless, buildArgs, runWithWrapUp } from "./headless.js";
 import { detectProject } from "./init.js";
-import { openConsoleWindow, isPidAlive } from "./proc.js";
+import { openConsoleWindow, isPidAlive, killTree } from "./proc.js";
 import { ensureDevServer, stopDevServer, devServerInfo } from "./devserver.js";
 import * as gitMod from "./git.js";
 
@@ -156,13 +156,22 @@ export function writeSweep(root, id, sweep) {
   return sweep;
 }
 
-// Load, mutate, save sweep.json atomically.
-function patchSweep(root, id, mutate) {
+// Load, mutate, save sweep.json atomically. A sweep the owner stopped (stopSweep) stays stopped
+// whatever a later write of its driver sets; only the owner's own resume (`reopen`) changes that.
+function patchSweep(root, id, mutate, { reopen = false } = {}) {
   const s = readSweep(root, id) || {};
+  const wasStopped = s.status === "stopped";
   mutate(s);
+  if (wasStopped && !reopen) s.status = "stopped";
   s.updatedAt = new Date().toISOString();
   writeSweep(root, id, s);
   return s;
+}
+
+// True once the owner stopped the sweep (`autoclaude sweep-stop`); its driver checks this before
+// every stage and every session, so it ends by itself even if its process could not be ended.
+function stopRequested(root, id) {
+  try { return (readSweep(root, id) || {}).status === "stopped"; } catch { return false; }
 }
 
 // ---------- options ----------
@@ -483,17 +492,27 @@ async function browserPrompt(agent, ctx, outDir) {
     });
   }
   // Optimize: the scanner module's builder keeps the template and its values together. A login is
-  // a POST, so a read-only target is measured without one.
+  // a POST, so a read-only target is measured without one. The walker cannot read the project (no
+  // --add-dir), so the map's routes are its page list.
   const template = readPrompt("sweep-optimize-browser.md") || REVIEW_FALLBACK;
   const login = full && ctx.testUsersText && ctx.options.testUsers && !ctx.options.testUsers.signUp ? ctx.testUsersText : null;
+  const pages = mapPages(ctx.map);
   const build = ctx.deps.buildOptimizeBrowserPrompt || (await maybeImport("./scan-optimize.js", "buildOptimizeBrowserPrompt"));
-  if (build) return build({ template, url: agent.target.url, root: ctx.root, turns: maxTurns(ctx.config), login });
+  if (build) return build({ template, url: agent.target.url, root: ctx.root, turns: maxTurns(ctx.config), login, pages });
   return fill(template, {
     PROJECT_ROOT: root, KIND: "optimize", URL: agent.target.url, MAP: ctx.mapText || "(none)",
-    PAGES: "(discover the pages from the map and the app's navigation)", LOADS: "5", MAX_PAGES: "12",
+    PAGES: pages.length ? pages.map((p) => `- ${p}`).join("\n") : "(discover the pages from the app's navigation)", LOADS: "5", MAX_PAGES: "12",
     LOGIN: login || "(no login provided; measure the public pages)",
     TURNS: turns, SCOPE: `the running app at ${agent.target.url}`, FILES: "(use the browser)"
   });
+}
+
+// The map session's routes (and the routes it says need a login), as the optimize walker's page
+// list: the walker works from the map, never from the project's files.
+export function mapPages(map) {
+  if (!map) return [];
+  const list = [...(Array.isArray(map.routes) ? map.routes : []), ...(Array.isArray(map.protectedRoutes) ? map.protectedRoutes : [])];
+  return [...new Set(list.filter((r) => typeof r === "string" && r.trim()).map((r) => r.trim()))];
 }
 
 const NO_USERS_TEXT = "No test logins were given. Do not sign up or log in; report the checks that need two signed-in users (access between users, session handling) under coverage.notExamined as not run.";
@@ -615,6 +634,70 @@ export function prepareTestUsers(root, options, envFile) {
   return { text: lines.join("\n"), envFile };
 }
 
+// ---------- the test users' passwords, masked as written ----------
+
+// What a known test password becomes in everything the sweep saves. It contains findings.js's
+// "[redacted" marker, so the pattern masking takes it for a masked value and leaves it alone.
+export const SECRET_MASK = "[redacted test password]";
+// Shorter values are not masked (they would mangle ordinary words); values under SHORT_SECRET_LEN
+// are masked only where they stand alone, and never in a field that names a file or an id.
+const MIN_SECRET_LEN = 4;
+const SHORT_SECRET_LEN = 8;
+const STRUCTURAL_KEYS = new Set(["file", "id", "fingerprint", "fingerprints", "anchor", "category", "kind", "name", "source", "target", "finding", "severity", "tier", "cwe", "mode", "commit", "sha"]);
+const escapeRe = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+// The test users' passwords from the users file (secrets/sweep-users.json), longest first so a
+// password that contains another is masked whole. The sweep knows them, so it masks them as
+// written in everything it saves, beside the pattern masking: a session may write one in plain
+// words ("signed in as alice with ..."). Read afresh on every start and resume. [] without a file.
+export function testUserSecrets(root, options) {
+  const tu = options && options.testUsers;
+  if (!tu || typeof tu.file !== "string" || !tu.file) return [];
+  let data = null;
+  try { data = JSON.parse(fs.readFileSync(path.join(root, tu.file), "utf8")); } catch { return []; }
+  const values = new Set();
+  for (const u of (data && Array.isArray(data.users) ? data.users : [])) {
+    if (u && typeof u.password === "string" && u.password.length >= MIN_SECRET_LEN) values.add(u.password);
+  }
+  return [...values].sort((a, b) => b.length - a.length);
+}
+
+// Every occurrence of a known secret in a string, replaced by SECRET_MASK. `structural` (a file
+// path, an id) gets only the long ones, which cannot be part of a path by accident.
+export function maskSecrets(text, secrets, { structural = false } = {}) {
+  if (typeof text !== "string" || !secrets || !secrets.length) return text;
+  let s = text;
+  for (const v of secrets) {
+    if (!s.includes(v)) continue;
+    if (v.length >= SHORT_SECRET_LEN) s = s.split(v).join(SECRET_MASK);
+    else if (!structural) s = s.replace(new RegExp(`(?<![A-Za-z0-9])${escapeRe(v)}(?![A-Za-z0-9])`, "g"), SECRET_MASK);
+  }
+  return s;
+}
+
+function maskSecretsDeep(value, secrets, key = null) {
+  const structural = !!key && STRUCTURAL_KEYS.has(key);
+  if (typeof value === "string") return maskSecrets(value, secrets, { structural });
+  if (Array.isArray(value)) return value.map((v) => (typeof v === "string" ? maskSecrets(v, secrets, { structural }) : maskSecretsDeep(v, secrets)));
+  if (value && typeof value === "object") {
+    const out = {};
+    for (const [k, v] of Object.entries(value)) out[k] = maskSecretsDeep(v, secrets, k);
+    return out;
+  }
+  return value;
+}
+
+// The redactors with the known secrets masked first: text and deep run the literal masking, then
+// the pattern masking; literals alone is for the scanners' own output, which keeps its shape.
+export function withSecrets(base, secrets) {
+  if (!secrets || !secrets.length) return { ...base, literals: (v) => v };
+  return {
+    text: (s) => base.text(maskSecrets(String(s), secrets)),
+    deep: (v) => base.deep(maskSecretsDeep(v, secrets)),
+    literals: (v) => maskSecretsDeep(v, secrets)
+  };
+}
+
 function verifyPrompt({ root, options, candidate, constraintsText, redact = (s) => s }) {
   return fill(readPrompt("sweep-verify.md"), {
     PROJECT_ROOT: String(root).replace(/\\/g, "/"),
@@ -676,15 +759,19 @@ export function gateDecision({ usage, waitAt5hPct, weeklyPauseAtPct, rateLimited
 // 5-hour window when it is nearly full or a result was rate-limited. The wait's deadline is fixed
 // when the wait starts and shared by every worker; when it passes, the rate-limit signal is
 // cleared and usage is read afresh. Agents whose result already exists are skipped by the caller.
-// Resolves to { paused, launched }. Never rejects.
+// usage.stopRequested (optional) is asked before every launch and every slice of a wait: once it
+// says yes (the owner's sweep-stop), no worker launches anything more. Resolves to { paused,
+// launched, stopped }. Never rejects.
 export async function runPool(agents, { concurrency, launch, usage }) {
   const queue = agents.slice();
   const signals = { rateLimited: false, waitUntil: null };
   let paused = null;
+  let stopped = false;
   let launched = 0;
   const worker = async () => {
     for (;;) {
-      if (paused) return;
+      if (paused || stopped) return;
+      if (typeof usage.stopRequested === "function" && usage.stopRequested()) { stopped = true; return; }
       if (signals.waitUntil !== null) {
         const left = signals.waitUntil - usage.now();
         if (left > 0) { await usage.sleep(Math.min(left, usage.maxChunkMs)); continue; }
@@ -710,7 +797,7 @@ export async function runPool(agents, { concurrency, launch, usage }) {
   };
   const n = Math.max(1, Math.min(concurrency, agents.length || 1));
   await Promise.all(Array.from({ length: n }, worker));
-  return { paused, launched };
+  return { paused, launched, stopped };
 }
 
 // ---------- the estimate ----------
@@ -777,9 +864,18 @@ export async function startSweep({ root, kind, options = {}, config, io, deps = 
     if (io && io.out) { io.out(`autoclaude: ${kind} sweep estimate (nothing started)`); io.out(formatEstimate(est, norm)); }
     return { ok: true, estimate: est, options: norm };
   }
-  // One sweep of a kind at a time: a second one would rerun every session beside the first.
-  const busy = findActiveSweeps(root, { isAlive: deps.isPidAlive }).find((s) => s.kind === kind && (s.liveness === "alive" || s.liveness === "starting"));
-  if (busy) return { ok: false, error: `a ${kind} sweep (${busy.id}) is already ${busy.status}; watch it with \`autoclaude sweep-status\` and start another when it has finished` };
+  // One sweep of a kind at a time: a second one would rerun every session beside the first. That
+  // counts a resumable one too: one whose window is gone (the watchdog would bring it back beside
+  // the new one) and one paused. The owner carries it on, or gives it up with sweep-stop.
+  const same = findActiveSweeps(root, { isAlive: deps.isPidAlive }).filter((s) => s.kind === kind);
+  const busy = same.find((s) => s.liveness === "alive" || s.liveness === "starting");
+  if (busy) return { ok: false, error: `a ${kind} sweep (${busy.id}) is already ${busy.status}; watch it with \`autoclaude sweep-status\` and start another when it has finished, or stop it with \`autoclaude sweep-stop ${busy.id}\`` };
+  const left = same.find((s) => s.liveness === "dead" || s.status === "paused");
+  if (left) {
+    const revived = Date.now() - lastTouched(left) <= STALE_SWEEP_MS ? "the watchdog, when installed, brings it back" : "too old for the watchdog to bring back";
+    const how = left.status === "paused" ? `is paused at stage ${left.stage}${left.error ? ` (${left.error})` : ""}` : `stopped at stage ${left.stage} when its window closed (${revived})`;
+    return { ok: false, id: left.id, error: `a ${kind} sweep (${left.id}) ${how}; carry it on with \`autoclaude sweep-run ${left.id}\`, or give it up with \`autoclaude sweep-stop ${left.id}\` and then start a new one` };
+  }
   const id = sweepId(kind, (io && io.now && io.now()) || new Date());
   const sp = sweepPaths(root, id);
   if (fs.existsSync(sp.sweepFile)) return { ok: false, error: `a sweep ${id} already exists; wait a minute and start it again` };
@@ -815,13 +911,14 @@ export async function startSweep({ root, kind, options = {}, config, io, deps = 
   return { ok: true, id, dir: sp.dir, estimate: est, window: { title, method: w && w.method } };
 }
 
-// Opens the ac-sweep-<project> window running `autoclaude sweep-run <id>`: at the start, and to
-// bring back a sweep whose window is gone (findDeadSweeps; the watchdog). Returns { title, window }
+// Opens the ac-sweep-<project> window running `autoclaude sweep-run --auto <id>`: at the start, and
+// to bring back a sweep whose window is gone (findDeadSweeps; the watchdog). --auto marks a window
+// the engine opened itself, which leaves a sweep the owner stopped alone. Returns { title, window }
 // where window is what openConsoleWindow returned.
 export function openSweepWindow({ root, id, env = process.env, open = null }) {
   const title = `ac-sweep-${path.basename(root).toLowerCase().replace(/[^a-z0-9]+/g, "-")}`;
   const binJs = path.join(pluginRoot(), "bin", "autoclaude.js");
-  const w = (open || openConsoleWindow)({ title, cwd: root, program: process.execPath, args: [binJs, "sweep-run", id], logFile: sweepPaths(root, id).logFile, env });
+  const w = (open || openConsoleWindow)({ title, cwd: root, program: process.execPath, args: [binJs, "sweep-run", "--auto", id], logFile: sweepPaths(root, id).logFile, env });
   return { title, window: w };
 }
 
@@ -851,32 +948,42 @@ function loadProjectSafe(root) {
 // report, acts on options.after, and sends the always-on "sweep finished" alert with the outcome.
 // Resolves to a result object; never rejects. The scanner/probe/report/fixplan functions are
 // injected through `deps` (tests use fakes); each defaults to the real sibling module, loaded
-// lazily. deps.config (with deps.mainPlan) replaces loading the project's config.
-export async function runSweep({ root, id, io = {}, deps = {} }) {
+// lazily. deps.config (with deps.mainPlan) replaces loading the project's config. `auto` is set by
+// a window the engine opened itself (`sweep-run --auto`: the start, the watchdog), which leaves a
+// sweep the owner stopped alone; without it (the owner's own `sweep-run <id>`) a stopped sweep is
+// resumed on purpose.
+export async function runSweep({ root, id, io = {}, deps = {}, auto = false }) {
   const sp = sweepPaths(root, id);
   let sweep = readSweep(root, id);
   if (!sweep) return { ok: false, error: `no sweep ${id} to run (sweep.json is missing)` };
   const env = io.env || process.env;
   const { config, mainPlan } = deps.config ? { config: deps.config, mainPlan: deps.mainPlan || deps.config.plan || "PLAN.md" } : loadProjectSafe(root);
   const options = sweep.options;
-  // Every line the log gets is masked: an error can carry a session's own words.
-  const redactors = await loadRedactors(deps);
+  // Every line the log gets is masked: an error can carry a session's own words. The test users'
+  // passwords are masked as written, beside the patterns (they are known exactly).
+  const redactors = withSecrets(await loadRedactors(deps), testUserSecrets(root, options));
   const log = (m) => { const line = redactors.text(String(m)); try { appendLine(sp.logFile, `${new Date().toISOString()} ${line}`); } catch {} if (io.out && deps.verbose !== false) io.out(`[sweep] ${line}`); };
   const git = deps.git || gitMod;
 
   // A finished sweep is not run again, and its fix run is not started a second time.
   if (sweep.status === "done") { log("already done"); return { ok: true, id, status: "done", already: true, ...(sweep.result || {}), startRun: false }; }
-  // One driver per sweep: another live process (its window still open) owns this one.
+  // A sweep the owner stopped stays stopped for a window the engine opened (--auto).
+  if (sweep.status === "stopped" && auto) { log("stopped by the owner; this window leaves it alone"); return { ok: true, id, status: "stopped", already: true }; }
+  // One driver per sweep: another live process (its window still open) owns this one. A stopped
+  // sweep whose driver has not ended yet counts too: it ends at its next check.
   const isAlive = deps.isPidAlive || isPidAlive;
-  if (sweep.pid && sweep.pid !== process.pid && ["running", "waiting"].includes(sweep.status) && sweepDriverAlive(sweep, { isAlive })) {
+  if (sweep.pid && sweep.pid !== process.pid && ["running", "waiting", "stopped"].includes(sweep.status) && sweepDriverAlive(sweep, { isAlive })) {
     return { ok: false, id, status: sweep.status, owned: true, error: `sweep ${id} is already being driven by process ${sweep.pid} (its window is open); watch it with \`autoclaude sweep-status\`` };
   }
   ensureSweepsIgnored(root);
   ensureDir(sp.agentsDir); ensureDir(sp.scannersDir); ensureDir(sp.screenshotsDir);
+  const fromStop = sweep.status === "stopped";
   patchSweep(root, id, (s) => {
     s.status = "running"; s.error = null; s.waitUntil = null; s.pid = process.pid; s.heartbeatAt = new Date().toISOString();
     s.pauseReason = null; s.pausedAt = null; s.weeklyResetsAt = null;
-  });
+    s.stoppedAt = null; s.stoppedBy = null; s.stoppedFrom = null;
+  }, { reopen: true });
+  if (fromStop) log(`resumed by the owner after a stop, at stage ${sweep.stage}`);
   const beat = setInterval(() => { try { patchSweep(root, id, (s) => { s.heartbeatAt = new Date().toISOString(); }); } catch {} }, deps.heartbeatMs || HEARTBEAT_MS);
   if (beat.unref) beat.unref();
 
@@ -886,11 +993,16 @@ export async function runSweep({ root, id, io = {}, deps = {} }) {
   // checks) is recorded in sweep.json and stopped at the end; one that was already answering, a
   // run's for example, is never touched.
   ctx.ensureDev = (ds, opts = {}) => ensureOwnDevServer(ctx, ds, opts);
+  // The owner's stop (sweep-stop) ends the drive between stages and before every session; what
+  // is finished stays, and the owner's own `sweep-run <id>` resumes it there.
+  const stopped = () => { log(`stopped by the owner (\`autoclaude sweep-stop\`); \`autoclaude sweep-run ${id}\` resumes it`); return { ok: true, id, status: "stopped" }; };
 
   try {
     for (let i = STAGES.indexOf(sweep.stage); i >= 0 && i < STAGES.length; i++) {
       const stage = STAGES[i];
+      if (stopRequested(root, id)) return stopped();
       const r = await runStage(stage, ctx);
+      if ((r && r.stopped) || stopRequested(root, id)) return stopped();
       if (r && r.pause) {
         // pauseReason, pausedAt and weeklyResetsAt (ISO, when known) tell the watchdog when the
         // weekly window that stopped the sweep has reset.
@@ -915,6 +1027,7 @@ export async function runSweep({ root, id, io = {}, deps = {} }) {
     patchSweep(root, id, (s) => { s.status = "done"; });
     return { ok: true, id, status: "done" };
   } catch (e) {
+    if (stopRequested(root, id)) return stopped();
     const msg = redactors.text(e && e.message ? e.message : String(e));
     patchSweep(root, id, (s) => { s.status = "failed"; s.error = msg; });
     log(`failed: ${msg}`);
@@ -940,20 +1053,21 @@ async function ensureOwnDevServer(ctx, ds, opts = {}) {
 // Stops the dev server this sweep started, if it is still the one running and no run is using
 // it. A server the sweep found answering is never recorded, so never stopped; one a run's gate
 // restarted has another pid and is the run's now; while a run is running or paused (or its
-// supervisor is alive) the server is left to it.
+// supervisor is alive) the server is left to it. True when it stopped one.
 function stopOwnDevServer(ctx) {
   try {
     const s = readSweep(ctx.root, ctx.id) || {};
     const pid = s.devServerPid;
-    if (!pid) return;
+    if (!pid) return false;
     const forget = () => patchSweep(ctx.root, ctx.id, (x) => { x.devServerPid = null; });
     const info = (ctx.deps.devServerInfo || devServerInfo)({ root: ctx.root });
-    if (!info || info.pid !== pid) { forget(); return; }
-    if (runInUse(ctx)) { ctx.log(`dev server (pid ${pid}) left running: a run in this project uses it`); forget(); return; }
+    if (!info || info.pid !== pid) { forget(); return false; }
+    if (runInUse(ctx)) { ctx.log(`dev server (pid ${pid}) left running: a run in this project uses it`); forget(); return false; }
     (ctx.deps.stopDevServer || stopDevServer)({ root: ctx.root });
     forget();
     ctx.log(`dev server (pid ${pid}) the sweep started is stopped`);
-  } catch {}
+    return true;
+  } catch { return false; }
 }
 
 // True while a normal run in this project is running or paused, or its supervisor is alive.
@@ -1003,7 +1117,8 @@ async function stageScanners(ctx) {
     let out;
     try { out = await fn(); }
     catch (e) { out = { candidates: [], coverage: { examined: [], notExamined: [`${name} scanners: not checked (${errText(e)})`] } }; }
-    writeJsonAtomic(file, out || { candidates: [], coverage: { examined: [], notExamined: [`${name} scanners: not checked`] } });
+    // The scanners mask what they find; the test users' passwords are masked here as well.
+    writeJsonAtomic(file, ctx.redactors.literals(out || { candidates: [], coverage: { examined: [], notExamined: [`${name} scanners: not checked`] } }));
     ctx.log(`scanner ${name}: ${(out && out.candidates ? out.candidates.length : 0)} candidate(s)`);
   };
   // The scanners' own `run` is a command runner (git, npm audit, npx), not a model session, so it
@@ -1051,7 +1166,7 @@ function savedResult(ctx, name, r, extra = {}) {
 
 // The masking functions from findings.js (redact for text, redactDeep for objects). Without them
 // nothing a session wrote is kept: the fallback replaces every string, so no unmasked value can
-// reach a file.
+// reach a file. runSweep wraps them with the known test passwords (withSecrets).
 async function loadRedactors(deps) {
   const text = deps.redact || (await maybeImport("./findings.js", "redact"));
   const deep = deps.redactDeep || (await maybeImport("./findings.js", "redactDeep"));
@@ -1076,14 +1191,23 @@ function agentDone(file) {
 }
 
 // Runs one headless session, and once more when it fails for a reason that may pass (an API
-// error, a timeout, a crash, no answer). A rate limit is handed back to the pool, which waits it
-// out; a session that used all its turns is not repeated, since it would only do that again.
+// error, a timeout, a crash, no answer). A session that used all its turns gets the checkers'
+// resumed wrap-up (headless.runWithWrapUp: a few more turns for its structured answer from what
+// it has seen) and is not repeated, since a rerun would only use them all again. A rate limit, the
+// wrap-up's included, is handed back to the pool, which waits it out and runs the agent again.
 async function runSession(ctx, opts) {
   const run = ctx.deps.run || runHeadless;
-  const first = await run(opts);
+  const once = async () => {
+    let limited = false;
+    const tracked = async (o) => { const r = await run(o); limited = !!(r && r.rateLimited); return r; };
+    const r = await runWithWrapUp(tracked, opts);
+    if (r && r.wrappedUp) ctx.log(`${opts.role}: used all its turns; its answer came from the wrap-up`);
+    return r && !r.ok && limited ? { ...r, rateLimited: true } : r;
+  };
+  const first = await once();
   if (!first || first.ok || first.rateLimited || first.subtype === "error_max_turns") return { ...first, attempts: 1 };
   ctx.log(`${opts.role}: failed (${first.error || "no answer"}); trying once more`);
-  const second = await run(opts);
+  const second = await once();
   const add = (a, b) => (typeof a === "number" || typeof b === "number" ? (a || 0) + (b || 0) : null);
   return { ...second, attempts: 2, costUsd: add(first.costUsd, second && second.costUsd), durationMs: add(first.durationMs, second && second.durationMs) };
 }
@@ -1111,6 +1235,7 @@ async function stageMap(ctx) {
     return r;
   };
   const pooled = await runPool([{ name: "map" }], { concurrency: 1, launch, usage: usageController(ctx) });
+  if (pooled.stopped) return { stopped: true };
   if (pooled.paused) return weeklyPause(pooled);
   loadMap(ctx);
   return null;
@@ -1151,7 +1276,7 @@ async function stageReview(ctx) {
   if (!ctx.mapText) loadMap(ctx);
   if (!ctx.baseline) ctx.baseline = readJson(path.join(ctx.sp.scannersDir, "baseline.json"), null);
   ctx.baselineText = ctx.baseline ? JSON.stringify(ctx.baseline, null, 1).slice(0, 2000) : "(no baseline recorded)";
-  const redact = ctx.deps.redact || (await maybeImport("./findings.js", "redact")) || ((s) => s);
+  const redact = (s) => ctx.redactors.text(s);
   // Scanner hits go to the reviewers masked: a stale-TODO line or a secret hit is quoted code.
   const scannerCandidates = scannerCandidatesFrom(ctx.sp).map((c) => ({ ...c, evidence: c.evidence ? redact(String(c.evidence)) : "" }));
   const optimizeOut = ctx.options.kind === "optimize" ? readJson(path.join(ctx.sp.scannersDir, "optimize.json"), null) : null;
@@ -1178,6 +1303,7 @@ async function stageReview(ctx) {
     return r;
   };
   const pooled = await runPool(todo, { concurrency: concurrency(ctx.config), launch, usage: usageController(ctx) });
+  if (pooled.stopped) return { stopped: true };
   if (pooled.paused) return weeklyPause(pooled);
   return null;
 }
@@ -1284,9 +1410,12 @@ async function stageLive(ctx) {
         ensureDir(outDir);
         const origin = originOfUrl(agent.target.url);
         const mcp = browser.mcpConfigFor(ctx.root, outDir.replace(/\\/g, "/"), { name: `sweep-${agent.name}`, proxyServer: proxy.url, allowedOrigins: origin ? [origin] : [], secretsFile: agent.mode === "full" ? users.envFile : null });
+        // No --add-dir: a browser session works from the map in its prompt, and its Read, Glob
+        // and Grep reach only its own folder (cwd: the screenshots and page snapshots), never the
+        // project, its secrets/ folder or the sweep's dotenv file of passwords.
         const tools = ["mcp__playwright", "Read", "Glob", "Grep"];
         const prompt = await browserPrompt(agent, ctx, outDir);
-        const args = buildArgs({ model: modelFor(ctx.config), effort: effortFor(ctx.config), maxTurns: maxTurns(ctx.config), schema, mcpConfig: mcp, allowedTools: tools, extraArgs: ["--add-dir", ctx.root, "--disallowedTools", disallowed.join(",")] });
+        const args = buildArgs({ model: modelFor(ctx.config), effort: effortFor(ctx.config), maxTurns: maxTurns(ctx.config), schema, mcpConfig: mcp, allowedTools: tools, extraArgs: ["--disallowedTools", disallowed.join(",")] });
         let r = await runSession(ctx, { prompt, args, cwd: outDir, env: browser.env(ctx.env), role: `sweep-${agent.name}`, timeoutMs: timeoutMs(ctx.config) });
         // The kinds this session was told not to run reach the report as not checked, whatever
         // the session itself wrote.
@@ -1307,6 +1436,7 @@ async function stageLive(ctx) {
       }
     };
     const pooled = await runPool(todo, { concurrency: concurrency(ctx.config), launch, usage: usageController(ctx) });
+    if (pooled.stopped) return { stopped: true };
     if (pooled.paused) return weeklyPause(pooled);
   } finally {
     // The passwords are only needed while a browser runs.
@@ -1350,6 +1480,8 @@ async function stageMerge(ctx) {
   const kind = ctx.options.kind;
   // Every candidate is of this sweep's kind, whatever a session wrote.
   let raw = candidates.map((c) => ({ ...c, kind, category: String(c.category || "other").trim().toLowerCase().replace(/\s+/g, "-") || "other" }));
+  // A browser session's finding is fixed right away like any other when a code change fixes it.
+  if (kind === "security") raw = raw.map(browserAutoFix);
   if (kind === "optimize") {
     // The tier rules apply to what a session proposed too: a session can never make a tier safer.
     const tierRules = ctx.deps.applyTierRules || (await maybeImport("./scan-optimize.js", "applyTierRules"));
@@ -1357,15 +1489,17 @@ async function stageMerge(ctx) {
     // And so does the three-proof rule for "unused" (P10.8): a deletion is automatic only when a
     // tool flagged the item and the repository-wide reference search and the entry-point check
     // kept it (scanners/unused.json). A session's own unused-file or unused-dependency candidate
-    // without that is report only.
+    // without that is report only, and so is a "leftover" whose fix deletes a whole file.
     const proofs = unusedProofs(ctx.sp);
     let demoted = 0;
+    let leftovers = 0;
     raw = raw.map((c) => {
       const d = requireUnusedProof(c, proofs);
-      if (d !== c) demoted++;
+      if (d !== c) { if (c.category === "leftover") leftovers++; else demoted++; }
       return d;
     });
     if (demoted) coverage.notExamined.push(`${demoted} unused file or package candidate${demoted === 1 ? "" : "s"} from the review sessions: not deleted automatically (no tool flagged ${demoted === 1 ? "it" : "them"} with a clean repository-wide reference search; report only)`);
+    if (leftovers) coverage.notExamined.push(`${leftovers} leftover candidate${leftovers === 1 ? "" : "s"} from the review sessions that delete${leftovers === 1 ? "s" : ""} a whole file: not deleted automatically (no tool flagged the file with a clean repository-wide reference search; report only)`);
   }
   const deduped = findingsMod.dedupe ? findingsMod.dedupe(raw, { kind, root: ctx.root }) : raw;
   const accepted = findingsMod.loadAccepted ? findingsMod.loadAccepted(ctx.root) : [];
@@ -1373,7 +1507,7 @@ async function stageMerge(ctx) {
   const numbered = findingsMod.numberFindings ? findingsMod.numberFindings(split.kept, kind) : split.kept.map((f, i) => ({ ...f, id: `${kind === "security" ? "SEC" : "OPT"}-${String(i + 1).padStart(3, "0")}` }));
   // Defence in depth: redact the evidence of every finding before it is stored, so no secret
   // reaches the store, the report or an alert even if an agent quoted one (P10.2).
-  const redact = findingsMod.redact || ((s) => s);
+  const redact = (s) => ctx.redactors.text(s);
   const safe = numbered.map((f) => ({ ...f, evidence: f.evidence ? redact(String(f.evidence)) : f.evidence, verdict: null, verdicts: [] }));
   // The areas and how their review went, for the report's coverage.
   const sweep = readSweep(ctx.root, ctx.id) || {};
@@ -1405,22 +1539,52 @@ export function unusedProofs(sp) {
   return { files, deps };
 }
 
+// Whether a candidate's fix deletes its whole file: `line` 0 (the schema's "the whole file"), or a
+// title or fix that removes the file itself ("Remove src/old.js", "delete this file", "git rm").
+// A false positive only makes a deletion report-only, the safe side.
+export function removesWholeFile(c) {
+  const file = normRel(c && c.file);
+  if (!file || /^[a-z]+:\/\//i.test(file)) return false;
+  if (!(Number(c.line) > 0)) return true;
+  const text = [c.title, c.fix].filter((t) => typeof t === "string").join("\n");
+  if (/\bgit\s+rm\b/i.test(text)) return true;
+  if (/\b(delete|remove|drop)\s+(the\s+|this\s+|that\s+)?(whole\s+|entire\s+)?(file|module)\b/i.test(text)) return true;
+  const names = [file, file.split("/").pop()].map(escapeRe).join("|");
+  return new RegExp(`\\b(delete|remove|drop|rm)\\s+(the\\s+)?(file\\s+)?[\`'"]?(\\S*/)?(${names})(?![A-Za-z0-9_.-])`, "i").test(text);
+}
+
 // A session's unused-file or unused-dependency candidate keeps its tier only with the scanner's
-// proof behind it; without, it becomes tier C (report only, never fixed automatically). Scanner
-// candidates carry their proof already. Returns the candidate itself when nothing changes.
+// proof behind it; without, it becomes tier C (report only, never fixed automatically). So does a
+// session's "leftover" whose fix deletes a whole file (removesWholeFile): the file needs the same
+// proof as an unused file. Scanner candidates carry their proof already. Returns the candidate
+// itself when nothing changes.
 export function requireUnusedProof(c, proofs) {
-  if (!c || !UNUSED_PROOF_CATEGORIES.includes(c.category)) return c;
+  if (!c) return c;
+  const wholeLeftover = c.category === "leftover" && removesWholeFile(c);
+  if (!UNUSED_PROOF_CATEGORIES.includes(c.category) && !wholeLeftover) return c;
   if (!String(c.source || "").startsWith("session")) return c;
   if (c.tier === "C") return c;
   const file = normRel(c.file);
   let proven = false;
-  if (c.category === "unused-file") proven = proofs.files.has(file);
+  if (c.category === "unused-file" || wholeLeftover) proven = proofs.files.has(file);
   else {
     const text = [c.title, c.evidence, c.fix].filter(Boolean).join(" ");
     proven = proofs.deps.some((d) => d.manifest === file && new RegExp(`(^|[^A-Za-z0-9@/._-])${d.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}($|[^A-Za-z0-9/._-])`).test(text));
   }
   if (proven) return c;
   return { ...c, tier: "C", autoFixSafe: false, tierNote: "no tool flagged it with a clean repository-wide reference search, so it is report only" };
+}
+
+// A security browser session's finding (an IDOR, XSS, CSRF or open redirect the browser saw) is
+// fixed right away like a reviewer's: its autoFixSafe stands when the session says a change to the
+// project's code fixes it and gives that change in `fix`. One the session marks as needing the
+// owner (a hosting or provider setting, a key to rotate, a decision), or one with no fix to make,
+// stays with the owner. Other sources are left as they are. Returns the candidate itself when
+// nothing changes.
+export function browserAutoFix(c) {
+  if (!c || !/^session browser-/.test(String(c.source || ""))) return c;
+  const safe = c.autoFixSafe === true && typeof c.fix === "string" && c.fix.trim() !== "";
+  return safe === (c.autoFixSafe === true) ? c : { ...c, autoFixSafe: safe };
 }
 
 // The deterministic results the engine writes (scanners/security.json, optimize.json, probe.json);
@@ -1496,7 +1660,7 @@ async function stageVerify(ctx) {
   const todo = store.findings.filter((f) => !f.verdict);
   if (!todo.length) return null;
   const schema = ctx.deps.VERDICT_SCHEMA || (await maybeImportValue("./findings.js", "VERDICT_SCHEMA")) || VERDICT_SCHEMA_FALLBACK;
-  const redact = ctx.deps.redact || (await maybeImport("./findings.js", "redact")) || ((s) => s);
+  const redact = (s) => ctx.redactors.text(s);
   // One pool task per verifier session; results collected per finding, then the verdict decided.
   // A verifier that failed (also on an earlier pass of this stage) runs again.
   const tasks = [];
@@ -1514,6 +1678,8 @@ async function stageVerify(ctx) {
     return r;
   };
   const pooled = await runPool(pending, { concurrency: concurrency(ctx.config), launch, usage: usageController(ctx) });
+  // Stopped before every verifier answered: no verdict is decided from part of the votes.
+  if (pooled.stopped) return { stopped: true };
   if (pooled.paused) return weeklyPause(pooled);
 
   // Tally each finding's verdicts. The report shows the votes and the verifiers' reasons.
@@ -1800,13 +1966,17 @@ export function sweepLiveness(s, { now = Date.now(), isAlive = isPidAlive } = {}
 }
 
 // A sweep as `status` and `sweep-status` show it: its own status, with a dead one shown as
-// "stopped (window gone)" and the command that resumes it (a paused one resumes the same way).
+// "stopped (window gone)" and one the owner stopped as "stopped (by the owner)", the command that
+// resumes it (a paused one resumes the same way), and, while it is going (running, waiting or
+// paused), the command that stops it for good.
 export function describeSweep(s, opts = {}) {
   const liveness = sweepLiveness(s, opts);
   const dead = liveness === "dead";
-  const displayStatus = dead ? "stopped (window gone)" : s.status;
-  const resumeCommand = dead || s.status === "paused" ? `autoclaude sweep-run ${s.id}` : null;
-  return { ...s, liveness, displayStatus, resumeCommand };
+  const stopped = s.status === "stopped";
+  const displayStatus = dead ? "stopped (window gone)" : stopped ? "stopped (by the owner)" : s.status;
+  const resumeCommand = dead || stopped || s.status === "paused" ? `autoclaude sweep-run ${s.id}` : null;
+  const stopCommand = ["running", "waiting", "paused"].includes(s.status) ? `autoclaude sweep-stop ${s.id}` : null;
+  return { ...s, liveness, displayStatus, resumeCommand, stopCommand };
 }
 
 // Every sweep folder's sweep.json (the folder also holds its .gitignore; an unreadable or
@@ -1834,6 +2004,50 @@ export function sweepStatus(root, { now = Date.now(), isAlive = null } = {}) {
   return { sweeps: readAllSweeps(root).map((s) => describeSweep(s, opts)) };
 }
 
+// `autoclaude sweep-stop [<id>]`: the owner ends a sweep for good. Marks it "stopped" (by the
+// owner), ends its driver's process tree (the ac-sweep window and every session, browser and
+// proxy it runs), and does what the driver's own exit would have done: removes the test logins'
+// dotenv file and stops a dev server the sweep started (unless a run uses it). The watchdog never
+// brings a stopped sweep back (it looks only at running, waiting and weekly-paused ones), a window
+// the engine opens (`sweep-run --auto`) leaves it alone, and the driver itself ends at its next
+// check if its process could not be ended. Only the owner's own `autoclaude sweep-run <id>`
+// resumes it, where it stopped. Without an id: the one sweep running or waiting, else the one
+// paused. Returns { ok, id, from, stage, pid, killed, devServerStopped, already } or { ok: false,
+// error, choices }. deps: isPidAlive, killTree, devServerInfo, stopDevServer (tests).
+export function stopSweep({ root, id = null, now = Date.now(), deps = {} } = {}) {
+  const isAlive = deps.isPidAlive || isPidAlive;
+  let s = null;
+  if (id) {
+    s = readSweep(root, id);
+    if (!s) return { ok: false, error: `no sweep ${id} in this project (\`autoclaude sweep-status\` lists them)` };
+  } else {
+    const active = findActiveSweeps(root, { now, isAlive });
+    const going = active.filter((x) => x.status === "running" || x.status === "waiting");
+    const pool = going.length ? going : active;
+    if (!pool.length) return { ok: false, error: "no sweep is running, waiting or paused in this project (`autoclaude sweep-status` lists them)" };
+    if (pool.length > 1) return { ok: false, choices: pool.map((x) => x.id), error: `${pool.length} sweeps are going (${pool.map((x) => x.id).join(", ")}); name the one to stop: \`autoclaude sweep-stop <id>\`` };
+    id = pool[0].id;
+    s = readSweep(root, id);
+  }
+  if (s.status === "stopped") return { ok: true, id, already: true, from: s.stoppedFrom || null, stage: s.stage || null, pid: null, killed: false, devServerStopped: false };
+  if (!["running", "waiting", "paused"].includes(s.status)) return { ok: false, id, error: `sweep ${id} has already ${s.status === "done" ? "finished" : `ended (${s.status})`}; there is nothing to stop` };
+  const from = s.status;
+  const at = new Date(now).toISOString();
+  const mark = (x) => { x.status = "stopped"; x.stoppedAt = at; x.stoppedBy = "owner"; x.stoppedFrom = from; x.waitUntil = null; };
+  // Marked first: a driver that outlives the kill reads it before its next session and ends.
+  patchSweep(root, id, mark);
+  const pid = s.pid && s.pid !== process.pid && sweepDriverAlive(s, { now, isAlive }) ? s.pid : null;
+  let killed = false;
+  if (pid) { try { killed = !!(deps.killTree || killTree)(pid); } catch { killed = false; } }
+  try { fs.rmSync(sweepPaths(root, id).usersEnvFile, { force: true }); } catch {}
+  const devServerStopped = stopOwnDevServer({ root, id, deps, log: () => {} });
+  // A write the driver made between reading sweep.json and its end may have put its own status
+  // back; and a driver that was ended never clears its pid.
+  const after = readSweep(root, id) || {};
+  if (after.status !== "stopped" || (killed && after.pid)) patchSweep(root, id, (x) => { mark(x); if (killed) x.pid = null; });
+  return { ok: true, id, from, stage: s.stage || null, pid, killed, devServerStopped };
+}
+
 // The sweeps the watchdog should bring back: running or waiting, their window gone, and touched
 // within the last day (an older one is a leftover, as for a run). Returns them as describeSweep
 // gives them (id, status, pid, heartbeatAt, updatedAt ... plus liveness "dead"), newest first;
@@ -1842,9 +2056,14 @@ export function findDeadSweeps(root, { now = Date.now(), isAlive = null } = {}) 
   const opts = { now, isAlive: isAlive || isPidAlive };
   return readAllSweeps(root).filter((s) => {
     if (sweepLiveness(s, opts) !== "dead") return false;
-    const last = Math.max(Date.parse(s.heartbeatAt || "") || 0, Date.parse(s.updatedAt || "") || 0, Date.parse(s.startedAt || "") || 0);
+    const last = lastTouched(s);
     return last > 0 && now - last <= STALE_SWEEP_MS;
   }).map((s) => describeSweep(s, opts));
+}
+
+// The last sign of life a sweep's record shows (heartbeat, update or start), in ms; 0 for none.
+function lastTouched(s) {
+  return Math.max(Date.parse(s.heartbeatAt || "") || 0, Date.parse(s.updatedAt || "") || 0, Date.parse(s.startedAt || "") || 0);
 }
 
 // ---------- small helpers ----------
@@ -1874,6 +2093,8 @@ function usageController(ctx) {
     },
     now,
     sleep,
+    // The owner's sweep-stop: no session is launched after it.
+    stopRequested: () => stopRequested(ctx.root, ctx.id),
     waitAt5hPct: sw.waitAt5hPct || 90,
     weeklyPauseAtPct: (ctx.config && ctx.config.usage && ctx.config.usage.weeklyPauseAtPct) || 85,
     graceMs: graceMin * 60 * 1000,

@@ -69,10 +69,18 @@ Project commands (run inside a project):
                         --reset "<cmd>"    the command that resets that database
                         --options <file>   a JSON file of the full options (flags win over it)
                         --estimate         print the sessions and rough time only; starts nothing
-  sweep-run <id>        (internal) Drive or resume the sweep <id>; the sweep window runs this and
-                        it picks up where it left off after a crash or restart
-  sweep-status          This project's sweeps (running, waiting, paused, done, failed); one whose
-                        window is gone shows as stopped, with the command that carries it on
+  sweep-run <id>        Drive or resume the sweep <id>; the sweep window runs this and it picks up
+                        where it left off after a crash or restart. Run by hand, it also resumes
+                        a sweep stopped with sweep-stop (--auto, which the windows AutoClaude
+                        opens pass, leaves a stopped sweep alone)
+  sweep-stop [<id>]     Stop a sweep for good: it is marked stopped, its window and the sessions
+                        it runs are ended, and the watchdog leaves it alone (closing the window
+                        is not enough: the watchdog opens it again). Without an id, the sweep
+                        that is running or waiting. Finished work is kept, and sweep-run <id>
+                        resumes it where it stopped
+  sweep-status          This project's sweeps (running, waiting, paused, stopped, done, failed);
+                        one whose window is gone shows as stopped, with the command that carries
+                        it on and the one that stops it for good
   status [--all]        State, current step, attempts, usage, a running sweep, a run-plan override, last progress (--all: every registered project)
   config                Open the settings page in your browser, served from this computer only:
                         this project's settings, this computer's defaults, the alert channel,
@@ -133,7 +141,7 @@ class Io {
 }
 
 // Every command runCli knows, for `<command> --help`.
-export const COMMANDS = ["help", "version", "init", "status", "config", "run", "security", "optimize", "sweep-run", "sweep-status", "checks", "guard-test", "supervise", "nudge", "watchdog", "uninstall", "start", "ready", "blocked", "decide", "answer", "pause", "note", "resume", "lint-plan", "usage", "install-cli", "notify-setup", "notify-test"];
+export const COMMANDS = ["help", "version", "init", "status", "config", "run", "security", "optimize", "sweep-run", "sweep-stop", "sweep-status", "checks", "guard-test", "supervise", "nudge", "watchdog", "uninstall", "start", "ready", "blocked", "decide", "answer", "pause", "note", "resume", "lint-plan", "usage", "install-cli", "notify-setup", "notify-test"];
 // Commands whose arguments are free text: only a first argument of --help or -h asks for help,
 // so a note or a question that mentions -h is left alone.
 const TEXT_COMMANDS = ["nudge", "blocked", "decide", "answer", "note", "guard-test", "notify-test"];
@@ -178,6 +186,7 @@ export async function runCli(argv, rawIo = {}) {
       case "security": return await cmdSweepStart("security", rest, io);
       case "optimize": return await cmdSweepStart("optimize", rest, io);
       case "sweep-run": return await cmdSweepRun(rest, io);
+      case "sweep-stop": return await cmdSweepStop(rest, io);
       case "sweep-status": return await cmdSweepStatus(rest, io);
       case "checks": return await cmdChecks(rest, io);
       case "guard-test": return await cmdGuardTest(rest, io);
@@ -234,7 +243,7 @@ function requireProject(io, { needConfig = true } = {}) {
   if (warnings.length) io.err(`autoclaude: note: ${warnings.length} setting(s) in this computer's defaults were ignored (${warnings.map((w) => w.path || "file").join(", ")}); \`autoclaude config\` shows why`);
   // mainPlan: the project's own plan, also while a run-plan override (`run --plan`) points
   // config.plan at a generated one.
-  return { root, config: cfg.config, paths: projectPaths(root), mainPlan: cfg.mainPlan || cfg.config.plan, runPlan: cfg.runPlan || null };
+  return { root, config: cfg.config, paths: projectPaths(root), mainPlan: cfg.mainPlan || cfg.config.plan, mainContinueHere: cfg.mainContinueHere, runPlan: cfg.runPlan || null };
 }
 
 function loadPlan(project) {
@@ -461,7 +470,9 @@ async function cmdRun(args, io) {
   let state = loadState(root);
   if (settle && checkOnly && settle.action !== "keep") {
     // The real run would settle first: judge the project's own plan and state, as it would.
-    project.config = { ...project.config, plan: project.mainPlan };
+    // The project's own resume file comes back with its plan (the override renamed it, D59).
+    const docs = project.mainContinueHere ? { docs: { ...project.config.docs, continueHere: project.mainContinueHere } } : {};
+    project.config = { ...project.config, plan: project.mainPlan, ...docs };
     state = (settle.kept && readMainStateKept(root)) || state;
     io.out(`autoclaude: \`autoclaude run\` would first hand the project back to its own plan, ${project.mainPlan}${settle.plan ? ` (the run plan override to ${settle.plan} ${settle.action === "drop" ? "has no run behind it" : "is complete"})` : ""}`);
   } else if (settle && settle.action === "keep") {
@@ -766,19 +777,27 @@ async function cmdSweepStart(kind, args, io) {
   return 0;
 }
 
-// The internal command the sweep window runs: drive (or resume) the sweep, then, in "fix" mode,
-// start the normal run on the generated plan.
+// The command the sweep window runs: drive (or resume) the sweep, then, in "fix" mode, start the
+// normal run on the generated plan. --auto marks a window AutoClaude opened (the start, the
+// watchdog): it leaves a sweep the owner stopped alone. Run by hand without it, it resumes one.
 async function cmdSweepRun(args, io) {
   const id = args.find((a) => !a.startsWith("-"));
   if (!id) { io.err("autoclaude: usage: autoclaude sweep-run <id>"); return 2; }
+  const auto = args.includes("--auto");
   const project = requireProject(io);
   if (!project) return 1;
   const runSweep = await optional(io, "./sweep.js", "runSweep");
   if (!runSweep) { io.out("autoclaude: this install cannot run sweeps (lib/sweep.js is missing)"); return 1; }
-  const r = await runSweep({ root: project.root, id, io, deps: io.deps });
+  const r = await runSweep({ root: project.root, id, io, deps: io.deps, auto });
   if (!r.ok) { io.out(`autoclaude: sweep ${id} ${r.status || "failed"}${r.error ? `: ${r.error}` : ""}`); return 1; }
+  if (r.status === "stopped") {
+    io.out(r.already
+      ? `autoclaude: sweep ${id} was stopped by the owner (\`autoclaude sweep-stop\`); this window leaves it alone. \`autoclaude sweep-run ${id}\` resumes it.`
+      : `autoclaude: sweep ${id} stopped by the owner (\`autoclaude sweep-stop\`). Its finished work is kept; \`autoclaude sweep-run ${id}\` resumes it where it stopped.`);
+    return 0;
+  }
   if (r.status === "paused") {
-    io.out(`autoclaude: sweep ${id} paused: ${r.reason}. Rerun \`autoclaude sweep-run ${id}\` when usage allows.`);
+    io.out(`autoclaude: sweep ${id} paused: ${r.reason}. Rerun \`autoclaude sweep-run ${id}\` when usage allows, or give it up with \`autoclaude sweep-stop ${id}\`.`);
     if (/weekly/i.test(String(r.reason || ""))) io.out("  After the weekly reset the watchdog carries it on by itself when usage.autoResumeAfterWeeklyReset is on and the watchdog is installed (`autoclaude watchdog --install`).");
     return 0;
   }
@@ -808,16 +827,41 @@ async function cmdSweepRun(args, io) {
   return 0;
 }
 
+// `autoclaude sweep-stop [<id>]`: stop a sweep for good (sweep.stopSweep). Closing its window is
+// not enough, since the watchdog opens it again; this marks it stopped, ends the window's process
+// tree, and the watchdog leaves it alone. `sweep-run <id>` resumes it on purpose.
+async function cmdSweepStop(args, io) {
+  const flag = args.find((a) => a.startsWith("-"));
+  if (flag) throw new Error(`unknown option ${flag}`);
+  if (args.length > 1) { io.err("autoclaude: usage: autoclaude sweep-stop [<id>]"); return 2; }
+  const project = requireProject(io, { needConfig: false });
+  if (!project) return 1;
+  const stopSweep = await optional(io, "./sweep.js", "stopSweep");
+  if (!stopSweep) { io.out("autoclaude: this install cannot run sweeps (lib/sweep.js is missing)"); return 1; }
+  const r = stopSweep({ root: project.root, id: args[0] || null, now: io.now().getTime(), deps: io.deps });
+  if (!r.ok) { io.out(`autoclaude: ${r.error}`); return 1; }
+  if (r.already) { io.out(`autoclaude: sweep ${r.id} is already stopped; \`autoclaude sweep-run ${r.id}\` resumes it.`); return 0; }
+  const ended = r.killed ? "; its window and the sessions it ran are ended"
+    : r.pid ? `; its process ${r.pid} did not end when asked, but the sweep checks before every session and stops by itself` : "";
+  io.out(`autoclaude: sweep ${r.id} stopped (it was ${r.from}${r.stage ? ` at stage ${r.stage}` : ""})${ended}${r.devServerStopped ? "; the dev server it started is stopped" : ""}.`);
+  io.out(`  It stays stopped: the watchdog leaves it alone. Its finished work is kept in .autoclaude/sweeps/${r.id}/; \`autoclaude sweep-run ${r.id}\` resumes it where it stopped.`);
+  return 0;
+}
+
 // One sweep as `status` shows it (sweep.describeSweep's displayStatus: a sweep whose window is
-// gone reads "stopped (window gone)"), with the command that carries a stopped or paused one on.
+// gone reads "stopped (window gone)"), with the command that carries a stopped or paused one on
+// and the one that stops it for good.
 function describeSweepLine(s, io) {
   const started = Date.parse(s.startedAt);
   const resume = s.resumeCommand ? `; carry it on with \`${s.resumeCommand}\`` : "";
-  return `sweep: ${s.kind} ${s.displayStatus || s.status}${sweepStageText(s)}${Number.isFinite(started) ? `, started ${fmtAge(io.now().getTime() - started)}` : ""}${resume}`;
+  const stop = s.stopCommand ? `${resume ? ", or stop it for good with" : "; stop it with"} \`${s.stopCommand}\`` : "";
+  return `sweep: ${s.kind} ${s.displayStatus || s.status}${sweepStageText(s)}${Number.isFinite(started) ? `, started ${fmtAge(io.now().getTime() - started)}` : ""}${resume}${stop}`;
 }
 
-// " (stage review)" for a sweep going, " at stage review" for one whose window is gone.
+// " (stage review)" for a sweep going, " at stage review" for one whose window is gone or that the
+// owner stopped.
 function sweepStageText(s) {
+  if (s.status === "stopped") return s.stage ? ` at stage ${s.stage}` : "";
   if (s.status !== "running" && s.status !== "waiting") return "";
   return s.liveness === "dead" ? ` at stage ${s.stage}` : ` (stage ${s.stage})`;
 }
@@ -834,7 +878,9 @@ async function cmdSweepStatus(args, io) {
     // The real verification count, known once the findings are merged (scanner hits included).
     const verify = typeof s.verifySessions === "number" && s.status !== "done" ? `, ${s.verifySessions} verification session${s.verifySessions === 1 ? "" : "s"}` : "";
     io.out(`  ${s.id}: ${s.displayStatus || s.status}${sweepStageText(s)}${counts}${verify}${s.error ? ` - ${s.error}` : ""}`);
-    if (s.resumeCommand) io.out(`    carry it on with \`${s.resumeCommand}\`${s.liveness === "dead" ? " (its window is gone: closed, logged off or restarted)" : ""}`);
+    if (s.status === "stopped") io.out(`    the watchdog leaves it alone; \`${s.resumeCommand}\` resumes it where it stopped`);
+    else if (s.resumeCommand) io.out(`    carry it on with \`${s.resumeCommand}\`${s.liveness === "dead" ? " (its window is gone: closed, logged off or restarted)" : ""}`);
+    if (s.stopCommand) io.out(`    stop it for good with \`${s.stopCommand}\`${s.liveness === "alive" || s.liveness === "starting" ? " (closing its window is not enough when the watchdog is installed: it opens the window again)" : ""}`);
     if (s.status === "done" && s.result && s.result.runCommand && s.result.after === "plan") io.out(`    fix plan: ${s.result.planFile}; run it with \`${s.result.runCommand}\``);
   }
   return 0;

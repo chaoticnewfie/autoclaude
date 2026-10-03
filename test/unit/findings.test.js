@@ -6,7 +6,7 @@ import path from "node:path";
 import {
   FINDING_SCHEMA, CANDIDATES_SCHEMA, VERDICT_SCHEMA, SEVERITIES, ACCEPTED_FILE, FINDINGS_SCHEMA_VERSION,
   redact, redactDeep, maskValue, fingerprint, normalizeFinding, dedupe, numberFindings, sortFindings, countBySeverity,
-  gateSeverity, areaOf, loadAccepted, readAccepted, saveAccepted, applyAccepted, writeReport
+  gateSeverity, areaOf, loadAccepted, readAccepted, saveAccepted, applyAccepted, writeReport, canonicalCategory
 } from "../../plugins/autoclaude/lib/findings.js";
 
 const tmpDir = () => fs.mkdtempSync(path.join(os.tmpdir(), "autoclaude-findings-"));
@@ -330,9 +330,137 @@ test("a session's finding keeps its fingerprint in the next sweep: reworded, ano
     first[0].fingerprint, "the first copy of the line in the file, in the search route");
   // Without the project to read, the evidence decides, as before.
   assert.notEqual(fingerprint({ category: "injection", file: "src/routes.js", evidence: "a" }), fingerprint({ category: "injection", file: "src/routes.js", evidence: "b" }));
-  // A path outside the project is never read.
-  const outside = normalizeFinding({ category: "injection", file: "../../etc/passwd", line: 1, evidence: "x" }, { kind: "security", root });
-  assert.equal(outside.fingerprint, fingerprint({ category: "injection", file: "../../etc/passwd", line: 1, evidence: "x" }));
+  // A path outside the project is never read: its lines would anchor two findings apart, but
+  // unread, the file is all a session's finding has.
+  const parent = tmpDir();
+  const inner = path.join(parent, "proj");
+  fs.mkdirSync(inner);
+  fs.writeFileSync(path.join(parent, "outside.js"), "const a = 1;\nconst b = 2;\n");
+  const out1 = normalizeFinding({ category: "injection", file: "../outside.js", line: 1, evidence: "x", source: "session area-src" }, { kind: "security", root: inner });
+  const out2 = normalizeFinding({ category: "injection", file: "../outside.js", line: 2, evidence: "y", source: "session area-src" }, { kind: "security", root: inner });
+  assert.equal(out1.fingerprint, out2.fingerprint);
+  fs.writeFileSync(path.join(inner, "inside.js"), "const a = 1;\nconst b = 2;\n");
+  const in1 = normalizeFinding({ category: "injection", file: "inside.js", line: 1, evidence: "x", source: "session area-src" }, { kind: "security", root: inner });
+  const in2 = normalizeFinding({ category: "injection", file: "inside.js", line: 2, evidence: "x", source: "session area-src" }, { kind: "security", root: inner });
+  assert.notEqual(in1.fingerprint, in2.fingerprint, "the same lines inside the project are read and tell the two apart");
+});
+
+const ORDERS = [
+  "import { db } from \"./db.js\";",
+  "",
+  "export async function getOrder(req, res) {",
+  "  const id = req.params.id;",
+  "  const order = await db.query(",
+  "    `SELECT * FROM orders WHERE id = ${id}`",
+  "  );",
+  "  if (!order) return res.status(404).end();",
+  "  // TODO: check the owner",
+  "  res.json(order);",
+  "}",
+  "",
+  "export async function listOrders(req, res) {",
+  "  const rows = await db.query(\"SELECT * FROM orders WHERE owner = $1\", [req.user.id]);",
+  "  // TODO: paginate",
+  "  res.json(rows);",
+  "}",
+  "",
+  "class Cart {",
+  "  total() {",
+  "    return 1;",
+  "  }",
+  "}",
+  "",
+  "class Invoice {",
+  "  total() {",
+  "    return 2;",
+  "  }",
+  "}",
+  ""
+].join("\n");
+
+test("one issue reported twice, worded and categorized differently and a few lines apart: one fingerprint, and accepted stays accepted", () => {
+  const root = tmpDir();
+  fs.mkdirSync(path.join(root, "src"));
+  fs.writeFileSync(path.join(root, "src", "orders.js"), ORDERS);
+  const norm = (f) => normalizeFinding(f, { kind: "security", root });
+  // Sweep 1: the area reviewer points at the function's line.
+  const first = norm({ category: "injection", title: "SQL injection in getOrder", severity: "high", file: "src/orders.js", line: 3,
+    evidence: "getOrder builds its query from req.params.id", source: "session area-src" });
+  // Sweep 2: another reviewer calls it "SQL Injection", words it otherwise and names the query's line.
+  const second = norm({ category: "SQL Injection", title: "The order id reaches the database unescaped", severity: "critical", file: "src/orders.js", line: 6,
+    evidence: "6: `SELECT * FROM orders WHERE id = ${id}`", source: "session area-api" });
+  assert.equal(second.fingerprint, first.fingerprint);
+  assert.equal(second.category, "sql-injection", "the stored category stays as the session wrote it");
+  saveAccepted(root, [{ fingerprint: first.fingerprint, kind: "security", reason: "the id is checked by the router" }]);
+  const next = applyAccepted([second], loadAccepted(root));
+  assert.deepEqual([next.accepted.length, next.kept.length], [1, 0], "listed as accepted, not reported again");
+  // One sweep's two reports, five lines apart (beyond NEAR_LINES): one finding.
+  const merged = dedupe([{ ...first, fingerprint: undefined }, { ...second, fingerprint: undefined }], { kind: "security", root });
+  assert.equal(merged.length, 1);
+
+  // The reviewer says authz where the browser says idor, at other lines of the same function.
+  const authz = norm({ category: "authz", file: "src/orders.js", line: 4, evidence: "no owner check", source: "session area-src" });
+  const idor = norm({ category: "IDOR", file: "src/orders.js", line: 8, evidence: "user B reads user A's order", source: "session browser-0" });
+  assert.equal(idor.fingerprint, authz.fingerprint);
+  assert.notEqual(authz.fingerprint, first.fingerprint, "another kind of problem in the same function is another finding");
+  // The same category in another function is another finding.
+  assert.notEqual(norm({ category: "injection", file: "src/orders.js", line: 14, evidence: "x", source: "session area-src" }).fingerprint, first.fingerprint);
+  // A method of one class is not the same-named method of another.
+  assert.notEqual(norm({ category: "bug", file: "src/orders.js", line: 21, source: "session area-src" }).fingerprint, norm({ category: "bug", file: "src/orders.js", line: 27, source: "session area-src" }).fingerprint);
+
+  // A file-level finding (line 0, nothing in the file quoted), or one on a URL path: the file alone.
+  const fileLevel = (category, evidence, file = "src/orders.js") => norm({ category, file, line: 0, evidence, source: "session area-src" }).fingerprint;
+  assert.equal(fileLevel("csrf", "the order routes take no token"), fileLevel("CSRF Protection", "no anti-forgery token anywhere in this router"));
+  assert.equal(fileLevel("idor", "user B opened /orders/12", "/orders/:id"), fileLevel("access-control", "another user's order is shown", "/orders/:id"));
+  assert.notEqual(fileLevel("csrf", "x"), fileLevel("csrf", "x", "src/other.js"));
+
+  // A scanner names the exact line: two hits in one function stay two findings.
+  const scan = (line) => normalizeFinding({ category: "stale-todo", file: "src/orders.js", line, evidence: "TODO", source: "scanner optimize" }, { kind: "optimize", root }).fingerprint;
+  assert.notEqual(scan(9), scan(15));
+  const sameFn = normalizeFinding({ category: "commented-out", file: "src/orders.js", line: 4, evidence: "x", source: "scanner optimize" }, { kind: "optimize", root }).fingerprint;
+  assert.notEqual(sameFn, normalizeFinding({ category: "commented-out", file: "src/orders.js", line: 8, evidence: "x", source: "scanner optimize" }, { kind: "optimize", root }).fingerprint);
+});
+
+test("canonicalCategory: synonyms and casing to one slug per kind; each canonical slug is its own; unknown slugs are kept", () => {
+  const same = (kind, ...names) => {
+    const want = canonicalCategory(names[0], kind);
+    for (const n of names) assert.equal(canonicalCategory(n, kind), want, `${kind}: ${n} -> ${canonicalCategory(n, kind)}, not ${want}`);
+    return want;
+  };
+  assert.equal(same("security", "injection", "sql-injection", "SQL Injection", "sqli", "command_injection", "nosql"), "injection");
+  assert.equal(same("security", "authz", "idor", "IDOR", "access-control", "Broken Access Control", "authorization", "authentication", "missing-auth"), "authz");
+  assert.equal(same("security", "xss", "stored-xss", "Cross-Site Scripting", "html-injection"), "xss");
+  assert.equal(same("security", "secrets", "secret", "hardcoded-secret", "Hard-coded credentials", "api-key"), "secrets");
+  assert.equal(same("security", "deps", "dependencies", "dependency", "vulnerable-dependency", "supply-chain"), "deps");
+  assert.equal(same("security", "headers", "security-headers", "missing-csp", "clickjacking"), "headers");
+  assert.equal(same("security", "csrf", "CSRF", "missing-csrf-protection", "xsrf"), "csrf");
+  assert.equal(same("security", "cookies", "cookie", "insecure-cookie", "session-cookie"), "cookies");
+  assert.equal(same("security", "errors", "verbose-errors", "stack-trace"), "errors");
+  assert.equal(same("security", "exposure", "information-disclosure", "source-maps"), "exposure");
+  assert.equal(same("security", "rate-limit", "brute-force", "missing-rate-limiting"), "rate-limit");
+  assert.equal(canonicalCategory("ssrf", "security"), "ssrf", "server-side request forgery is not csrf");
+  assert.equal(canonicalCategory("server-side-request-forgery", "security"), "ssrf");
+  assert.equal(same("optimize", "duplicate", "duplicates", "duplicated-code"), "duplicate");
+  assert.equal(same("optimize", "unused-export", "unused-code", "dead-code", "unused"), "unused-export");
+  assert.equal(same("optimize", "unused-file", "unused-files", "dead-file"), "unused-file");
+  assert.equal(same("optimize", "performance", "perf", "n+1", "slow-query"), "performance");
+  assert.equal(same("optimize", "slow-test", "slow-tests"), "slow-test");
+  assert.equal(same("optimize", "major-upgrade", "major"), "major-upgrade");
+  // Every category the scanners write is canonical; another kind's canonical slug is kept.
+  for (const c of ["authz", "config", "cookies", "cors", "deps", "errors", "exposure", "headers", "rate-limit", "secrets"]) assert.equal(canonicalCategory(c, "security"), c);
+  assert.equal(canonicalCategory("headers", "optimize"), "headers");
+  assert.equal(canonicalCategory("performance", "security"), "performance");
+  for (const c of ["unused-file", "unused-dependency", "unlisted-dependency", "commented-out", "stale-todo", "leftover", "outdated", "unused-export", "duplicate", "performance", "rebuild", "slow-test", "flaky-test", "bug", "major-upgrade"]) {
+    assert.equal(canonicalCategory(c, "optimize"), c);
+  }
+  // Unknown slugs: kept, with a plural dropped; empty is "other".
+  assert.equal(canonicalCategory("Business Logic", "security"), "business-logic");
+  assert.equal(canonicalCategory("refute-me"), "refute-me");
+  assert.equal(canonicalCategory("missing-checks"), "missing-check");
+  assert.equal(canonicalCategory("", "security"), "other");
+  // The fingerprint follows the canonical slug; the kind decides which synonyms apply.
+  assert.equal(fingerprint({ kind: "security", category: "idor", file: "a.js", evidence: "e" }), fingerprint({ kind: "security", category: "authz", file: "a.js", evidence: "e" }));
+  assert.notEqual(fingerprint({ kind: "security", category: "injection", file: "a.js", evidence: "e" }), fingerprint({ kind: "security", category: "xss", file: "a.js", evidence: "e" }));
 });
 
 test("a scanner's anchor decides its fingerprint; a session cannot set one; dedupe keeps every member's fingerprint", () => {

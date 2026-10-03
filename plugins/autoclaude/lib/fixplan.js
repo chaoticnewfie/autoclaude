@@ -18,19 +18,19 @@ export const CHARACTERIZATION_DIR = "test/characterization";
 // builder any write under CHARACTERIZATION_DIR while the current step is pinned (isPinnedStep).
 // Written only once lib/plan.js knows the tag, so a generated plan always passes lint.
 export const PINNED_TAG = "pinned";
-// Step id prefixes: the letters of a step id. "SF" and "OF" (security fix, optimize fix), not the
-// "S" the project template uses, so a fix run's PROGRESS.md lines never read like the project's
-// own steps; another letter is added when the project's plan or PROGRESS.md already has the ids.
-export const STEP_PREFIX = Object.freeze({ security: "SF", optimize: "OF" });
+// Step id prefixes: the letters of a step id. "X" for a security fix plan and "OF" (optimize
+// fix), never starting with the "S" the project template uses, so a fix run's PROGRESS.md lines
+// never read like the project's own steps; another letter is added when the project's plan or
+// PROGRESS.md already has the ids.
+export const STEP_PREFIX = Object.freeze({ security: "X", optimize: "OF" });
 
-// A change step working under pinned tests: tagged pinned, or (a plan from before the tag) one
-// that depends on an earlier step and names a test under CHARACTERIZATION_DIR, which is the
-// shape of every pin-then-change pair this module writes.
+// A change step working under pinned tests: one tagged pinned, which only this module writes
+// (and an owner who means it). A step that merely depends on another and names a test under
+// CHARACTERIZATION_DIR is not pinned: the project's own plan may pin and then change its code
+// itself, and the guard must not stop that step from writing its own test.
 export function isPinnedStep(step) {
   if (!step || typeof step !== "object") return false;
-  if (Array.isArray(step.tags) && step.tags.includes(PINNED_TAG)) return true;
-  const under = (t) => String(t).replace(/\\/g, "/").replace(/^\.\//, "").toLowerCase().startsWith(`${CHARACTERIZATION_DIR}/`);
-  return Array.isArray(step.depends) && step.depends.length > 0 && Array.isArray(step.test) && step.test.some(under);
+  return Array.isArray(step.tags) && step.tags.includes(PINNED_TAG);
 }
 
 // ---------- text that is safe in a plan ----------
@@ -56,16 +56,16 @@ export function fixPlanTitle(kind, date, stamp = null) {
   return `${kind === "optimize" ? "Optimization" : "Security fixes"} ${date}${extra ? ` ${extra}` : ""}`;
 }
 
-// Every step-like id (S1.2, OF1.1) in a text, lower case.
+// Every step-like id (S1.2, X1.1, OF1.1) in a text, lower case.
 function idsIn(text) {
   return new Set((String(text || "").match(/\b[A-Za-z]+\d+(?:\.\d+)+\b/g) || []).map((s) => s.toLowerCase()));
 }
 
-// The letters for this plan's step ids: STEP_PREFIX[kind], else that with a letter added (SFB,
-// SFC ...), whichever writes no id the project's own plan or PROGRESS.md already has. counts:
+// The letters for this plan's step ids: STEP_PREFIX[kind], else that with a letter added (XB,
+// XC ...), whichever writes no id the project's own plan or PROGRESS.md already has. counts:
 // the number of steps in each phase, in order.
 export function stepPrefix(kind, counts, { mainPlanText = "", progressText = "" } = {}) {
-  const base = STEP_PREFIX[kind] || "X";
+  const base = STEP_PREFIX[kind] || "F";
   const taken = new Set([...parsePlan(String(mainPlanText || "")).steps.map((s) => s.id.toLowerCase()), ...idsIn(progressText)]);
   const ids = (prefix) => counts.flatMap((n, i) => Array.from({ length: n }, (_, k) => `${prefix}${i + 1}.${k + 1}`.toLowerCase()));
   for (const extra of ["", ..."BCDEFGHJKLMNPQRSTUVWXYZ"]) {

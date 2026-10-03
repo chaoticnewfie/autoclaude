@@ -22,7 +22,8 @@ Contents:
 14. [Linux and macOS notes](#14-linux-and-macos-notes)
 15. [Troubleshooting](#15-troubleshooting)
 16. [Updating and uninstalling](#16-updating-and-uninstalling)
-17. [Command reference](#17-command-reference)
+17. [Security and optimize sweeps](#17-security-and-optimize-sweeps)
+18. [Command reference](#18-command-reference)
 
 ## 0. How a run works, and the words used here
 
@@ -204,7 +205,8 @@ nothing else the checklist does not need:
      file); the project's name, used in the plan title and the run branch, comes from
      `package.json` or else the folder's name
    - `CLAUDE.md`, `PLAN.md`, `CONTINUE_HERE.md`, `PROGRESS.md`, and `docs/` with `DECISIONS.md`,
-     `BLOCKERS.md`, `DEFERRED.md`, `REVIEW_NOTES.md`, `SECURITY-FINDINGS.md`, `SESSION_LOG.md`
+     `BLOCKERS.md`, `DEFERRED.md`, `REVIEW_NOTES.md`, `SESSION_LOG.md`, and
+     `docs/private/SECURITY-FINDINGS.md` (gitignored)
    - `.gitattributes` and `.editorconfig` only if the project has none; entries added to
      `.gitignore`; `.autoclaude/` for run state
    - `AUTOCLAUDE.md`: a copy of the repository's `INSTRUCTIONS.md`, the plain instructions for
@@ -366,7 +368,7 @@ Claude Code session in that window starting on the first step.
 | `CONTINUE_HERE.md` | Where the builder is, rewritten before every step is handed in |
 | `docs/DECISIONS.md` | Decisions taken during the run (`D-###`, with who decided and "Owner review: yes" for accepted security risks) and how review notes were handled (`N-###`) |
 | `docs/BLOCKERS.md` | Follow-ups and items left for the owner, with their status |
-| `docs/SECURITY-FINDINGS.md` | Security findings below the blocking level, with their status |
+| `docs/private/SECURITY-FINDINGS.md` | Security findings below the blocking level, with their status; gitignored and never committed (older projects: `docs/SECURITY-FINDINGS.md`, section 17) |
 | `HANDOFF.md` | The hand-back, written and committed when the plan completes (section 10) |
 | `secrets/` | Secrets the run generated, one file each; never committed |
 | `.autoclaude/reports/` | A report for every verification, each checker's verdict and screenshots |
@@ -599,6 +601,7 @@ These are the built-in defaults:
   "security": { "when": ["phase-end", "tag:security"], "blockOn": "high", "model": "opus", "timeoutSec": 900 },
   "bugBash": { "atPhaseEnd": true },
   "checkers": { "effort": "xhigh" },
+  "sweep": { "concurrency": 3, "depth": "thorough", "advisories": true, "waitAt5hPct": 90, "maxTurnsPerAgent": 40, "timeoutSecPerAgent": 900, "after": "fix" },
   "retries": { "maxAttemptsPerStep": 3, "maxNoProgressStops": 3, "maxMinutesPerStep": 120 },
   "usage": { "weeklyPauseAtPct": 85, "autoResumeAfterWeeklyReset": false, "staleAfterMin": 30 },
   "git": { "commitEachStep": true, "tagPhaseEnds": true, "push": true },
@@ -614,7 +617,7 @@ These are the built-in defaults:
   "permissions": { "allow": [], "environment": [] },
   "docs": {
     "progress": "PROGRESS.md", "continueHere": "CONTINUE_HERE.md", "decisions": "docs/DECISIONS.md",
-    "blockers": "docs/BLOCKERS.md", "security": "docs/SECURITY-FINDINGS.md",
+    "blockers": "docs/BLOCKERS.md", "security": "docs/private/SECURITY-FINDINGS.md",
     "reviewNotes": "docs/REVIEW_NOTES.md", "sessionLog": "docs/SESSION_LOG.md"
   }
 }
@@ -646,6 +649,7 @@ These are the built-in defaults:
 | `guard.deny` | Extra commands the run may never execute (section 12): `{ "pattern": "<regular expression>", "reason": "<what to do instead>" }` |
 | `permissions.allow` | Claude Code permission rules the run is given, such as `"Bash(ssh myserver *)"`. Planning writes them from what you allowed; each one lets the builder do that without the auto-mode safety check stopping it |
 | `permissions.environment` | Plain-language lines telling auto mode which infrastructure is trusted for this run (for example "The Proxmox host pve at 192.168.1.10 is ours; creating VMs there is expected") |
+| `sweep` | Security and optimize sweeps (section 17): `concurrency` sessions at once (1 to 8), `depth` (`thorough`, `standard`, `quick`), `advisories` (package lookups at npm and OSV), `waitAt5hPct` (wait for the 5-hour reset at this usage), `maxTurnsPerAgent` and `timeoutSecPerAgent` per session, and `after` (`report`, `plan`, `fix`). These can change during a run; they apply to the next sweep |
 | `docs` | Where the run writes its documents. `sessionLog` is informational; the project's `CLAUDE.md` decides whether a session log is kept |
 
 **Usage data.** The weekly pause and `autoclaude usage` need Claude Code's usage percentages. The
@@ -825,14 +829,130 @@ Linux and macOS it leaves `~/.local/bin` and your PATH alone, because other tool
 (`defaults.json`), the project registry and the logs. Project files (`autoclaude.config.json`, `.autoclaude/`, the docs `init` wrote) stay in each
 project; delete them by hand if you no longer want them.
 
-## 17. Command reference
+## 17. Security and optimize sweeps
+
+A sweep checks a whole existing project rather than one run's changes. It needs only
+`autoclaude init`; when the checks or the dev server are missing, the sweep's questions set them
+up the way planning does.
+
+**Starting one.** In a Claude Code session in the project, type `/autoclaude:security` or
+`/autoclaude:optimize`. The skill asks its questions in rounds (what to check, live targets and
+test kinds, whether the database is throwaway, test logins, depth, exclusions, and what happens
+at the end), prints an estimate, and starts the sweep in its own console window,
+`ac-sweep-<project>`. From a terminal, `autoclaude security [options]` and
+`autoclaude optimize [options]` do the same with flags (section 18); `--estimate` prints the
+sessions and rough time and starts nothing.
+
+**Stages.** A sweep lists the project's files and splits them into areas, runs its scanners
+(plain Node and tools fetched on the fly, never added to the project), runs one session that maps
+the app (entry points, routes, roles, data stores, trust boundaries), runs read-only review
+sessions per area (Read, Glob and Grep only), runs the live and browser checks, then checks
+every candidate finding with independent sessions that try to disprove it, and writes the
+report. Each session's result is saved as it finishes, so a sweep picks up where it left off
+after a crash or restart. At most `sweep.concurrency` sessions run at once (3 by default), on
+Opus at `checkers.effort`. A sweep waits when the 5-hour usage window reaches `sweep.waitAt5hPct`
+and pauses at `usage.weeklyPauseAtPct`.
+
+**Security checks.** All on by default; each can be switched off for one sweep:
+- the whole codebase, by area: login and sessions, access control (database roles and row-level
+  security included), input handling and injection, output encoding, secrets and data exposure
+  (logging, errors, CORS, CSRF), crypto, configuration and infrastructure (Dockerfiles, compose,
+  CI, web server config, `.env` handling, open ports);
+- secrets in the working tree and in all of git history (gitleaks through Docker when available),
+  tracked sensitive files and `.gitignore` coverage;
+- package advisories: `npm audit` and, for other lockfiles, OSV (osv-scanner through Docker when
+  available). This sends package names and versions, never code, to npm and OSV;
+  `sweep.advisories: false` or `--no-advisories` keeps everything on the machine and the report
+  says packages were not checked;
+- live checks of the running app: security headers, cookie flags, CORS, exposed files (`/.git`,
+  `/.env`, source maps), verbose errors, routes that answer without a login, rate limiting, and a
+  browser session with two test users for one user reaching the other's data, XSS, CSRF, open
+  redirects and session handling.
+
+**Live targets and safety.** Targets are chosen per sweep: the local dev server (the default),
+staging addresses you name, and production as off, read-only checks or full attacks (asked twice,
+with a warning). Every live request goes through an allow-list: each browser session gets its own
+Node proxy that allows only its target's origin, and the direct probes check the same list; a
+request anywhere else is refused and logged in the sweep's `proxy.log`. A read-only target gets
+only GET and HEAD, and no browser attacks; a read-only HTTPS target gets the direct probes only.
+Tests that change data run only when you confirm the database is throwaway (with a reset command
+if there is one). Test users are signed up by the sweep when the app allows it; otherwise the
+questions ask for two logins, kept in the gitignored `secrets/sweep-users.json`. Browser sessions
+cannot read the project's files; the sweep masks the test passwords and every secret-looking
+value in everything it saves.
+
+**Optimize checks.** All on by default: unused code and packages, duplicates and leftovers,
+performance, poorly built features, and the test suite's speed and flakiness. It first records a
+baseline (each check's and test file's time, flaky tests found by rerunning, build time, bundle
+size, package count, dev-server start time, page load times and request counts), so every
+improvement is measured; an improvement counts only above the noise. Something is "unused" only
+when a tool flags it (knip, at a pinned version, for JavaScript and TypeScript), a search of the
+whole repository (scripts, CI, manifests, config, docs) finds no reference, and it matches no
+entry-point convention of the stack. Findings are tiered: A (mechanical, with proof: unused
+files, packages and imports, commented-out code, minor and patch upgrades) is fixed directly;
+B (merging duplicates, performance, rebuilds, test speed, bugs) is fixed behind tests that pin
+the current behaviour first; C (major upgrades, schema and migration changes, login and
+permission code, anything whose use cannot be seen from the repository) is left for you. A real
+bug found while optimizing is fixed with a test and listed in the hand-back as a behaviour change.
+Optimize never weakens a test.
+
+**Depth.** `thorough` (the default) uses small areas and three verifier sessions per finding,
+kept on a majority; `standard` uses larger areas and one; `quick` uses the largest areas and none.
+A finding with fewer than two valid votes at `thorough` is "uncertain" and never fixed
+automatically.
+
+**The report.** `.autoclaude/sweeps/<date>-<kind>/report.md` and `findings.json`, never
+committed (the folder is gitignored, and the sweep checks that before it writes). It states what
+was and was not examined, then each confirmed finding most severe first: id (SEC-001, OPT-001),
+severity (critical, high, medium, low; critical is fixed as high), CWE and CVSS where they apply,
+file and line, masked evidence, impact, how to reproduce, the suggested fix with code, and a test
+idea; then uncertain findings, accepted ones, and an appendix of disproved ones. The "sweep
+finished" alert is always sent and carries only counts, the report path and what happens next.
+
+**After the sweep** (`sweep.after`, or the questions): `report` stops there; `plan` writes a fix
+plan into the sweep folder and the alert gives the command to run it,
+`autoclaude run --plan .autoclaude/sweeps/<id>/SECURITY_PLAN.md`; `fix` does that at once. Fix
+right away is refused, and falls back to the plan, while another run is running or paused, when
+the working tree is dirty, or when the checks are not green on the starting commit.
+
+**The fix run.** `run --plan` checks the preflight first, then creates a new branch from the
+current commit (`autoclaude/security-fixes-<date>`, with `-2` and on when that exists), commits
+the plan there as `SECURITY_PLAN.md` or `OPTIMIZE_PLAN.md`, keeps the project's own plan and run
+state aside, and starts a normal run on it. Every fix is verified like any step: checks, browser
+tester, bug bash and the security review on steps tagged `security`. The plan words every step
+neutrally ("a regression test shows ..."), with only finding ids pointing at the gitignored
+report, so nothing committed or pushed describes how to exploit anything. Step ids start with X
+(security) or OF (optimize). The fix run's resume file and hand-back are
+`CONTINUE_HERE-SECURITY.md` and `HANDOFF-SECURITY.md` (OPTIMIZE for optimize); when it completes,
+the next `autoclaude run` hands the project back to its own plan and state.
+
+**Accepted findings.** Tell Claude "mark SEC-004 as a false alarm" (or an accepted risk); it adds
+the finding's fingerprint, a reason, who and when to `autoclaude.accepted.json` at the project
+root. That file is committed and holds no details. Later sweeps list those findings as accepted
+instead of reporting them again. A run's builder can never change it.
+
+**Watching and stopping.** `autoclaude status` and `autoclaude sweep-status` show sweeps. A
+closed sweep window is reopened by the watchdog within 5 minutes, like a run; to stop a sweep for
+good, run `autoclaude sweep-stop [<id>]`. `autoclaude sweep-run <id>` carries on with a stopped
+or paused sweep without rerunning finished sessions. Only one sweep of each kind runs at a time.
+
+**Security findings from normal runs.** New projects keep them in
+`docs/private/SECURITY-FINDINGS.md`, which `init` gitignores and the gate never commits. A
+project whose config still names `docs/SECURITY-FINDINGS.md` is offered the move by planning and
+the sweep's questions.
+
+## 18. Command reference
 
 `autoclaude help` prints the same list, and `autoclaude <command> --help` shows one command.
 
 | Command | What it does |
 |---|---|
 | `init [<folder>] [--playwright] [--no-statusline] [--dev-url <url>]` | Set a project up (section 2) |
-| `run [--check]` | Preflight, then open the run window; `--check` runs only the preflight |
+| `run [--check] [--plan <file>]` | Preflight, then open the run window; `--check` runs only the preflight; `--plan` runs a sweep's fix plan on a new branch (section 17) |
+| `security [options]`, `optimize [options]` | Start a sweep in its own window (section 17): `--report`, `--plan` or `--fix`; `--depth`; `--modules a,b`; `--no-browser`; `--url <target>`; `--exclude <glob>`; `--no-advisories`; `--writes`; `--reset "<cmd>"`; `--options <file>`; `--estimate` |
+| `sweep-status` | The project's sweeps and their state |
+| `sweep-stop [<id>]` | Stop a sweep for good (the watchdog then leaves it alone) |
+| `sweep-run <id>` | Carry on with a stopped or paused sweep; the sweep window runs this too |
 | `status [--all]` | The run's state; `--all` for every registered project |
 | `config` | Open the settings page in your browser (section 11) |
 | `pause [--now]` | Pause after the next committed step, or at once |

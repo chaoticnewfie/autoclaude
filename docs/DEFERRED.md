@@ -294,3 +294,20 @@ on real work.
 file's own formatting by patching only the changed keys; notes get `min(60 s, what the gate can
 spare)`; the summary counts attempts per feature when `gate.verifyAt` is "phase".
 **No rework.** Each is local to one module (gate.js, configpage.js, footprint.js, summary.js).
+
+## 23. Sweep follow-ups found in review
+
+**What.** (1) Owner-wide Read allow rules (for example `Read(//c/**)` in the user settings) could
+still let a sweep browser session read files; absolute-path Read deny rules on Windows are
+unverified. (2) Passwords a sweep invents in sign-up mode, and Playwright's own snapshot files in
+the browser output folder, are only pattern-masked. (3) No command to give up a paused or
+unfinished fix run and go back to the project's own plan (today: finish it, or a plain
+`autoclaude run` drops an override with no run behind it). (4) Closing the sweep window or Ctrl+C
+counts as a dead window the watchdog reopens; `autoclaude sweep-stop` is the way to stop.
+**Why it waits.** Each is narrow, and the review judged the defaults safe: sessions run with
+`--disallowedTools` for writes and shells, and everything the sweep saves is masked.
+**Trigger.** A sweep that shows one of them, or Scott asking.
+**Path.** (1) a verified Read deny syntax for Windows paths; (2) mask the sign-up passwords the
+session reports back, and run the browser output folder through the masker; (3) an
+`autoclaude run --drop-plan`; (4) mark a sweep stopped on SIGINT/SIGBREAK in sweep-run.
+**No rework.** All four are local to sweep.js, cli.js or tester.js.

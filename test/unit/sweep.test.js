@@ -8,8 +8,11 @@ import {
   buildInventory, gateDecision, tallyVerdict, estimateSweep, collectCandidates, runPool,
   startSweep, runSweep, sweepStatus, findActiveSweeps, sweepPaths, readSweep, MODULES, STAGES,
   prepareTestUsers, MAP_SCHEMA, browserPlan, browserChecks, proxyRuleFor, requireUnusedProof, unusedProofs,
-  findDeadSweeps, sweepLiveness, formatEstimate, SESSION_DISALLOWED, openSweepWindow, sweepsDir, ensureSweepsIgnored, sweepWhen
+  findDeadSweeps, sweepLiveness, formatEstimate, SESSION_DISALLOWED, openSweepWindow, sweepsDir, ensureSweepsIgnored, sweepWhen,
+  stopSweep, testUserSecrets, maskSecrets, SECRET_MASK, removesWholeFile, browserAutoFix, mapPages
 } from "../../plugins/autoclaude/lib/sweep.js";
+import { WRAP_UP_PROMPT } from "../../plugins/autoclaude/lib/headless.js";
+import { pluginRoot } from "../../plugins/autoclaude/lib/paths.js";
 
 function tmp(prefix = "ac-sweep-") {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -306,7 +309,8 @@ test("startSweep validates, writes sweep.json and inventory.json, prints an esti
   assert.match(out.text, /sweep: security, depth standard/);
   assert.match(out.text, /rough time: about/);
   assert.equal(opened.title, `ac-sweep-${path.basename(root).toLowerCase().replace(/[^a-z0-9]+/g, "-")}`);
-  assert.deepEqual(opened.args.slice(-2), ["sweep-run", r.id]);
+  // --auto: a window the engine opens leaves a sweep the owner stopped alone.
+  assert.deepEqual(opened.args.slice(-3), ["sweep-run", "--auto", r.id]);
 });
 
 test("startSweep refuses an unknown kind, and normalizeOptions coerces a bad depth to the default", async () => {
@@ -858,7 +862,7 @@ test("liveness: sweep.json carries the driver's pid and heartbeat; sweep-run ref
   const opened = [];
   const w = openSweepWindow({ root: root3, id: "a-dead", env: {}, open: (o) => { opened.push(o); return { method: "windows-console" }; } });
   assert.match(w.title, /^ac-sweep-/);
-  assert.deepEqual(opened[0].args.slice(-2), ["sweep-run", "a-dead"]);
+  assert.deepEqual(opened[0].args.slice(-3), ["sweep-run", "--auto", "a-dead"]);
 });
 
 function sweepsList(root) {
@@ -1064,4 +1068,310 @@ test("the fix plan is generated with the project's progress file and the sweep's
   assert.match(args.mainPlanText, /The app listens on 127\.0\.0\.1 only/);
   const when = sweepWhen(id);
   assert.deepEqual([args.date, args.stamp], [when.date, when.stamp]);
+});
+
+// ---------- the owner's stop, resumable sweeps, known passwords, leftovers, browser fixes, wrap-up ----------
+
+// A started sweep (window faked) whose sweep.json is then given the `patch` fields.
+async function startedSweep(root, kind = "security", { at = new Date("2026-10-02T09:15:00"), patch = {} } = {}) {
+  const r = await startSweep({ root, kind, options: { modules: ["code"], after: "report", depth: "quick" }, config: CONFIG, io: makeIo(root, at).io, deps: { git: fakeGit(), openConsoleWindow: () => ({ method: "windows-console" }), readUsage: USAGE_OK, isPidAlive: () => false } });
+  assert.equal(r.ok, true, r.error);
+  const sp = sweepPaths(root, r.id);
+  fs.writeFileSync(sp.sweepFile, JSON.stringify({ ...readSweep(root, r.id), ...patch }));
+  return { id: r.id, sp };
+}
+
+const runDeps = (config, extra = {}) => ({ config, git: fakeGit(), readUsage: USAGE_OK, sleep: async () => {}, runSecurityScanners: async () => ({ candidates: [], coverage: {} }), ...findingsDeps([]), verbose: false, ...extra });
+
+test("sweep-stop: marked stopped by the owner, its driver's process tree ended and its leftovers cleaned; the watchdog's lookups skip it, an engine-opened window leaves it alone, the owner's sweep-run resumes it", async () => {
+  const root = makeProject();
+  const beat = new Date().toISOString();
+  const { id, sp } = await startedSweep(root, "security", { patch: { stage: "review", pid: 4242, heartbeatAt: beat, updatedAt: beat, devServerPid: 777 } });
+  fs.writeFileSync(sp.usersEnvFile, "SWEEP_USER_A_PASSWORD='x'\n");
+  const killed = [];
+  let devStops = 0;
+  const deps = { isPidAlive: (pid) => pid === 4242, killTree: (pid) => { killed.push(pid); return true; }, devServerInfo: () => ({ pid: 777 }), stopDevServer: () => { devStops++; return { stopped: true }; } };
+  // Without an id: the sweep that is running.
+  const r = stopSweep({ root, deps });
+  assert.deepEqual([r.ok, r.id, r.from, r.stage, r.pid, r.killed, r.devServerStopped], [true, id, "running", "review", 4242, true, true]);
+  assert.deepEqual(killed, [4242], "the driver's whole tree: the window, its sessions, browsers and proxies");
+  assert.equal(devStops, 1, "the dev server the sweep started");
+  assert.equal(fs.existsSync(sp.usersEnvFile), false, "the passwords' dotenv file the driver would have removed");
+  const s = readSweep(root, id);
+  assert.deepEqual([s.status, s.stoppedBy, s.stoppedFrom, s.pid, s.devServerPid], ["stopped", "owner", "running", null, null]);
+  // The watchdog's lookups: neither dead nor going, so it is never opened again.
+  const gone = { isAlive: () => false };
+  assert.deepEqual(findDeadSweeps(root, gone), []);
+  assert.deepEqual(findActiveSweeps(root, gone), []);
+  const shown = sweepStatus(root, gone).sweeps[0];
+  assert.deepEqual([shown.displayStatus, shown.resumeCommand, shown.stopCommand], ["stopped (by the owner)", `autoclaude sweep-run ${id}`, null]);
+  assert.equal(stopSweep({ root, id, deps }).already, true);
+  // A window the engine opened (sweep-run --auto) leaves it alone and runs nothing.
+  const rec = {};
+  const auto = await runSweep({ root, id, io: makeIo(root).io, deps: runDeps(CONFIG, { run: recordingRun(rec) }), auto: true });
+  assert.deepEqual([auto.ok, auto.status, auto.already], [true, "stopped", true]);
+  assert.equal(rec.calls.length, 0);
+  assert.equal(readSweep(root, id).status, "stopped");
+  // The owner's own sweep-run resumes it where it stopped, on purpose.
+  const resumed = await runSweep({ root, id, io: makeIo(root).io, deps: runDeps(CONFIG, { run: recordingRun(rec) }) });
+  assert.equal(resumed.status, "done", resumed.error);
+  assert.ok(rec.calls.some((c) => /^sweep-area-/.test(c.role)));
+  const after = readSweep(root, id);
+  assert.deepEqual([after.status, after.stoppedAt, after.stoppedBy], ["done", null, null]);
+
+  // Without an id and two going, it asks which; a finished one has nothing to stop.
+  const root2 = makeProject();
+  const a = await startedSweep(root2, "security");
+  const b = await startedSweep(root2, "optimize");
+  const two = stopSweep({ root: root2, deps: { isPidAlive: () => false } });
+  assert.equal(two.ok, false);
+  assert.deepEqual(two.choices.sort(), [a.id, b.id].sort());
+  assert.match(two.error, /name the one to stop: `autoclaude sweep-stop <id>`/);
+  fs.writeFileSync(a.sp.sweepFile, JSON.stringify({ ...readSweep(root2, a.id), status: "done" }));
+  assert.match(stopSweep({ root: root2, id: a.id }).error, /has already finished; there is nothing to stop/);
+  assert.match(stopSweep({ root: root2, id: "nope" }).error, /no sweep nope in this project/);
+  assert.equal(stopSweep({ root: makeProject() }).ok, false);
+});
+
+test("a stop while the sweep runs ends its driver at the next check: the session under way is kept, nothing more is launched, no verdict comes from part of the votes, and the owner's resume carries on", async () => {
+  const config = { ...CONFIG, sweep: { ...CONFIG.sweep, concurrency: 1 } };
+  const root = makeProject();
+  const rec = {};
+  const run = recordingRun(rec, async ({ role }) => {
+    if (/^sweep-area-/.test(role) && !rec.stoppedAt) {
+      rec.stoppedAt = role;
+      // The driver is this very process, so its tree is not ended: the driver must stop itself.
+      const r = stopSweep({ root, deps: { killTree: (pid) => { rec.killed = pid; return true; } } });
+      assert.equal(r.ok, true, r.error);
+    }
+    return null;
+  });
+  const { id, result, sp } = await startAndRun(root, "security", { modules: ["code"], depth: "standard", after: "report" }, { run }, { config });
+  assert.equal(result.status, "stopped", result.error);
+  assert.equal(rec.killed, undefined, "the driver's own process is never ended from inside");
+  assert.deepEqual(rec.calls.map((c) => c.role), ["sweep-map", rec.stoppedAt], "nothing is launched after the stop");
+  assert.ok(fs.existsSync(path.join(sp.agentsDir, `${rec.stoppedAt.replace(/^sweep-/, "")}.json`)), "the session under way is kept");
+  const s = readSweep(root, id);
+  assert.deepEqual([s.status, s.stage, s.pid], ["stopped", "review", null]);
+  const rec2 = {};
+  const again = await runSweep({ root, id, io: makeIo(root).io, deps: runDeps(config, { run: recordingRun(rec2) }) });
+  assert.equal(again.status, "done", again.error);
+  const roles = rec2.calls.map((c) => c.role);
+  assert.ok(!roles.includes(rec.stoppedAt) && !roles.includes("sweep-map"), "finished sessions are not run again");
+  assert.ok(roles.some((r) => /^sweep-area-/.test(r)) && roles.some((r) => r.startsWith("verify-")));
+
+  // Stopped while the verifiers run (three per finding): no finding gets a verdict from one vote.
+  const root2 = makeProject();
+  const rec3 = {};
+  const run3 = recordingRun(rec3, async ({ role }) => {
+    if (role === "verify-SEC-001-1") stopSweep({ root: root2 });
+    return null;
+  });
+  const r3 = await startAndRun(root2, "security", { modules: ["code"], depth: "thorough", after: "report" }, { run: run3 }, { config });
+  assert.equal(r3.result.status, "stopped", r3.result.error);
+  const store = JSON.parse(fs.readFileSync(r3.sp.storeFile, "utf8"));
+  assert.ok(store.findings.length && store.findings.every((f) => f.verdict === null), JSON.stringify(store.findings.map((f) => f.verdict)));
+  assert.equal(rec3.calls.filter((c) => c.role.startsWith("verify-")).length, 1);
+});
+
+test("a new sweep of a kind is refused beside a resumable one of that kind (window gone, or paused), naming sweep-run and sweep-stop; once given up, a new one starts", async () => {
+  const root = makeProject();
+  const old = new Date(Date.now() - 10 * 60000).toISOString();
+  const { id } = await startedSweep(root, "security", { patch: { stage: "review", pid: 1111, heartbeatAt: old, updatedAt: old } });
+  const later = (min) => makeIo(root, new Date(`2026-10-02T10:${String(min).padStart(2, "0")}:00`)).io;
+  const deps = { git: fakeGit(), openConsoleWindow: () => ({ method: "windows-console" }), readUsage: USAGE_OK, isPidAlive: () => false };
+  const opts = { modules: ["code"], after: "report", depth: "quick" };
+  let r = await startSweep({ root, kind: "security", options: opts, config: CONFIG, io: later(1), deps });
+  assert.equal(r.ok, false);
+  assert.ok(r.error.startsWith(`a security sweep (${id}) stopped at stage review when its window closed`), r.error);
+  assert.ok(r.error.includes(`carry it on with \`autoclaude sweep-run ${id}\``) && r.error.includes(`give it up with \`autoclaude sweep-stop ${id}\``), r.error);
+  assert.deepEqual(sweepsList(root), [id], "nothing new was written");
+  // Another kind is not held up.
+  assert.equal((await startSweep({ root, kind: "optimize", options: opts, config: CONFIG, io: later(2), deps })).ok, true);
+  // A paused one holds it up too.
+  fs.writeFileSync(sweepPaths(root, id).sweepFile, JSON.stringify({ ...readSweep(root, id), status: "paused", pid: null, error: "weekly usage limit reached (91%)" }));
+  r = await startSweep({ root, kind: "security", options: opts, config: CONFIG, io: later(3), deps });
+  assert.ok(r.error.startsWith(`a security sweep (${id}) is paused at stage review (weekly usage limit reached (91%)); carry it on with`), r.error);
+  // Given up with sweep-stop: a new one starts.
+  assert.equal(stopSweep({ root, id, deps: { isPidAlive: () => false } }).ok, true);
+  r = await startSweep({ root, kind: "security", options: opts, config: CONFIG, io: later(4), deps });
+  assert.equal(r.ok, true, r.error);
+});
+
+test("the test users' passwords are masked as written in everything the sweep saves, beside the pattern masking", async () => {
+  // Whole values, the longest first; a short one only where it stands alone, and never in a path field.
+  assert.equal(maskSecrets("signed in with Hunter2Hunter2-b and Hunter2Hunter2", ["Hunter2Hunter2-b", "Hunter2Hunter2"]), `signed in with ${SECRET_MASK} and ${SECRET_MASK}`);
+  assert.equal(maskSecrets("typed qwer, not qwerty", ["qwer"]), `typed ${SECRET_MASK}, not qwerty`);
+  assert.equal(maskSecrets("src/qwer.js", ["qwer"], { structural: true }), "src/qwer.js");
+  const root = makeProject();
+  const users = withUsers(root);
+  assert.deepEqual(testUserSecrets(root, { testUsers: users }).sort(), ["Pw-unit-7781", "Pw-unit-7782"]);
+  assert.deepEqual(testUserSecrets(root, { testUsers: null }), []);
+  // End to end: a browser session, a verifier and a failed reviewer all write them in plain words.
+  const [pwA, pwB] = ["Pw-unit-7781", "Pw-unit-7782"];
+  let failed = false;
+  const run = recordingRun({}, async ({ role }) => {
+    if (role === "sweep-browser-0") {
+      return okResult({
+        findings: [{ kind: "security", category: "idor", title: "user A reads user B's order", severity: "high", file: "/orders/2", line: 0, evidence: `signed in as user A with ${pwA}, opened /orders/2`, impact: "i", reproduce: `log in as a@example.com / ${pwA}`, fix: "check the owner", testIdea: "t", confidence: 8, autoFixSafe: true }],
+        coverage: { examined: [`user B (${pwB})`], notExamined: [] },
+        notes: `Signed in as user A (alice) with ${pwA}, then as user B with ${pwB}`
+      });
+    }
+    if (role.startsWith("verify-")) return okResult({ verdict: "confirmed", reason: `logged in with ${pwA} and saw it`, severity: "high" });
+    if (role === "sweep-area-src" && !failed) { failed = true; return { ok: false, infra: true, rateLimited: false, structured: null, error: `claude ended with error: typed ${pwB}` }; }
+    return null;
+  });
+  const { result, sp } = await startAndRun(root, "security", { modules: ["code", "live"], depth: "standard", after: "report", writesAllowed: true, testUsers: users, targets: [{ url: "http://127.0.0.1:4100", mode: "full" }] }, { run, ...liveDeps({}) });
+  assert.equal(result.status, "done", result.error);
+  let text = "";
+  const walk = (d) => { for (const e of fs.readdirSync(d, { withFileTypes: true })) { const p = path.join(d, e.name); if (e.isDirectory()) walk(p); else text += fs.readFileSync(p, "utf8"); } };
+  walk(sp.dir);
+  assert.ok(text.includes(SECRET_MASK), "the masked form is kept");
+  assert.ok(!text.includes("Pw-unit-778"), "no file in the sweep folder holds a test password");
+});
+
+test("a session's leftover that deletes a whole file needs the same proof as an unused file: tier C without it", async () => {
+  const proofs = { files: new Set(["lib/old.js"]), deps: [] };
+  const s = (f) => ({ source: "session area-src", category: "leftover", tier: "A", autoFixSafe: true, file: "src/reports/legacy.js", line: 12, title: "Leftover of the reports feature", fix: "remove the debug log", ...f });
+  assert.equal(removesWholeFile(s({ line: 0 })), true, "line 0 is the whole file");
+  assert.equal(removesWholeFile(s({ fix: "Remove src/reports/legacy.js, the remains of the removed reports feature" })), true);
+  assert.equal(removesWholeFile(s({ fix: "Delete `legacy.js`" })), true);
+  assert.equal(removesWholeFile(s({ fix: "delete the whole file" })), true);
+  assert.equal(removesWholeFile(s({ fix: "git rm it" })), true);
+  assert.equal(removesWholeFile(s({ fix: "Remove the debug console.log on this line" })), false);
+  assert.equal(removesWholeFile(s({ fix: "Remove the unused key legacyMode from src/reports/legacy.json" })), false);
+  assert.equal(requireUnusedProof(s({ line: 0 }), proofs).tier, "C");
+  assert.deepEqual(Object.values((({ tier, autoFixSafe }) => ({ tier, autoFixSafe }))(requireUnusedProof(s({ fix: "Remove src/reports/legacy.js" }), proofs))), ["C", false]);
+  assert.equal(requireUnusedProof(s({}), proofs).tier, "A", "a leftover line keeps its tier");
+  assert.equal(requireUnusedProof(s({ file: "lib/old.js", line: 0 }), proofs).tier, "A", "the scanner proved the file unused");
+  assert.equal(requireUnusedProof({ ...s({ line: 0 }), source: "scanner optimize" }, proofs).tier, "A");
+
+  // End to end on an optimize sweep.
+  const root = makeProject();
+  const run = recordingRun({}, async ({ role }) => {
+    if (role === "sweep-area-src") {
+      return okResult({ findings: [
+        { category: "leftover", severity: "low", file: "src/app.js", line: 0, evidence: "the reports feature was removed", impact: "dead", fix: "Remove src/app.js, the remains of the removed reports feature", testIdea: "t", confidence: 8, tier: "A" },
+        { category: "leftover", severity: "low", file: "src/app.js", line: 3, evidence: "console.log(debug)", impact: "noise", fix: "remove the debug log", testIdea: "t", confidence: 8, tier: "A" }
+      ], coverage: { examined: ["src"], notExamined: [] }, notes: "" });
+    }
+    if (/^sweep-area-/.test(role)) return okResult({ findings: [], coverage: { examined: [role], notExamined: [] }, notes: "" });
+    return null;
+  });
+  const { result, sp } = await startAndRun(root, "optimize", { modules: ["duplicates"], depth: "quick", after: "report" }, {
+    run,
+    recordBaseline: async () => ({ version: 1, checksGreen: true, coverage: { examined: [], notExamined: [] } }),
+    runOptimizeScanners: async () => ({ candidates: [], coverage: { examined: [], notExamined: [] }, leads: [] })
+  });
+  assert.equal(result.status, "done", result.error);
+  const store = JSON.parse(fs.readFileSync(sp.storeFile, "utf8"));
+  const at = (line) => store.findings.find((f) => f.line === line);
+  assert.deepEqual([at(0).tier, at(0).autoFixSafe], ["C", false]);
+  assert.equal(at(3).tier, "A");
+  assert.ok(store.coverage.notExamined.some((n) => /^1 leftover candidate from the review sessions that deletes a whole file: not deleted automatically/.test(n)), JSON.stringify(store.coverage.notExamined));
+});
+
+test("a browser-confirmed security finding with a code fix is fixed right away; one needing the owner, or with no fix, stays with the owner", async () => {
+  const b = (f) => ({ source: "session browser-0", category: "idor", fix: "check the order belongs to the user", autoFixSafe: true, ...f });
+  assert.equal(browserAutoFix(b({})).autoFixSafe, true);
+  assert.equal(browserAutoFix(b({ fix: "  " })).autoFixSafe, false);
+  assert.equal(browserAutoFix(b({ autoFixSafe: false })).autoFixSafe, false);
+  const reviewer = { source: "session area-src", fix: "", autoFixSafe: true };
+  assert.equal(browserAutoFix(reviewer), reviewer, "other sources are left as they are");
+  // The prompt lets the session say so, by the same rule as the area reviewers.
+  const prompt = fs.readFileSync(path.join(pluginRoot(), "prompts", "sweep-security-browser.md"), "utf8");
+  assert.doesNotMatch(prompt, /`autoFixSafe` false;/);
+  assert.match(prompt, /`autoFixSafe` \(true when a change to the app's own code fixes it, as it does for an IDOR, XSS, CSRF or open redirect in the app/);
+  assert.match(prompt, /false when the fix needs the owner/);
+  // End to end: what the merge stores.
+  const root = makeProject();
+  const run = recordingRun({}, async ({ role }) => {
+    if (role === "sweep-browser-0") {
+      return okResult({ findings: [
+        { kind: "security", category: "idor", title: "user A reads user B's order", severity: "high", file: "/orders/2", line: 0, evidence: "e", impact: "i", fix: "check the order belongs to the signed-in user", testIdea: "t", confidence: 8, autoFixSafe: true },
+        { kind: "security", category: "session", title: "sessions survive sign-out in production", severity: "medium", file: "/logout", line: 0, evidence: "e", impact: "i", fix: "", testIdea: "t", confidence: 7, autoFixSafe: true, ownerAction: "invalidate the sessions" }
+      ], coverage: { examined: [], notExamined: [] }, notes: "" });
+    }
+    return null;
+  });
+  const { result, sp } = await startAndRun(root, "security", { modules: ["live"], depth: "quick", after: "report", writesAllowed: true, targets: [{ url: "http://127.0.0.1:4100", mode: "full" }] }, { run, ...liveDeps({}) });
+  assert.equal(result.status, "done", result.error);
+  const store = JSON.parse(fs.readFileSync(sp.storeFile, "utf8"));
+  const by = (cat) => store.findings.find((f) => f.category === cat);
+  assert.equal(by("idor").autoFixSafe, true);
+  assert.equal(by("session").autoFixSafe, false);
+});
+
+test("browser sessions get no --add-dir: they work from the map in their prompt, while the map, reviewers and verifiers keep reading the project", async () => {
+  const MAP = { entryPoints: ["src/app.js"], routes: ["GET /orders -> src/app.js", "GET /orders/:id"], protectedRoutes: ["/account"], loginPath: "/login", roles: [], dataStores: [], trustBoundaries: [], notes: "" };
+  const root = makeProject();
+  const rec = {};
+  const run = recordingRun(rec, async ({ role }) => (role === "sweep-map" ? okResult(MAP) : null));
+  const { result } = await startAndRun(root, "security", { modules: ["code", "live"], depth: "standard", after: "report", writesAllowed: true, targets: [{ url: "http://127.0.0.1:4100", mode: "full" }] }, { run, ...liveDeps({}) });
+  assert.equal(result.status, "done", result.error);
+  for (const c of rec.calls) {
+    if (c.role.startsWith("sweep-browser-")) assert.ok(!c.args.includes("--add-dir"), `${c.role} cannot read the project`);
+    else assert.equal(argAfter(c.args, "--add-dir"), root, `${c.role} reads the project`);
+  }
+  const sec = rec.calls.find((c) => c.role === "sweep-browser-0").prompt;
+  assert.doesNotMatch(sec, /Read, Glob and Grep on files under/);
+  assert.match(sec, /You cannot read the project's files: work from the app map below/);
+  assert.match(sec, /GET \/orders\/:id/, "the map is in the prompt");
+
+  // Optimize: the walker's page list is the map's routes.
+  assert.deepEqual(mapPages(MAP), ["GET /orders -> src/app.js", "GET /orders/:id", "/account"]);
+  assert.deepEqual(mapPages(null), []);
+  const root2 = makeProject();
+  const rec2 = {};
+  const run2 = recordingRun(rec2, async ({ role }) => (role === "sweep-map" ? okResult(MAP) : null));
+  const r2 = await startAndRun(root2, "optimize", { modules: ["performance"], depth: "quick", after: "report", targets: [{ url: "http://127.0.0.1:4100", mode: "readonly" }] }, {
+    run: run2, ...liveDeps({}),
+    recordBaseline: async () => ({ version: 1, checksGreen: true, coverage: { examined: [], notExamined: [] } }),
+    runOptimizeScanners: async () => ({ candidates: [], coverage: { examined: [], notExamined: [] }, leads: [] })
+  });
+  assert.equal(r2.result.status, "done", r2.result.error);
+  const walk = rec2.calls.find((c) => c.role === "sweep-browser-0");
+  assert.ok(!walk.args.includes("--add-dir"));
+  assert.match(walk.prompt, /- GET \/orders\/:id\n- \/account/);
+  assert.doesNotMatch(walk.prompt, /Grep the route definitions|files under/);
+});
+
+test("a sweep session that used all its turns gets the checkers' resumed wrap-up instead of failing; a failed wrap-up is not rerun, a rate-limited one is waited out", async () => {
+  const maxed = (sessionId) => ({ ok: false, infra: true, rateLimited: false, structured: null, subtype: "error_max_turns", sessionId, numTurns: 40, costUsd: 0.5, error: "claude ended with error_max_turns: " });
+  const root = makeProject();
+  const rec = {};
+  const run = recordingRun(rec, async ({ role, prompt }) => {
+    const wrap = prompt === WRAP_UP_PROMPT;
+    if (role === "sweep-area-src") return wrap ? okResult({ findings: [], coverage: { examined: ["src/app.js"], notExamined: ["the rest: out of turns"] }, notes: "wrapped up" }, { numTurns: 2 }) : maxed("sess-src");
+    if (role === "sweep-area-lib") return wrap ? { ok: false, infra: true, rateLimited: false, structured: null, error: "claude ended with error: no answer" } : maxed("sess-lib");
+    return null;
+  });
+  const { result, sp } = await startAndRun(root, "security", { modules: ["code"], depth: "quick", after: "report" }, { run });
+  assert.equal(result.status, "done", result.error);
+  const src = JSON.parse(fs.readFileSync(path.join(sp.agentsDir, "area-src.json"), "utf8"));
+  assert.deepEqual([src.ok, src.attempts, src.structured.notes, src.numTurns], [true, 1, "wrapped up", 42]);
+  const srcCalls = rec.calls.filter((c) => c.role === "sweep-area-src");
+  assert.equal(srcCalls.length, 2);
+  assert.deepEqual([argAfter(srcCalls[1].args, "--resume"), argAfter(srcCalls[1].args, "--max-turns")], ["sess-src", "4"]);
+  const lib = JSON.parse(fs.readFileSync(path.join(sp.agentsDir, "area-lib.json"), "utf8"));
+  assert.equal(lib.ok, false);
+  assert.match(lib.error, /the wrap-up also failed/);
+  assert.equal(rec.calls.filter((c) => c.role === "sweep-area-lib").length, 2, "used all its turns: no second full run");
+
+  // A wrap-up stopped by a usage limit goes back to the pool, which waits and runs the agent again.
+  const root2 = makeProject();
+  const rec2 = {};
+  let t = Date.parse("2026-10-02T12:00:00Z");
+  let wraps = 0;
+  const run2 = recordingRun(rec2, async ({ role, prompt }) => {
+    if (role !== "sweep-area-src") return null;
+    if (prompt !== WRAP_UP_PROMPT) return maxed("sess-2");
+    wraps++;
+    return wraps === 1 ? { ok: false, infra: true, rateLimited: true, structured: null, error: "claude ended with error: usage limit reached" } : okResult({ findings: [], coverage: { examined: ["src"], notExamined: [] }, notes: "" });
+  });
+  const r2 = await startAndRun(root2, "security", { modules: ["code"], depth: "quick", after: "report" }, { run: run2, now: () => t, sleep: async (ms) => { t += ms; } });
+  assert.equal(r2.result.status, "done", r2.result.error);
+  assert.equal(rec2.calls.filter((c) => c.role === "sweep-area-src").length, 4, "the full run and its wrap-up, twice");
+  assert.equal(JSON.parse(fs.readFileSync(path.join(r2.sp.agentsDir, "area-src.json"), "utf8")).ok, true);
 });

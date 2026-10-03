@@ -77,9 +77,13 @@ decided here, by the owner.
    - An optimize sweep is already going (`autoclaude sweep-status` lists them): show its status.
      One whose window is gone (closed, or the computer restarted) shows as "stopped (window
      gone)" with the command that carries it on; it carries on by itself only when the watchdog
-     is installed. Offer `autoclaude sweep-run <id>`, which picks it up where it stopped. A sweep
-     whose window is still open: stop; the owner waits for it (a second one of the same kind is
-     refused).
+     is installed. A paused one carries on the same way. Offer `autoclaude sweep-run <id>`, which
+     picks it up where it stopped. If the owner does not want it any more,
+     `autoclaude sweep-stop <id>` gives it up for good (its finished work stays in its folder, and
+     the watchdog leaves it alone); only then can a new optimize sweep start. A sweep whose window
+     is still open: stop; the owner waits for it, or stops it with `autoclaude sweep-stop <id>`.
+     A second sweep of the same kind is refused while one is running, waiting, paused or gone
+     with its window.
 2. Read, without asking: `autoclaude.config.json` (`plan`, `checks`, `devServer`), `CLAUDE.md`,
    the plan's "Constraints & decisions" section, `.gitignore`, `git status --short`, the package
    manifests and lockfiles, the build and test scripts, CI config, whether the app shares a
@@ -184,8 +188,11 @@ running it. When the project shares a database with other apps, name it here.
    the report's path. The report is `.autoclaude/sweeps/<id>/report.md`, with the baseline. A
    closed window, an RDP disconnect or a restart does not lose finished work:
    `autoclaude sweep-run <id>` in the project carries on where it stopped, without rerunning
-   finished sessions, and the watchdog, when installed, opens the window again by itself. Then,
-   by what happens after:
+   finished sessions, and the watchdog, when installed, opens the window again by itself. So
+   closing the window does not stop a sweep; `autoclaude sweep-stop` does (the sweep running or
+   waiting; `autoclaude sweep-stop <id>` names one). It ends the window and the sessions it runs,
+   keeps the finished work, and the watchdog leaves a stopped sweep alone;
+   `autoclaude sweep-run <id>` resumes it on purpose. Then, by what happens after:
    - **Fix right away**: the fix run starts in the same window on a new branch made from the
      commit the sweep looked at, with `OPTIMIZE_PLAN.md` committed there, and ends with
      `HANDOFF-OPTIMIZE.md`, like any run; the owner reviews and merges that branch.

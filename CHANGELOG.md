@@ -1,5 +1,24 @@
 # Changelog
 
+## 1.1.0 (not released yet; on the branch phase10-sweeps)
+
+- **Security sweep** (`/autoclaude:security`, `autoclaude security`): a whole-project review by
+  area, secrets in the files and the git history, package advisories, config and infrastructure,
+  and live attacks on the running app through an allow-list proxy; every finding checked by
+  independent sessions; a gitignored report with suggested fixes.
+- **Optimize sweep** (`/autoclaude:optimize`, `autoclaude optimize`): unused code and packages,
+  duplicates, measured performance, poorly built features, slow and flaky tests; tiered fixes,
+  with tests that pin current behaviour before any rebuild.
+- **Report, plan or fix right away**, and `autoclaude run --plan <file>` to run a generated fix plan
+  on its own branch while the project's own plan and state wait.
+- `autoclaude sweep-status`, `sweep-stop` and `sweep-run`; accepted findings remembered in
+  `autoclaude.accepted.json`.
+- Security findings from normal runs go to the gitignored `docs/private/SECURITY-FINDINGS.md`.
+- Playwright MCP pinned to a tested version, and its arbitrary-code tool denied to every browser
+  checker.
+- The gate's commits no longer fail in a project whose gitignored `secrets/` folder exists (git
+  2.55 rejects an exclude pathspec for an ignored folder).
+
 ## 1.0.0 (2026-10-02)
 
 The first stable release, and the repository is public. Everything below has been proven on two

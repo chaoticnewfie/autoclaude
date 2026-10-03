@@ -65,7 +65,7 @@ Categories: duplicate, commented-out, stale-todo, leftover.
 - duplicate: copies worth merging: about 10 lines or more, three or more copies, or copies that have already started to differ (when one copy got a fix the other did not, report that as a bug too). Short similar blocks are not worth a finding. Name every copy in `evidence` and the shared helper in `fix`.
 - commented-out: code left in comments (git keeps the history).
 - stale-todo: TODO and FIXME comments older than about six months. Say whether the work they describe is done (the fix removes the comment) or not (the fix moves it to the project's list of deferred work). Never just delete a live one: it often records a known bug.
-- leftover: debug logging, branches that can never run, config keys nothing reads, remains of removed features. Feature flags and config read by deployment are tier C.
+- leftover: debug logging, branches that can never run, config keys nothing reads, remains of removed features, each at its own line. Feature flags and config read by deployment are tier C. A whole file that is a leftover is an unused-file finding, under the three checks above: the sweep never deletes a whole file on a leftover finding without the scanner's proof (it keeps such a finding as tier C, report only).
 
 ### Performance (module "performance")
 

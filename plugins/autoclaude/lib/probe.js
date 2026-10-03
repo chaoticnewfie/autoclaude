@@ -508,7 +508,8 @@ export async function runHttpProbe({ targets = [], tests = {}, writesAllowed = f
     if (on("exposedFiles")) { candidates.push(...await checkExposedFiles({ base, allow, fetchImpl, logFile, redact })); examined.push(`${origin}: exposed files (.git, .env, source maps)`); }
     else notExamined.push(`${origin}: exposed files (switched off)`);
 
-    if (on("verboseErrors") || on("errors")) { candidates.push(...await checkVerboseErrors({ base, allow, fetchImpl, logFile, redact })); examined.push(`${origin}: verbose errors`); }
+    // Switched off by its own name or by the older "errors": either one being false is enough.
+    if (on("verboseErrors") && on("errors")) { candidates.push(...await checkVerboseErrors({ base, allow, fetchImpl, logFile, redact })); examined.push(`${origin}: verbose errors`); }
     else notExamined.push(`${origin}: verbose errors (switched off)`);
 
     if (on("authBypass")) {

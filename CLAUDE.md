@@ -187,6 +187,15 @@ reviews, never edited.
 - Workflow agents that run the full suite in parallel make PowerShell start slowly enough (over
   60 s) that the file-lock test cannot take its lock; it reports a skip then. Run one full suite
   at a time.
+- git 2.55 fails `git add -A -- . ":(exclude)<dir>"` (exit 1) when <dir> exists and .gitignore
+  ignores it, though it staged everything else. Stage with a plain `add -A -- .` and then
+  `git reset -q -- <dir>` (git.js stageForCommit, 1.0.1).
+- A `node --test` started from inside a `node --test` run (NODE_TEST_CONTEXT in its environment)
+  reports to its parent and prints no TAP of its own: drop that variable before running a
+  project's tests from a test.
+- GitHub push protection (on since the repo went public) rejects a push whose commits contain a
+  key-shaped literal, fake ones in tests included (a Stripe-style sk_live_ key was refused).
+  Build fake keys at runtime, for example `["sk", "live", "..."].join("_")`.
 
 ## Documentation index
 

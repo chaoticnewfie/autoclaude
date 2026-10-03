@@ -238,19 +238,98 @@ export function normalizeEvidence(text) {
     .toLowerCase();
 }
 
+// ---------- the category a fingerprint is made from ----------
+//
+// A session's category is a free slug: one sweep says "injection", the next "sql-injection"; the
+// reviewer says "authz" where the browser says "idor". Fingerprints and dedupe compare the
+// canonical slug instead, so wording and casing never make a finding new. The stored category
+// stays as the session wrote it (the report shows it). The canonical slugs are the scanners' own
+// (lib/scan-security.js, lib/probe.js) and the optimize categories of lib/scan-optimize.js; each
+// maps to itself. A slug no rule knows is kept, with a plural "s" dropped.
+
+// One rule: the canonical slug and the hyphen-separated words that mean it (each alternative a
+// regular expression over whole words of the slug).
+const words = (...alts) => new RegExp(`(?:^|-)(?:${alts.join("|")})(?=-|$)`);
+const SECURITY_CATEGORIES = [
+  ["xss", words("xss", "cross-site-scripting", "html-injection", "script-injection")],
+  ["ssrf", words("ssrf", "server-side-request-forgery")],
+  ["csrf", words("csrf", "xsrf", "cross-site-request-forgery")],
+  ["open-redirect", words("redirects?", "unvalidated-redirects?")],
+  ["path-traversal", words("traversal", "lfi", "rfi", "file-inclusion", "zip-?slip")],
+  ["xxe", words("xxe", "xml-external-entit(?:y|ies)", "external-entit(?:y|ies)")],
+  ["deserialization", words("deserializ[a-z]*", "deserialis[a-z]*", "unserializ[a-z]*")],
+  ["prototype-pollution", words("prototype-pollution", "prototype")],
+  ["injection", words("[a-z0-9]*injections?", "sqli", "sql", "nosql", "rce", "remote-code-execution", "code-execution", "command-execution", "commands?", "exec", "eval", "ssti", "ldap", "xpath")],
+  ["rate-limit", words("rate-?limit[a-z-]*", "throttl[a-z]*", "brute-?force[a-z-]*", "lockout", "account-lockout", "credential-stuffing")],
+  ["secrets", words("secrets?", "credentials?", "creds", "hard-?coded", "api-?keys?", "private-keys?", "gitleaks", "leaked-(?:keys?|tokens?|secrets?)", "exposed-(?:keys?|tokens?|secrets?)")],
+  ["deps", words("deps?", "dependenc(?:y|ies)", "packages?", "supply-chain", "sca", "advisor(?:y|ies)", "cves?", "vulnerable-(?:components?|librar(?:y|ies))", "third-party", "npm-audit", "osv")],
+  ["cookies", words("cookies?")],
+  ["session", words("sessions?", "logout")],
+  ["cors", words("cors", "cross-origin[a-z-]*")],
+  ["headers", words("headers?", "csp", "content-security-policy", "hsts", "strict-transport-security", "clickjacking", "frame-options", "framing", "nosniff", "referrer-policy")],
+  ["crypto", words("crypto[a-z]*", "cipher[a-z]*", "encrypt[a-z]*", "decrypt[a-z]*", "hash[a-z]*", "md5", "sha-?1", "random[a-z]*", "prng", "rng", "tls", "ssl", "certificates?", "weak-keys?", "entropy", "plaintext[a-z-]*", "cleartext[a-z-]*")],
+  ["authz", words("authz", "authn", "o?auth", "authori[sz]ation", "authenticat[a-z]*", "access-control", "idor", "bola", "bfla", "insecure-direct-object-references?", "privilege[a-z-]*", "privesc", "permissions?", "unauthori[sz]ed[a-z-]*", "unauthenticated[a-z-]*", "missing-auth[a-z]*", "ownership", "tenan(?:t|cy)[a-z-]*", "login", "acl", "rbac", "jwt", "mass-assignment", "passwords?", "password-policy")],
+  ["errors", words("errors?", "error-[a-z-]*", "stack-?traces?", "verbose[a-z-]*", "exceptions?", "debug-(?:output|info|messages?)")],
+  ["exposure", words("exposures?", "exposed[a-z-]*", "disclosure", "information-disclosure", "info-disclosure", "info-leak[a-z]*", "information-leak[a-z]*", "data-leak[a-z]*", "sensitive-data[a-z-]*", "source-?maps?", "directory-listing", "env-file", "dotenv", "pii", "privacy")],
+  ["dos", words("dos", "ddos", "redos", "denial-of-service", "resource-exhaustion", "unbounded[a-z-]*")],
+  ["upload", words("uploads?", "file-uploads?")],
+  ["logging", words("logging", "logs?", "audit[a-z-]*", "monitoring")],
+  ["config", words("config[a-z]*", "misconfig[a-z]*", "debug", "debug-mode", "defaults?", "insecure-defaults?", "settings?", "hardening", "gitignore")]
+];
+const OPTIMIZE_CATEGORIES = [
+  ["flaky-test", words("flak[a-z]*")],
+  ["slow-test", /^(?=.*(?:^|-)slow(?:-|$))(?=.*(?:^|-)(?:tests?|specs?|suites?)(?:-|$))/],
+  ["major-upgrade", words("major[a-z-]*", "breaking-upgrades?")],
+  ["unlisted-dependency", words("(?:unlisted|undeclared|missing|implicit)-(?:deps?|dependenc(?:y|ies)|packages?)")],
+  ["unused-dependency", words("(?:unused|extraneous|dead|unneeded|unnecessary|redundant)-(?:deps?|dependenc(?:y|ies)|packages?)", "(?:dependenc(?:y|ies)|packages?)-unused")],
+  ["outdated", words("outdated[a-z-]*", "upgrades?", "updates?", "minor-upgrades?", "patch-upgrades?", "stale-dep[a-z]*", "old-versions?")],
+  ["unused-file", words("(?:unused|dead|orphan(?:ed)?|unreferenced|unreachable)-(?:files?|modules?)")],
+  ["commented-out", words("commented[a-z-]*", "comment-out[a-z-]*")],
+  ["stale-todo", words("todos?", "fixmes?", "hack", "xxx")],
+  ["leftover", words("leftovers?", "remnants?", "remains", "obsolete[a-z-]*", "vestig[a-z]*", "legacy[a-z-]*", "(?:unused|dead|stale)-(?:config[a-z-]*|settings?|flags?)", "feature-flags?")],
+  ["unused-export", words("(?:unused|dead|unreferenced|unreachable)-(?:exports?|functions?|code|symbols?|variables?|imports?|methods?|class(?:es)?|components?)", "dead-code"), /^unused$/],
+  ["duplicate", words("duplicat[a-z]*", "dup", "dupes?", "clones?", "copy-?paste[a-z-]*", "repeated-code", "dry")],
+  ["performance", words("perf[a-z]*", "slow[a-z-]*", "speed", "latency", "n\\+1", "n-plus-one", "n-1", "queries", "query[a-z-]*", "bundle[a-z-]*", "loading", "load-time", "render[a-z-]*", "memory[a-z-]*", "cach[a-z]*", "blocking[a-z-]*", "sync-io", "efficien[a-z]*", "optimi[sz]ation")],
+  ["rebuild", words("rebuild[a-z-]*", "redesign[a-z-]*", "refactor[a-z-]*", "rewrite[a-z-]*", "poorly[a-z-]*", "complex[a-z-]*", "architecture", "structure", "maintainability", "readability", "tech-debt", "technical-debt", "spaghetti")],
+  ["bug", words("bugs?", "defects?", "broken", "incorrect[a-z-]*", "wrong[a-z-]*", "errors?", "console-errors?", "crash[a-z-]*", "regression", "failures?", "failed-requests?", "exceptions?")]
+];
+
+const CANONICAL = new Set([...SECURITY_CATEGORIES, ...OPTIMIZE_CATEGORIES].map(([canon]) => canon));
+
+// The canonical slug of a category for a kind of sweep (security when the kind is unknown, as in
+// normalizeFinding): lower case, words joined by hyphens, synonyms to one slug. Another kind's
+// canonical slug stays as it is.
+export function canonicalCategory(category, kind = "security") {
+  // A slug is a few words; a long one is cut, which keeps the word rules below linear.
+  const slug = String(category || "").slice(0, 200).trim().toLowerCase().replace(/[^a-z0-9+]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 80);
+  if (!slug) return "other";
+  for (const [canon, ...res] of kind === "optimize" ? OPTIMIZE_CATEGORIES : SECURITY_CATEGORIES) if (canon === slug || res.some((re) => re.test(slug))) return canon;
+  if (CANONICAL.has(slug)) return slug;
+  return slug.length > 4 && slug.endsWith("ies") ? `${slug.slice(0, -3)}y` : slug.length > 3 ? slug.replace(/([^s])s$/, "$1") : slug;
+}
+
 // ---------- the anchor a fingerprint is made from ----------
 //
 // A finding a session reports is free text: the next sweep's session quotes another span, words
-// the title differently, and the line moves when code above it changes. None of that may change
-// the fingerprint, or a finding the owner accepted comes back (P10.2). So the fingerprint is made
-// from facts that stay put: the category, the file, and an anchor:
+// the title differently, points at the function's line once and at the query's line the next
+// time, and the line moves when code above it changes. None of that may change the fingerprint,
+// or a finding the owner accepted comes back (P10.2). So the fingerprint is made from facts that
+// stay put: the canonical category, the file, and an anchor:
 //   - a scanner's own `anchor` (a package, a header, a secret rule and its masked value), which
 //     its code writes the same way every time; a session's is ignored;
-//   - else the code the finding points at, read from the working tree: the line (a blank or
-//     brace-only line moves to the nearest line with code), normalized and masked, with the name
-//     of the function, method, class or route around it. The line number itself never counts;
-//   - else (no root, no readable file, a line that is not in it) the normalized evidence, then the
-//     title: deterministic checks write fixed text there.
+//   - else, read from the working tree at the finding's line (a blank or brace-only line moves to
+//     the nearest line with code; a finding without a line is found by the code its evidence
+//     quotes):
+//       - for a scanner (source "scanner ..."), which points at the exact line every time: the
+//         code at that line, normalized and masked, with the function, method, class or route
+//         around it;
+//       - for a session (or a finding of unknown source): the function, method, class or route
+//         around it, whatever line in it was named; at the top level, the code at that line;
+//     the line number itself never counts;
+//   - else, for a session's finding with a file (one that names no line in it, or a file that
+//     cannot be read, such as a URL path): the file alone;
+//   - else (no root, or a scanner's finding with no line in a readable file) the normalized
+//     evidence, then the title: deterministic checks write fixed text there.
 
 const MAX_ANCHOR_FILE = 2 * 1024 * 1024;
 const URL_FILE = /^[a-z][a-z0-9+.-]*:\/\//i;
@@ -327,11 +406,13 @@ function declarationName(line) {
 
 const indentOf = (l) => (/^[ \t]*/.exec(l)[0].replace(/\t/g, "  ")).length;
 
-// The function, method, class or route the line is in (or is): the nearest less indented line
-// above it that declares one. "" at the top level.
+// The functions, methods, classes and routes the line is in (or is), outermost first and joined
+// with " > ": each the nearest less indented line above the last that declares one. "" at the
+// top level. The whole chain, so a method of one class is not the same-named method of another.
 function enclosingName(lines, idx) {
+  const names = [];
   const own = declarationName(lines[idx]);
-  if (own) return own;
+  if (own) names.push(own);
   let indent = indentOf(lines[idx]);
   for (let j = idx - 1; j >= 0 && j >= idx - 400 && indent > 0; j--) {
     const l = lines[j];
@@ -339,37 +420,44 @@ function enclosingName(lines, idx) {
     const ind = indentOf(l);
     if (ind >= indent) continue;
     const name = declarationName(l);
-    if (name) return name;
+    if (name) names.unshift(name);
     indent = ind;
   }
-  return "";
+  return names.join(" > ");
 }
 
-// The anchor of a finding, as described above: "scanner:...", "code:...", or "text:...".
-// options: root (the project, to read the code), cache (a Map shared by one merge).
+// The anchor of a finding, as described above: "scanner:...", "fn:...", "code:...", "file:" or
+// "text:...". options: root (the project, to read the code), cache (a Map shared by one merge).
 export function anchorOf(finding, { root = null, cache = null } = {}) {
   const f = finding || {};
-  const fromSession = /^session\b/i.test(String(f.source || ""));
+  const source = String(f.source || "");
+  const fromSession = /^session\b/i.test(source);
   if (typeof f.anchor === "string" && f.anchor.trim() && !fromSession) return `scanner:${f.anchor.trim().toLowerCase()}`;
+  // A scanner names the exact line every time; a session's line is a guess near the problem.
+  const exact = /^scanner\b/i.test(source);
   const lines = root ? sourceLines(root, f.file, cache) : null;
   if (lines) {
     const n = Number(f.line);
     let idx = Number.isFinite(n) && n >= 1 && n <= lines.length ? Math.floor(n) - 1 : evidenceLine(lines, f.evidence);
     if (idx >= 0) {
       idx = significantLine(lines, idx);
+      const where = enclosingName(lines, idx);
+      if (where && !exact) return `fn:${where}`;
       const code = normalizeEvidence(lines[idx]);
-      if (code) return `code:${enclosingName(lines, idx)}\n${code}`;
+      if (code) return `code:${where}\n${code}`;
     }
   }
+  // A session's finding the code cannot place: the file it names is all that stays put.
+  if (root && !exact && normFile(f.file)) return "file:";
   return `text:${normalizeEvidence(f.evidence) || normalizeEvidence(f.title) || `line ${Number(f.line) || 0}`}`;
 }
 
-// Category, file and a hash of the anchor, as one opaque hash: it says nothing about the finding,
-// so the committed accepted list can carry it. Without a root (or a readable file) it falls back
+// The canonical category, the file and a hash of the anchor, as one opaque hash: it says nothing
+// about the finding, so the committed accepted list can carry it. Without a root it falls back
 // to the evidence, as before.
 export function fingerprint(finding, { root = null, cache = null } = {}) {
   const f = finding || {};
-  const category = String(f.category || "").trim().toLowerCase();
+  const category = canonicalCategory(f.category, f.kind);
   const file = normFile(f.file).toLowerCase();
   const anchor = anchorOf(f, { root, cache });
   // A text anchor hashes exactly as the fingerprint did before anchors existed.
@@ -479,7 +567,8 @@ export function sortFindings(findings) {
 }
 
 // Findings reported more than once (two sessions, or a scanner and a session) become one: the
-// same fingerprint, or the same kind, category and file with lines at most NEAR_LINES apart. The
+// same fingerprint, or the same kind, canonical category (canonicalCategory) and file with lines
+// at most NEAR_LINES apart. The
 // strongest report is kept (severity, then confidence), with the highest confidence of the group
 // and every source that found it in `sources`. Every member's fingerprint is kept in
 // `fingerprints` (the kept one first), so an accepted entry made from any of them still matches
@@ -487,22 +576,25 @@ export function sortFindings(findings) {
 // raw candidates from sessions and scanners go in as they came.
 export function dedupe(findings, { kind = null, root = null } = {}) {
   const out = [];
+  const cats = []; // the canonical category of each entry of out
   const cache = new Map();
   for (const raw of findings || []) {
     if (!raw || typeof raw !== "object") continue;
     const f = KINDS.includes(kind) ? normalizeFinding(raw, { kind, root, cache }) : { ...raw, fingerprint: raw.fingerprint || fingerprint(raw, { root, cache }) };
     const srcs = [...(Array.isArray(f.sources) ? f.sources : []), ...(f.source ? [f.source] : [])];
     const fps = fingerprintsOf(f);
-    const i = out.findIndex((g) => (g.kind || null) === (f.kind || null) && (g.fingerprints.some((x) => fps.includes(x)) || (
-      g.category === f.category && normFile(g.file) === normFile(f.file) && normFile(f.file) !== ""
+    const cat = canonicalCategory(f.category, f.kind);
+    const i = out.findIndex((g, j) => (g.kind || null) === (f.kind || null) && (g.fingerprints.some((x) => fps.includes(x)) || (
+      cats[j] === cat && normFile(g.file) === normFile(f.file) && normFile(f.file) !== ""
       && Number(g.line) > 0 && Number(f.line) > 0 && Math.abs(Number(g.line) - Number(f.line)) <= NEAR_LINES)));
-    if (i < 0) { out.push({ ...f, sources: [...new Set(srcs)], fingerprints: fps }); continue; }
+    if (i < 0) { out.push({ ...f, sources: [...new Set(srcs)], fingerprints: fps }); cats.push(cat); continue; }
     const g = out[i];
     const sources = [...new Set([...(g.sources || []), ...srcs])];
     const confidence = Math.max(Number(g.confidence) || 0, Number(f.confidence) || 0);
     const kept = compareFindings(f, g) < 0 ? f : g;
     const fingerprints = [...new Set([String(kept.fingerprint).toLowerCase(), ...g.fingerprints, ...fps])];
     out[i] = { ...kept, confidence, sources, fingerprints };
+    cats[i] = canonicalCategory(kept.category, kept.kind);
   }
   return out;
 }

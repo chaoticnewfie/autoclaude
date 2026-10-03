@@ -93,10 +93,10 @@ test("a security plan: phases by area then severity, at most 5 steps each, every
     assert.ok(s.accept.some((a) => /regression test named for SEC-\d{3}/.test(a)), `${s.id} has a regression-test Accept line`);
     assert.match(stepText(parsed, s), /- Note: Finding SEC-\d{3} \((high|medium|low)\), details in `\.autoclaude\/sweeps\/20261002-1430-security\/report\.md`/);
   }
-  assert.match(r.text, /- \[ \] \*\*SF1\.1\*\* Resolve finding SEC-001 in `src\/api\/search\.js`/);
+  assert.match(r.text, /- \[ \] \*\*X1\.1\*\* Resolve finding SEC-001 in `src\/api\/search\.js`/);
   assert.match(r.text, /Note: Finding SEC-001 \(high\)/, "critical is written as high");
   assert.equal(/critical\)/.test(r.text), false);
-  assert.match(r.text, /\*\*SF3\.1\*\* Update the dependency named in finding SEC-002\n  - Accept: the dependency finding SEC-002 names is upgraded the way its report entry says \(to the fixed version it gives, or later; inside the allowed range when it gives none\)/);
+  assert.match(r.text, /\*\*X3\.1\*\* Update the dependency named in finding SEC-002\n  - Accept: the dependency finding SEC-002 names is upgraded the way its report entry says \(to the fixed version it gives, or later; inside the allowed range when it gives none\)/);
   assert.match(r.text, /Test: test\/sec-001\.test\.js/);
   for (const detail of SECRET_DETAIL) assert.equal(r.text.toLowerCase().includes(detail.toLowerCase()), false, `the plan leaks "${detail}"`);
 });
@@ -144,7 +144,7 @@ test("an optimize plan: tier A is one step, tier B pins behaviour first, tier C 
   assert.ok(change.tags.includes("no-ui"));
   assert.equal(pin.phase, change.phase, "a pin step and its change share a phase");
   // The tool guard knows the change step by its tag, which plan.js lists (so the plan still lints
-  // clean), or by its shape; the pin step itself writes the tests, so it is not pinned.
+  // clean); the pin step itself writes the tests, so it is not pinned.
   assert.ok(TAGS.includes(PINNED_TAG), "lint knows the pinned tag");
   assert.ok(change.tags.includes(PINNED_TAG), "the change step is tagged pinned");
   assert.equal(pin.tags.includes(PINNED_TAG), false);
@@ -241,22 +241,29 @@ test("needsOwner: a security finding marked unsafe to fix, an optimize finding o
 });
 
 test("step ids never collide with the project's own plan or PROGRESS.md; a stamp makes the title and branch unique", () => {
-  assert.deepEqual(STEP_PREFIX, { security: "SF", optimize: "OF" }, "not the template's S");
+  assert.deepEqual(STEP_PREFIX, { security: "X", optimize: "OF" }, "never the template's S");
+  for (const p of Object.values(STEP_PREFIX)) assert.equal(p[0].toUpperCase() === "S", false, `${p} reads like the project's own S ids`);
   const one = securityFindings().slice(0, 1);
   const plain = generateFixPlan({ kind: "security", confirmed: one, mainPlanText: MAIN_PLAN, reportRel: REPORT, date: "2026-10-02" });
-  assert.deepEqual(parsePlan(plain.text).steps.map((s) => s.id), ["SF1.1"], "the project's own S1.1 is never reused");
-  // A project whose own plan uses SF, and a PROGRESS.md that already records an earlier fix run.
-  const ownSf = MAIN_PLAN.replace("**S1.1**", "**SF1.1**");
-  const progress = "# Progress\n\n- 2026-09-30 S1.1 Add a todo (attempt 1)\n- 2026-10-01 SFB1.1 Resolve finding SEC-001 in `src/a.js` (attempt 1)\n";
-  assert.equal(stepPrefix("security", [1], { mainPlanText: ownSf }), "SFB");
-  assert.equal(stepPrefix("security", [1], { progressText: progress }), "SF", "SF1.1 is not in PROGRESS.md");
-  assert.equal(stepPrefix("security", [1], { mainPlanText: ownSf, progressText: progress }), "SFC");
+  assert.deepEqual(parsePlan(plain.text).steps.map((s) => s.id), ["X1.1"], "the project's own S1.1 is never reused");
+  // A whole security plan: lint-clean, and no id that starts like the project's S ids.
+  const many = generateFixPlan({ kind: "security", confirmed: securityFindings(), mainPlanText: MAIN_PLAN, progressText: "- 2026-09-30 S1.1 Add a todo (attempt 1)\n", reportRel: REPORT, date: "2026-10-02" });
+  assert.deepEqual(many.problems, [], many.text);
+  assert.deepEqual(lintPlan(parsePlan(many.text)), []);
+  const manyIds = parsePlan(many.text).steps.map((s) => s.id);
+  assert.ok(manyIds.length > 1 && manyIds.every((id) => /^X\d+\.\d+$/.test(id)), manyIds.join(", "));
+  // A project whose own plan uses X, and a PROGRESS.md that already records an earlier fix run.
+  const ownX = MAIN_PLAN.replace("**S1.1**", "**X1.1**");
+  const progress = "# Progress\n\n- 2026-09-30 S1.1 Add a todo (attempt 1)\n- 2026-10-01 XB1.1 Resolve finding SEC-001 in `src/a.js` (attempt 1)\n";
+  assert.equal(stepPrefix("security", [1], { mainPlanText: ownX }), "XB");
+  assert.equal(stepPrefix("security", [1], { progressText: progress }), "X", "X1.1 is not in PROGRESS.md");
+  assert.equal(stepPrefix("security", [1], { mainPlanText: ownX, progressText: progress }), "XC");
   assert.equal(stepPrefix("optimize", [2, 1], { progressText: "- OF2.1 x" }), "OFB", "every id the plan would write is checked");
-  const r = generateFixPlan({ kind: "security", confirmed: one, mainPlanText: ownSf, progressText: progress, reportRel: REPORT, date: "2026-10-02" });
+  const r = generateFixPlan({ kind: "security", confirmed: one, mainPlanText: ownX, progressText: progress, reportRel: REPORT, date: "2026-10-02" });
   assert.deepEqual(r.problems, [], r.text);
   const ids = parsePlan(r.text).steps.map((s) => s.id);
-  assert.deepEqual(ids, ["SFC1.1"]);
-  for (const id of ids) assert.equal(new RegExp(`\\b${id}\\b`).test(progress + ownSf), false, id);
+  assert.deepEqual(ids, ["XC1.1"]);
+  for (const id of ids) assert.equal(new RegExp(`\\b${id}\\b`).test(progress + ownX), false, id);
   // The stamp: one sweep, one title, one branch.
   assert.equal(fixPlanTitle("security", "2026-10-02", "1430"), "Security fixes 2026-10-02 1430");
   const stamped = generateFixPlan({ kind: "security", confirmed: one, reportRel: REPORT, date: "2026-10-02", stamp: "1430" });
@@ -264,16 +271,20 @@ test("step ids never collide with the project's own plan or PROGRESS.md; a stamp
   assert.equal(planSlug(parsePlan(plain.text)), "security-fixes-2026-10-02", "no stamp: the title as before");
 });
 
-test("a pinned change step is known by its tag or by its shape", () => {
+test("a pinned change step is known by its tag only, never by its shape", () => {
   const plan = parsePlan([
     "# P", "", "## Phase 1: A",
     "- [ ] **OF1.1** Pin", "  - Accept: a", `  - Test: ${CHARACTERIZATION_DIR}/opt-001.test.js`,
-    "- [ ] **OF1.2** Change", "  - Accept: b", `  - Test: ./${CHARACTERIZATION_DIR}/opt-001.test.js`, "  - Depends: OF1.1",
+    "- [ ] **OF1.2** Change", "  - Accept: b", `  - Test: ./${CHARACTERIZATION_DIR}/opt-001.test.js`, "  - Tags: no-ui, pinned", "  - Depends: OF1.1",
     "- [ ] **OF1.3** Other", "  - Accept: c", "  - Test: test/other.test.js", "  - Depends: OF1.1",
+    // An owner's own step that writes its characterization test after another step: not pinned.
+    "- [ ] **OF1.4** Pin the parser's current output", "  - Accept: d", `  - Test: ${CHARACTERIZATION_DIR}/parser.test.js`, "  - Depends: OF1.3",
     ""
   ].join("\n"));
-  assert.deepEqual(plan.steps.map(isPinnedStep), [false, true, false]);
+  assert.deepEqual(lintPlan(plan), []);
+  assert.deepEqual(plan.steps.map(isPinnedStep), [false, true, false, false]);
   assert.equal(isPinnedStep({ tags: [PINNED_TAG], depends: [], test: [] }), true);
+  assert.equal(isPinnedStep({ tags: ["no-ui"], depends: ["S1.1"], test: [`${CHARACTERIZATION_DIR}/a.test.js`] }), false, "Depends and a characterization test are not the tag");
   assert.equal(isPinnedStep(null), false);
 });
 

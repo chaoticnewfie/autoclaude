@@ -7,10 +7,11 @@ import { fileURLToPath } from "node:url";
 import {
   DEFAULTS, mergeConfig, validateConfig, loadConfig, formatConfigErrors, PROJECT_ONLY_KEYS, SAFE_LIVE_KEYS, isSafeLiveKey,
   machineDefaultsFile, loadLayers, writeProjectConfig, writeMachineDefaults, readMachineDefaults, configTemplate, EFFORTS,
-  setRunPlan, clearRunPlan, runPlanOverride, readRunPlan, runPlanFile, RUN_PLAN_ERROR_PATH, ACCEPTED_FILE, resolveRunPlanSource
+  setRunPlan, clearRunPlan, runPlanOverride, readRunPlan, runPlanFile, RUN_PLAN_ERROR_PATH, ACCEPTED_FILE, resolveRunPlanSource,
+  continueHereFor, runPlanTag
 } from "../../plugins/autoclaude/lib/config.js";
 import { runCli } from "../../plugins/autoclaude/lib/cli.js";
-import { collectHandback } from "../../plugins/autoclaude/lib/summary.js";
+import { collectHandback, handoffFileFor } from "../../plugins/autoclaude/lib/summary.js";
 import { defaultState } from "../../plugins/autoclaude/lib/state.js";
 
 const tmpDir = () => fs.mkdtempSync(path.join(os.tmpdir(), "autoclaude-config-"));
@@ -379,6 +380,58 @@ test("every config.plan reader follows the override: the CLI, the hand-back and 
   assert.equal(await runCli(["lint-plan"], io), 0);
   assert.match(out.join(""), /PLAN\.md ok: 1 steps in 1 phases/);
   assert.equal(out.join("").includes("SECURITY_PLAN"), false);
+});
+
+test("a run on a generated plan has its own resume file: CONTINUE_HERE-SECURITY.md, named like its hand-back (D59)", () => {
+  assert.equal(continueHereFor("CONTINUE_HERE.md", "SECURITY_PLAN.md"), "CONTINUE_HERE-SECURITY.md");
+  assert.equal(continueHereFor("CONTINUE_HERE.md", "OPTIMIZE_PLAN.md"), "CONTINUE_HERE-OPTIMIZE.md");
+  assert.equal(continueHereFor("docs\\RESUME.md", "plans/fix.md"), "docs/RESUME-FIX.md", "next to the project's own, forward slashes");
+  assert.equal(continueHereFor("./CONTINUE_HERE.md", "PLAN.md"), "CONTINUE_HERE-RUN.md");
+  assert.equal(continueHereFor("NOTES", "SECURITY_PLAN.md"), "NOTES-SECURITY.md");
+  for (const p of ["SECURITY_PLAN.md", "OPTIMIZE_PLAN.md", "plans/fix.md", "my plan.md", "PLAN.md"]) assert.equal(`HANDOFF-${runPlanTag(p)}.md`, handoffFileFor(p), p);
+
+  const root = planProject();
+  let r = loadConfig(root);
+  assert.deepEqual([r.config.docs.continueHere, r.mainContinueHere], ["CONTINUE_HERE.md", "CONTINUE_HERE.md"]);
+  setRunPlan(root, "SECURITY_PLAN.md");
+  r = loadConfig(root);
+  assert.deepEqual(r.errors, []);
+  assert.deepEqual([r.config.plan, r.config.docs.continueHere, r.mainContinueHere], ["SECURITY_PLAN.md", "CONTINUE_HERE-SECURITY.md", "CONTINUE_HERE.md"]);
+  assert.equal(r.config.docs.progress, "PROGRESS.md", "the other docs are the project's");
+  assert.equal(loadLayers(root).merged.docs.continueHere, "CONTINUE_HERE.md", "the settings page shows the project's own");
+  setRunPlan(root, "OPTIMIZE_PLAN.md");
+  assert.equal(loadConfig(root).config.docs.continueHere, "CONTINUE_HERE-OPTIMIZE.md");
+  // A project that names its own resume file: the run's sits next to it.
+  writeProjectConfig(root, { version: 1, plan: "PLAN.md", docs: { continueHere: "docs/RESUME.md" } });
+  r = loadConfig(root);
+  assert.deepEqual([r.config.docs.continueHere, r.mainContinueHere], ["docs/RESUME-OPTIMIZE.md", "docs/RESUME.md"]);
+  // A broken override or none: the project's own resume file.
+  fs.writeFileSync(runPlanFile(root), "{ broken");
+  assert.equal(loadConfig(root).config.docs.continueHere, "docs/RESUME.md");
+  clearRunPlan(root);
+  assert.equal(loadConfig(root).config.docs.continueHere, "docs/RESUME.md");
+});
+
+test("the session context and the gate follow the run's resume file through loadConfig", async () => {
+  const root = planProject();
+  setRunPlan(root, "SECURITY_PLAN.md");
+  const { config } = loadConfig(root);
+  const { buildContext } = await import("../../plugins/autoclaude/scripts/session-context.js");
+  const ctx = buildContext({ root, state: { ...defaultState(), status: "running", currentStep: "S1.1" }, config, planText: fs.readFileSync(path.join(root, config.plan), "utf8"), progressText: "", promptTemplate: "Read `{{CONTINUE_HERE}}` first, rewrite `{{CONTINUE_HERE}}` before ready." });
+  assert.match(ctx, /Read `CONTINUE_HERE-SECURITY\.md` first, rewrite `CONTINUE_HERE-SECURITY\.md` before ready\./);
+  assert.equal(/`CONTINUE_HERE\.md`/.test(ctx), false, "the project's own resume file is not the builder's");
+  // The real prompt uses the placeholder, never the file name.
+  const prompt = fs.readFileSync(fileURLToPath(new URL("../../plugins/autoclaude/prompts/context.md", import.meta.url)), "utf8");
+  assert.match(prompt, /\{\{CONTINUE_HERE\}\}/);
+  assert.equal(prompt.includes("CONTINUE_HERE.md"), false);
+  // The gate takes its config from loadConfig and names the resume file only through
+  // config.docs.continueHere (the comments aside).
+  const gate = fs.readFileSync(fileURLToPath(new URL("../../plugins/autoclaude/lib/gate.js", import.meta.url)), "utf8");
+  assert.match(gate, /loadConfig\(root\)/);
+  assert.match(gate, /\bconfig\.docs\.continueHere\b/);
+  const code = gate.split("\n").filter((l) => !/^\s*\/\//.test(l)).join("\n");
+  assert.equal(code.includes("CONTINUE_HERE"), false, "no resume file name written into the gate's code");
+  clearRunPlan(root);
 });
 
 test("no module reads the project's config except through loadConfig, so the override reaches every config.plan reader", () => {

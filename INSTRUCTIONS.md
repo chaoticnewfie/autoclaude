@@ -266,6 +266,7 @@ The settings you are most likely to change:
 | Alerts                          | the channel, and which informational messages you get       |
 | Checks, dev server              | your test commands, and how to start the app for the browser checks |
 | Deny rules, permissions         | what the run must never run, and what it may do outside the project |
+| Sweeps                          | depth, what happens after, sessions at once, package lookups (section 15) |
 
 From a terminal:
     autoclaude checks                   run the project's checks exactly the way the run does
@@ -288,6 +289,10 @@ looks at the commands being run; reading or mentioning a blocked file is fine.
 
 These checks look at what Claude runs, so they are a strong safety net, not a wall. Before a run
 changes an existing machine, it takes the snapshot you agreed to during planning.
+
+Security findings the run files go to docs/private/SECURITY-FINDINGS.md, which git ignores, so
+they never end up in a public repository. Older projects that still keep that file in docs/ are
+offered the move during planning.
 
 
 ## 13. Troubleshooting
@@ -337,7 +342,69 @@ Add --purge to "autoclaude uninstall" to also delete your alert settings, comput
 logs. The files AutoClaude added to your projects stay; delete them by hand if you want.
 
 
-## 15. Command list
+## 15. Security and optimize sweeps
+
+A sweep checks a whole existing project, not just one run's changes. There are two kinds:
+
+- Security: Claude reviews the whole codebase area by area (logins, permissions, input
+  handling, injection, XSS, file paths, crypto, sessions, CORS/CSRF, error leaks), searches
+  for passwords and keys in the files and in all of git history, checks your packages for known
+  vulnerabilities, reviews Docker, CI and config files, and attacks the running app with a
+  headless browser and direct requests.
+- Optimize: unused code and packages, duplicated code and leftovers, slow paths (measured
+  before and after), poorly built features, and slow or flaky tests.
+
+To start one, open Claude in the project folder and type:
+
+    /autoclaude:security        or        /autoclaude:optimize
+
+It asks its questions first: what to check, what the live tests may touch, test logins, how
+deep to go, and what happens at the end. Then the sweep runs on its own in a window named
+ac-sweep-<project>, like a run, and sends a Discord or ntfy message when it finishes.
+
+What the live tests may touch is your choice each time. The default is only the app on this
+computer (the dev server). You can add staging addresses, and production as off, harmless
+read-only checks, or full attacks (with a warning). Tests that change data run only when you
+confirm the database is a throwaway one. Every live request goes through an allow-list, and
+anything else is refused and logged.
+
+Every finding is checked by independent Claude sessions before it reaches the report (three
+of them at the default depth, "thorough"), so false alarms are rare.
+
+At the end, one of three things happens, chosen in the questions:
+
+    report only             the report, nothing else
+    report + a fix plan     the report, plus a plan for you to read; start it with
+                            autoclaude run --plan <the path the message gives>
+    fix right away          the plan starts at once as a normal run on its own branch,
+                            and every fix is verified like any other step
+
+The report is in .autoclaude/sweeps/<date>-<kind>/report.md in the project. It is never
+committed, because it says exactly how to exploit what it found. Each finding has its severity
+(critical, high, medium, low), where it is, the evidence, how to reproduce it and a suggested fix.
+Secrets are masked everywhere.
+
+A fix run works on its own plan (SECURITY_PLAN.md or OPTIMIZE_PLAN.md) on a new branch, and
+your own plan and its progress are kept aside until it finishes. Its hand-back is
+HANDOFF-SECURITY.md or HANDOFF-OPTIMIZE.md. Merge the branch after you review it, as usual.
+
+Optimize never weakens a test. Before it rebuilds a feature, it writes tests that pin down how
+the feature behaves today, and the rebuilt feature must pass them unchanged. Big package
+upgrades, shared database changes and anything it cannot prove unused are left for you.
+
+To accept a finding (an accepted risk or a false alarm), tell Claude, for example "mark SEC-004
+as a false alarm". It goes into autoclaude.accepted.json (committed, no details), and later
+sweeps stop reporting it.
+
+    autoclaude sweep-status          what sweeps there are, and their state
+    autoclaude sweep-stop            stop the running sweep for good (closing its window is not
+                                     enough: the watchdog reopens it)
+    autoclaude sweep-run <id>        carry on with a stopped or paused sweep
+
+A sweep uses a lot of Claude usage: several sessions run at once (3 by default). It waits when
+your 5-hour window is nearly full and pauses at your weekly limit, like a run.
+
+## 16. Command list
 
     Setting up
       /autoclaude:init             (in Claude) add AutoClaude to the project
@@ -353,6 +420,14 @@ logs. The files AutoClaude added to your projects stay; delete them by hand if y
       autoclaude resume            carry on
       autoclaude answer "..."      answer a question Claude is blocked on
       autoclaude nudge "..."       restart Claude with a one-off prompt
+
+    Sweeps (section 15)
+      /autoclaude:security         (in Claude) a full security sweep of the project
+      /autoclaude:optimize         (in Claude) a full optimization sweep
+      autoclaude sweep-status      what sweeps there are
+      autoclaude sweep-stop        stop the running sweep for good
+      autoclaude sweep-run <id>    carry on with a stopped or paused sweep
+      autoclaude run --plan <file> run a sweep's fix plan on its own branch
 
     Checking
       autoclaude lint-plan         check the plan's format

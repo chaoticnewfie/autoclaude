@@ -478,7 +478,7 @@ test("the hook finds the pinned step in the run's plan: denied during the change
   fs.writeFileSync(path.join(proj, "OPTIMIZE_PLAN.md"), [
     "# Optimization 2026-10-02", "", "## Phase 1: Optimizations in src (medium)",
     "- [x] **OF1.1** Pin the current behaviour around finding OPT-001", "  - Accept: pinned", "  - Test: test/characterization/opt-001.test.js",
-    "- [ ] **OF1.2** Merge the two copies (OPT-001)", "  - Accept: unchanged", "  - Test: test/characterization/opt-001.test.js", "  - Depends: OF1.1", ""
+    "- [ ] **OF1.2** Merge the two copies (OPT-001)", "  - Accept: unchanged", "  - Test: test/characterization/opt-001.test.js", "  - Tags: no-ui, pinned", "  - Depends: OF1.1", ""
   ].join("\n"));
   setRunPlan(proj, "OPTIMIZE_PLAN.md");
   const script = fileURLToPath(new URL("../../plugins/autoclaude/scripts/tool-guard.js", import.meta.url));
@@ -496,6 +496,36 @@ test("the hook finds the pinned step in the run's plan: denied during the change
   saveState(proj, { ...defaultState(), status: "running", currentStep: "OF1.1" });
   assert.equal(hook("test/characterization/opt-001.test.js"), null, "the pin step writes the tests");
   assert.equal(await pinnedStep(proj, { plan: "missing.md" }, { currentStep: "OF1.2" }), null, "an unreadable plan leaves the step unpinned");
+});
+
+test("an owner's step with Depends and a Test under test/characterization/ is not pinned: it writes its own test", async () => {
+  const fs = await import("node:fs");
+  const { spawnSync } = await import("node:child_process");
+  const { fileURLToPath } = await import("node:url");
+  const { saveState, defaultState } = await import("../../plugins/autoclaude/lib/state.js");
+  const { pinnedStep } = await import("../../plugins/autoclaude/scripts/tool-guard.js");
+  const proj = fs.mkdtempSync(path.join(os.tmpdir(), "autoclaude-guard-ownpin-"));
+  fs.writeFileSync(path.join(proj, "autoclaude.config.json"), JSON.stringify({ version: 1, plan: "PLAN.md" }));
+  fs.writeFileSync(path.join(proj, "PLAN.md"), [
+    "# Own plan", "", "## Phase 1: Parser",
+    "- [x] **S1.1** Split the parser", "  - Accept: a", "  - Test: test/parser.test.js",
+    "- [ ] **S1.2** Pin the parser's current output", "  - Accept: b", "  - Test: test/characterization/parser.test.js", "  - Depends: S1.1", ""
+  ].join("\n"));
+  const script = fileURLToPath(new URL("../../plugins/autoclaude/scripts/tool-guard.js", import.meta.url));
+  const env = { ...process.env, CLAUDE_CONFIG_DIR: fs.mkdtempSync(path.join(os.tmpdir(), "autoclaude-guard-cfg-")) };
+  delete env.AUTOCLAUDE_ROLE;
+  delete env.AUTOCLAUDE_BUILDER;
+  const hook = (file) => {
+    const r = spawnSync(process.execPath, [script], { input: JSON.stringify({ tool_name: "Write", tool_input: { file_path: path.join(proj, file) }, cwd: proj }), env, encoding: "utf8" });
+    return r.stdout ? JSON.parse(r.stdout).hookSpecificOutput.permissionDecisionReason : null;
+  };
+  saveState(proj, { ...defaultState(), status: "running", currentStep: "S1.2" });
+  assert.equal(await pinnedStep(proj, { plan: "PLAN.md" }, { currentStep: "S1.2" }), null, "no pinned tag: not pinned");
+  assert.equal(hook("test/characterization/parser.test.js"), null, "the step writes the test it must create");
+  // The same step tagged pinned is guarded.
+  fs.writeFileSync(path.join(proj, "PLAN.md"), fs.readFileSync(path.join(proj, "PLAN.md"), "utf8").replace("  - Depends: S1.1", "  - Tags: pinned\n  - Depends: S1.1"));
+  assert.deepEqual(await pinnedStep(proj, { plan: "PLAN.md" }, { currentStep: "S1.2" }), { step: "S1.2", dir: "test/characterization", pinStep: "S1.1" });
+  assert.match(hook("test/characterization/parser.test.js"), /test\/characterization\/ holds the characterization tests the pin step S1\.1 wrote/);
 });
 
 test("the hook itself follows the run-plan override through loadConfig and guards both plans", async () => {

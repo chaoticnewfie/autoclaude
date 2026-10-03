@@ -892,6 +892,50 @@ test("sweep-status and status list the project's sweeps: a live one by its stage
   assert.match(st.out, /sweep: optimize stopped \(window gone\) at stage review, started .*; carry it on with `autoclaude sweep-run 20261002-0800-optimize`/);
 });
 
+test("sweep-stop stops a sweep for good: its window's process tree is ended, a window AutoClaude opens leaves it alone, and status and sweep-status say how to stop and resume", async () => {
+  const root = project();
+  const id = "20261002-0905-security";
+  const dir = path.join(root, ".autoclaude", "sweeps", id);
+  fs.mkdirSync(dir, { recursive: true });
+  const beat = new Date().toISOString();
+  fs.writeFileSync(path.join(dir, "sweep.json"), JSON.stringify({ id, kind: "security", status: "running", stage: "verify", pid: 4242, heartbeatAt: beat, updatedAt: beat, startedAt: "2026-10-02T09:05:00Z", options: { kind: "security", modules: ["code"], after: "report" }, agents: {} }));
+  const killed = [];
+  const deps = { isPidAlive: (pid) => pid === 4242 && !killed.length, killTree: (pid) => { killed.push(pid); return true; } };
+  // While it runs, both say how to stop it (closing the window is not enough).
+  let r = await run(["status"], root, { deps });
+  assert.match(r.out, new RegExp(`sweep: security running \\(stage verify\\), started .*; stop it with \`autoclaude sweep-stop ${id}\``));
+  r = await run(["sweep-status"], root, { deps });
+  assert.match(r.out, new RegExp(`${id}: running \\(stage verify\\)\\n\\s+stop it for good with \`autoclaude sweep-stop ${id}\` \\(closing its window is not enough when the watchdog is installed`));
+  // Without an id: the sweep that is running.
+  r = await run(["sweep-stop"], root, { deps });
+  assert.equal(r.code, 0, r.out + r.err);
+  assert.match(r.out, new RegExp(`sweep ${id} stopped \\(it was running at stage verify\\); its window and the sessions it ran are ended\\.`));
+  assert.match(r.out, new RegExp(`the watchdog leaves it alone\\. Its finished work is kept in \\.autoclaude/sweeps/${id}/; \`autoclaude sweep-run ${id}\` resumes it`));
+  assert.deepEqual(killed, [4242]);
+  const s = JSON.parse(fs.readFileSync(path.join(dir, "sweep.json"), "utf8"));
+  assert.deepEqual([s.status, s.stoppedBy, s.pid], ["stopped", "owner", null]);
+  r = await run(["sweep-status"], root, { deps });
+  assert.match(r.out, new RegExp(`${id}: stopped \\(by the owner\\) at stage verify\\n\\s+the watchdog leaves it alone; \`autoclaude sweep-run ${id}\` resumes it where it stopped`));
+  assert.doesNotMatch((await run(["status"], root, { deps })).out, /sweep: security/, "a stopped sweep is not going");
+  // The window the start or the watchdog opens passes --auto: it runs nothing.
+  r = await run(["sweep-run", "--auto", id], root, { deps });
+  assert.equal(r.code, 0, r.out + r.err);
+  assert.match(r.out, /was stopped by the owner \(`autoclaude sweep-stop`\); this window leaves it alone/);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(dir, "sweep.json"), "utf8")).status, "stopped");
+  r = await run(["sweep-stop", id], root, { deps });
+  assert.match(r.out, /is already stopped; `autoclaude sweep-run 20261002-0905-security` resumes it/);
+  r = await run(["sweep-stop"], root, { deps });
+  assert.equal(r.code, 1);
+  assert.match(r.out, /no sweep is running, waiting or paused in this project/);
+  r = await run(["sweep-stop", "nope"], root, { deps });
+  assert.equal(r.code, 1);
+  assert.match(r.out, /no sweep nope in this project/);
+  r = await run(["sweep-stop", "--now"], root, { deps });
+  assert.equal(r.code, 1);
+  assert.match(r.err, /unknown option --now/);
+  assert.match(commandHelp("sweep-stop"), /the watchdog leaves it alone \(closing the window\s+is not enough/);
+});
+
 const FIX_PLAN = `# Security fixes 2026-10-02
 
 ## Phase 1: Fixes

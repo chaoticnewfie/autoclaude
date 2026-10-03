@@ -5,8 +5,8 @@
 //     computer's settings the run reads (the AutoClaude defaults and notify files, Claude Code's
 //     user settings): the builder must not switch off what verifies it. A run on a generated
 //     plan (`run --plan`, P10.7) protects that plan and the project's own plan alike. While the
-//     current step is a change under pinned tests (fixplan.isPinnedStep, P10.9), any write
-//     under the characterization test folder is denied as well.
+//     current step is a change under pinned tests (tagged pinned: fixplan.isPinnedStep, P10.9),
+//     any write under the characterization test folder is denied as well.
 //   - Bash and PowerShell commands that would write, delete or move those files, push while
 //     pushing is off, force-push or delete remote refs, change git aliases or push settings,
 //     hard-reset, commit or tag, or delete recursively outside the project and the temp folder

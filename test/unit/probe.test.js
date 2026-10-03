@@ -347,3 +347,23 @@ test("runHttpProbe: a switched-off test is reported not examined, and writes run
   assert.ok(!out.coverage.examined.some((e) => /security headers/.test(e)));
   assert.ok(calls.some((c) => c.method === "POST"), "full mode + writes allowed: the login rate-limit check runs");
 });
+
+test("runHttpProbe: the verbose-errors probe can be switched off, by its own name or the older one", async () => {
+  const leaky = () => fakeFetch({ "GET /": res({ status: 200, body: "home" }), "*": res({ status: 500, body: "Error\n    at Object.handler (/home/app/server.js:42:13)" }) });
+  const probeUrl = (c) => /autoclaude-sweep-probe/.test(c.url);
+  const run = (tests, fn) => runHttpProbe({ targets: [{ url: "http://127.0.0.1:4173", mode: "readonly" }], tests, fetchImpl: fn, redact: mark });
+  // On by default: the probe URL is fetched and the leak is a finding.
+  const on = leaky();
+  const found = await run({}, on.fn);
+  assert.ok(on.calls.some(probeUrl));
+  assert.ok(found.candidates.some((c) => c.category === "errors"));
+  assert.ok(found.coverage.examined.some((e) => /verbose errors/.test(e)));
+  for (const tests of [{ verboseErrors: false }, { errors: false }, { verboseErrors: false, errors: true }]) {
+    const off = leaky();
+    const out = await run(tests, off.fn);
+    assert.equal(off.calls.some(probeUrl), false, `${JSON.stringify(tests)}: the probe URL is never requested`);
+    assert.equal(out.candidates.some((c) => c.category === "errors"), false, JSON.stringify(tests));
+    assert.ok(out.coverage.notExamined.some((n) => /verbose errors \(switched off\)/.test(n)), JSON.stringify(tests));
+    assert.equal(out.coverage.examined.some((e) => /verbose errors/.test(e)), false);
+  }
+});
