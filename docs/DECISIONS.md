@@ -976,3 +976,11 @@ session for a few minutes, and takes its time off the clock.
 **Rejected.** Running the tester and the bug bash at the same time: they share one dev server and
 one database, and the bug bash tries to break things, so the tester would fail at random.
 Starting the security review before the checks pass: a failing check would waste it.
+- **Addendum (2026-10-03), details from the same suggestion.** The security review gets its own
+  budget (capped by the gate's deadline); the browser chain's reserve covers only the tester and
+  the bug bash. When both sides fail, the outcome follows out-of-time > infra > failed > passed,
+  and two real failures make one attempt with both reports. A failing tester does not stop the
+  security review: its findings go into the fix. Sections are reported in a fixed order with the
+  timings marked as overlapping. A setting `checkers.parallel`: `security` (default), `off`, or
+  `all` (the tester and bug bash overlap too; opt-in, only for apps whose test data can take
+  both at once). Chosen by Scott's session as the recommended answers, for review at CHECKPOINT 10.
