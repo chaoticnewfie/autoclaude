@@ -444,3 +444,14 @@ One entry per working session: what was done, what was committed. Append only.
   inside npm test, so three in a row was bad luck) and paused as step-failed. Resumed by hand as
   an owner would. Question for Scott at CHECKPOINT 10: rerun a failed check once before counting
   it as an attempt, and report it as flaky (his DB run had 4 of 5 check failures flaky).
+- After the resume, the security fix run finished on its own: 18 of 18 steps in 6 features in
+  2 h 5 min (all 18 first time after the flaky pause), four fix-up passes, a "Phase N verified"
+  alert per feature and a plan-complete alert, each feature pushed with its tag to the practice
+  remote, HANDOFF-SECURITY.md and CONTINUE_HERE-SECURITY.md written (the project's own
+  CONTINUE_HERE.md and PLAN.md untouched), the project's own plan and state restored at the end.
+  The proxy log: 0 requests allowed outside the target, 69 refused (Chromium's own Google calls
+  and 2 deliberate open-redirect probes to attacker.invalid). No Docker volume was created today;
+  the 120 volumes added since 2026-09-29 come from the DB project's run and work (anonymous test
+  volumes, DEFERRED 20), left for Scott.
+- Optimize sweep started through /autoclaude:optimize (3 rounds plus a go; it asked which commit
+  to sweep since the security fixes are unmerged), mode "report plus a fix plan to review".
