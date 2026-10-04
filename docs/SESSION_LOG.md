@@ -455,3 +455,10 @@ One entry per working session: what was done, what was committed. Append only.
   volumes, DEFERRED 20), left for Scott.
 - Optimize sweep started through /autoclaude:optimize (3 rounds plus a go; it asked which commit
   to sweep since the security fixes are unmerged), mode "report plus a fix plan to review".
+- Optimize sweep: 31 min (estimate 24), 48 files in 6 areas, 31 candidates -> 26, 78 verifier
+  sessions, 25 confirmed and 1 refuted, every planted problem still present found, plus real
+  bugs (a "//" request crashes the server, a double-click deletes the next todo, HEAD answers
+  404); OPTIMIZE_PLAN.md 31 steps in 9 phases, lint clean, all phases fit, pinned two-step
+  changes. Proof findings: same-file findings not merged when one is file-level (OPT-007/013,
+  OPT-019/023), scanner findings without titles, raw keys in the baseline table. P10.12 ticked.
+  This machine restored to GitHub 1.0.1 (notify.json intact). CHECKPOINT 10 next.

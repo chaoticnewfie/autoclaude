@@ -1,6 +1,6 @@
 # CONTINUE_HERE.md
 
-**Last updated: 2026-10-03.** Rewrite this file at the end of every prompt.
+**Last updated: 2026-10-04.** Rewrite this file at the end of every prompt.
 
 ## Where things are
 
@@ -15,25 +15,18 @@ xhigh, on the settings page) sets the tester, bug bash, security review and deci
 **1.0.0 is released** (tag v1.0.0, CHANGELOG.md, D57) and the repository is public from
 2026-10-02 (D56), with no license yet. This machine runs 1.0.0 (updated from GitHub).
 
-## TEMPORARY MACHINE STATE: restore after P10.12
-
-For the live proof (2026-10-04), this machine's plugin was switched from the GitHub marketplace
-(1.0.1) to a directory marketplace on this clone (1.1.0-rc.3). Restore when the proof is done:
-`claude plugin marketplace remove autoclaude`, `claude plugin marketplace add
-chaoticnewfie/autoclaude`, `claude plugin install autoclaude@autoclaude` (run through
-`node spikes/lib/claude-clean.mjs ...`), then check `autoclaude version` says 1.0.1.
-
 ## The exact next step
 
-Phase 10 (security and optimize sweeps, D58, D59) is built, reviewed twice, documented
-(INSTRUCTIONS.md section 15, USAGE.md section 17) and committed on branch `phase10-sweeps`
-(1.1.0-rc.2, 724 tests green). `main` carries the hotfix 1.0.1 (tag v1.0.1: gate commits failed
-when an ignored secrets/ folder existed); merge main into the branch before the release (expect
-conflicts in git.js, gate.js, CHANGELOG.md and the version files; the branch already has the
-same fix). Next: P10.12, the live proof on the practice app with planted problems (heavy on
-usage: ask Scott when), then P10.13 (phases sized to fit their verification, design questions
-for Scott first), then CHECKPOINT 10 and the 1.1.0 release. Still open from Phase 9: P9.1's
-written review, P9.2 to P9.4.
+CHECKPOINT 10 with Scott (pinged on Discord 2026-10-04). Phase 10 is built, reviewed and proven
+live (P10.12 ticked); this machine is back on GitHub 1.0.1. Show him: the security report and
+HANDOFF-SECURITY.md, the optimize report and OPTIMIZE_PLAN.md (spikes/out/todo-live/.autoclaude/
+sweeps/), the alerts, the times. Ask: (1) rerun a failed check once before counting it
+(the planted flaky test paused the fix run); (2) fix the small proof findings before 1.1.0
+(same-file findings not merged when one is file-level: OPT-007/013, OPT-019/023; scanner
+findings without titles; raw keys in the baseline table); (3) D59 and the D61 addendum;
+(4) P10.13 is built but its automatic phase split was not yet seen in a live planning
+session. Then merge phase10-sweeps into main (expect conflicts with the 1.0.1 hotfix in git.js,
+gate.js, CHANGELOG.md and the version files) and release 1.1.0.
 
 ## Notes for whoever continues
 
