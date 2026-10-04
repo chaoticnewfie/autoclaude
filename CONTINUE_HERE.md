@@ -56,3 +56,5 @@ written review, P9.2 to P9.4.
 - Whether the project template ships the fuller docs set as stubs (default: core files only).
 - Whether to merge the DB project's Phase A run branch before planning the next part.
 - DEFERRED 22 (fix-up pass cost and small items): deferred until a real run measures them.
+- Rerun a failed check once before counting it as an attempt (flaky tests paused the P10.12
+  fix run; 4 of 5 check failures in the DB run were flaky). Ask at CHECKPOINT 10.

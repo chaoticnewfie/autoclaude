@@ -439,3 +439,8 @@ One entry per working session: what was done, what was committed. Append only.
   started on autoclaude/security-fixes-2026-10-04-0010.
 - Seen once: a verifier session hit "~/.claude.json is corrupted: Unexpected EOF" (parallel Claude
   sessions racing on that file); its retry worked and the file is valid. Watch for it.
+- The fix run built X1.1 to X1.4, then Phase 1's verification failed three times on the planted
+  flaky test alone (all 17 new security tests passed; the flaky test fails about 1 run in 12
+  inside npm test, so three in a row was bad luck) and paused as step-failed. Resumed by hand as
+  an owner would. Question for Scott at CHECKPOINT 10: rerun a failed check once before counting
+  it as an attempt, and report it as flaky (his DB run had 4 of 5 check failures flaky).
