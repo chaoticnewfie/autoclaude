@@ -17,16 +17,10 @@ xhigh, on the settings page) sets the tester, bug bash, security review and deci
 
 ## The exact next step
 
-CHECKPOINT 10 with Scott (pinged on Discord 2026-10-04). Phase 10 is built, reviewed and proven
-live (P10.12 ticked); this machine is back on GitHub 1.0.1. Show him: the security report and
-HANDOFF-SECURITY.md, the optimize report and OPTIMIZE_PLAN.md (spikes/out/todo-live/.autoclaude/
-sweeps/), the alerts, the times. Ask: (1) rerun a failed check once before counting it
-(the planted flaky test paused the fix run); (2) fix the small proof findings before 1.1.0
-(same-file findings not merged when one is file-level: OPT-007/013, OPT-019/023; scanner
-findings without titles; raw keys in the baseline table); (3) D59 and the D61 addendum;
-(4) P10.13 is built but its automatic phase split was not yet seen in a live planning
-session. Then merge phase10-sweeps into main (expect conflicts with the 1.0.1 hotfix in git.js,
-gate.js, CHANGELOG.md and the version files) and release 1.1.0.
+1.1.0 is released (2026-10-04; tag v1.1.0; Phase 10: security and optimize sweeps, phases that
+fit their verification, flaky-check reruns; D58 to D62), proven live on practice apps and
+installed on this machine from GitHub. Next: P9.1's written review of the DB project's second run,
+then P9.2 to P9.4. Backlog from the proof: DEFERRED 23 to 25.
 
 ## Notes for whoever continues
 
@@ -47,7 +41,4 @@ gate.js, CHANGELOG.md and the version files) and release 1.1.0.
 ## Decisions Scott still owns
 
 - Whether the project template ships the fuller docs set as stubs (default: core files only).
-- Whether to merge the DB project's Phase A run branch before planning the next part.
 - DEFERRED 22 (fix-up pass cost and small items): deferred until a real run measures them.
-- Rerun a failed check once before counting it as an attempt (flaky tests paused the P10.12
-  fix run; 4 of 5 check failures in the DB run were flaky). Ask at CHECKPOINT 10.

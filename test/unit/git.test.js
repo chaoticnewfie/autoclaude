@@ -86,6 +86,18 @@ test("commitAll commits everything with a multi-line message, then reports nothi
   assert.deepEqual(await log(root, opts), [{ sha: c.sha, subject: 'autoclaude(S1.1): first "quoted" step' }]);
 });
 
+test("commitAll works when secrets/ exists and .gitignore ignores it (git 2.55 fails an exclude pathspec for it, 1.0.1)", async () => {
+  const root = await makeRepo();
+  fs.writeFileSync(path.join(root, ".gitignore"), "secrets/\n");
+  fs.mkdirSync(path.join(root, "secrets"));
+  fs.writeFileSync(path.join(root, "secrets", "db-password"), "hunter2\n");
+  fs.writeFileSync(path.join(root, "a.txt"), "a\n");
+  const c = await commitAll(root, "first", opts);
+  assert.equal(c.ok, true, c.stderr);
+  assert.equal(c.committed, true);
+  assert.equal(await sh("git ls-files", root), ".gitignore\na.txt");
+});
+
 test("commitAll never stages secrets/, even when the project does not ignore it", async () => {
   const root = await makeRepo();
   fs.mkdirSync(path.join(root, "secrets"));

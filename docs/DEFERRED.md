@@ -326,3 +326,19 @@ lockfile and manifest as one place for package findings, and clusters instead of
 duplicate code (findings.js dedupe).
 **No rework.** The merge already runs in three passes over the same list; each is a new pass or a
 wider match.
+
+## 25. Leftovers after a completed run, and a shared-file race
+
+**What.** Seen in the P10.12 proof: (1) after a run completes, the supervisor waits for the last
+builder session, which sits idle at its prompt until the owner closes the window, so the window
+and a claude process stay; (2) a dev server the run's checkers started was still running hours
+after the run completed; (3) with several Claude sessions at once (a sweep's 3), one session once
+read ~/.claude.json mid-write ("corrupted: Unexpected EOF"); its retry worked and the file stayed
+valid.
+**Why it waits.** None loses work: (1) and (2) only hold a folder and a port until the window is
+closed; (3) is Claude Code's own file and the retry already covers it.
+**Trigger.** An owner tripping over a held folder or port, or (3) failing a session twice.
+**Path.** (1) on complete, end an idle builder session and exit; (2) stop any dev server the run
+started at completion (devserver.js already knows which it started); (3) stagger session starts
+by a second or two.
+**No rework.** Each is a few lines in supervisor.js, gate.js complete() or the sweep pool.

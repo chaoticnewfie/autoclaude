@@ -464,3 +464,15 @@ One entry per working session: what was done, what was committed. Append only.
   This machine restored to GitHub 1.0.1 (notify.json intact). CHECKPOINT 10 next.
 - CHECKPOINT 10 held (D62): rerun failed checks once, polish reports, live phase-split test, then 1.1.0.
 - P10.14 built (2 agents): flaky-check rerun (153/153 in its files), report polish (178/178; replayed on the proof's outputs: security 25 to 24 findings, optimize 26 to 23, fingerprints unchanged); skills record every fingerprint of a merged finding; DEFERRED 24.
+- Hotfix 1.0.1 on main: with git 2.55, the gate's commit failed in any project whose .gitignore
+  ignores an existing secrets/ folder (an exclude pathspec for an ignored folder exits 1), so a
+  run that generated a secret would pause as commit-failed. Staging is now add -A, then reset
+  secrets/. Found by the Phase 10 integrator; reproduced, test added (fails without the fix).
+  Full suite on main: 474 of 474.
+- Live phase-sizing test (P10.13): a headless /autoclaude:plan on spikes/out/plan-practice. At a
+  300 s limit it reasoned that no split could help (the bug bash alone needs 420 s) and raised the
+  limit; at 660 s it kept a 19-line feature as one phase, then split a 48-line feature into 3
+  phases by itself and said why; lint-plan confirmed all fit.
+- Released 1.1.0: main merged into phase10-sweeps (conflicts with the 1.0.1 hotfix resolved: the
+  branch already had the same staging fix), full suite 806 of 806, branch merged into main, tag
+  v1.1.0. DEFERRED 25 (leftovers after a completed run; the ~/.claude.json race).

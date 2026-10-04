@@ -18,8 +18,8 @@ if (!["new", "next"].includes(mode) || !msgFile) {
   console.error("usage: plan-turn.mjs new|next <message file>");
   process.exit(2);
 }
-const project = "C:/AutoClaude/spikes/out/todo-live";
-const out = "C:/AutoClaude/spikes/out/practice";
+const project = process.env.AC_PROJECT || "C:/AutoClaude/spikes/out/todo-live";
+const out = process.env.AC_OUT || "C:/AutoClaude/spikes/out/practice";
 fs.mkdirSync(out, { recursive: true });
 const sessionFile = path.join(out, "session.txt");
 

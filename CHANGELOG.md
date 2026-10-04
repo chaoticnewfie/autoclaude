@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.1.0 (not released yet; on the branch phase10-sweeps)
+## 1.1.0 (2026-10-04)
 
 - **Security sweep** (`/autoclaude:security`, `autoclaude security`): a whole-project review by
   area, secrets in the files and the git history, package advisories, config and infrastructure,
@@ -22,8 +22,12 @@
 - Security findings from normal runs go to the gitignored `docs/private/SECURITY-FINDINGS.md`.
 - Playwright MCP pinned to a tested version, and its arbitrary-code tool denied to every browser
   checker.
-- The gate's commits no longer fail in a project whose gitignored `secrets/` folder exists (git
-  2.55 rejects an exclude pathspec for an ignored folder).
+## 1.0.1 (2026-10-03)
+
+- Fixed: in a project whose `.gitignore` ignores `secrets/` and where that folder exists (a run
+  generated a secret there), every gate commit failed and the run paused as `commit-failed`. git
+  2.55 rejects an exclude pathspec for an ignored folder; the gate now stages everything and then
+  unstages `secrets/`.
 
 ## 1.0.0 (2026-10-02)
 

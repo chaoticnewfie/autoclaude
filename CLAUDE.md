@@ -14,10 +14,10 @@ what order lives in [PLAN.md](PLAN.md). Where things are right now lives in
 
 ## Status, in one line
 
-1.0.0 released (2026-10-02, D57), and the repository is public (D56). Phase 8 built per-feature
-verification, full-scope planning, the settings page and the hand-back; two all-day runs of the DB
-project proved it. Next: P9.1's written review, then P9.2 to P9.4. The DB project may be read for
-reviews, never edited.
+1.1.0 released (2026-10-04): security and optimize sweeps, phases that fit their verification,
+flaky-check reruns (Phase 10, D58 to D62), proven live on practice apps. The repository is public
+(D56). Next: P9.1's written review, then P9.2 to P9.4. The DB project may be read for reviews,
+never edited.
 
 ## Definition of done: every prompt, no exceptions
 

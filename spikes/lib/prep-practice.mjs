@@ -7,8 +7,8 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { prepareFixture, gitEnv } from "../../test/fixtures/prepare.js";
 
-const dest = "C:/AutoClaude/spikes/out/todo-live";
-const remote = "C:/AutoClaude/spikes/out/practice-remote.git";
+const dest = process.argv[2] || "C:/AutoClaude/spikes/out/todo-live";
+const remote = process.argv[3] || "C:/AutoClaude/spikes/out/practice-remote.git";
 const env = gitEnv(process.env);
 const git = (cwd, ...args) => {
   const r = spawnSync("git", args, { cwd, env, encoding: "utf8" });
