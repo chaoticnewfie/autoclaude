@@ -17,7 +17,7 @@ xhigh, on the settings page) sets the tester, bug bash, security review and deci
 
 ## The exact next step
 
-1.1.0 is released (2026-10-04; tag v1.1.0; Phase 10: security and optimize sweeps, phases that
+1.1.1 is released (2026-10-04; tags v1.1.0 and v1.1.1; Phase 10: security and optimize sweeps, phases that
 fit their verification, flaky-check reruns; D58 to D62), proven live on practice apps and
 installed on this machine from GitHub. Next: P9.1's written review of the DB project's second run,
 then P9.2 to P9.4. Backlog from the proof: DEFERRED 23 to 25.
