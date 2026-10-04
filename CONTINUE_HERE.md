@@ -15,6 +15,14 @@ xhigh, on the settings page) sets the tester, bug bash, security review and deci
 **1.0.0 is released** (tag v1.0.0, CHANGELOG.md, D57) and the repository is public from
 2026-10-02 (D56), with no license yet. This machine runs 1.0.0 (updated from GitHub).
 
+## TEMPORARY MACHINE STATE: restore after P10.12
+
+For the live proof (2026-10-04), this machine's plugin was switched from the GitHub marketplace
+(1.0.1) to a directory marketplace on this clone (1.1.0-rc.3). Restore when the proof is done:
+`claude plugin marketplace remove autoclaude`, `claude plugin marketplace add
+chaoticnewfie/autoclaude`, `claude plugin install autoclaude@autoclaude` (run through
+`node spikes/lib/claude-clean.mjs ...`), then check `autoclaude version` says 1.0.1.
+
 ## The exact next step
 
 Phase 10 (security and optimize sweeps, D58, D59) is built, reviewed twice, documented

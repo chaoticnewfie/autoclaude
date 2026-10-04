@@ -426,3 +426,4 @@ One entry per working session: what was done, what was committed. Append only.
 - P10.13 designed with Scott in two rounds (D60); building on the sweeps branch for 1.1.0.
 - Scott passed on a suggestion to run the checkers side by side; the security review now runs alongside the browser checks (D61), added to the gate agent's P10.13 work.
 - P10.13 built (2 builders), integrated, reviewed (5 findings) and fixed: 782 of 782; 1.1.0-rc.3 on the branch.
+- P10.12 started: practice app with planted problems (spikes/lib/prep-sweep-practice.mjs); this machine temporarily on rc.3 from the clone (restore noted in CONTINUE_HERE).
