@@ -987,4 +987,5 @@ the sweep's questions.
 | `notify-test [message]` | Send a test alert |
 | `watchdog [--install \| --uninstall \| --status]` | The scheduled watchdog |
 | `uninstall [--purge]` | Remove AutoClaude's machine-level pieces |
+| `version` | The AutoClaude version this computer runs |
 | `start`, `supervise`, `ready`, `blocked`, `decide` | Used by the run itself; you do not need them |

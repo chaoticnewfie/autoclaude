@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.1.1 (2026-10-04)
+
+- Instructions: step-by-step update of a project with a run going (pause, update, check the new
+  settings and phase sizes, run, resume), and `autoclaude version` in the command list.
+
 ## 1.1.0 (2026-10-04)
 
 - **Security sweep** (`/autoclaude:security`, `autoclaude security`): a whole-project review by

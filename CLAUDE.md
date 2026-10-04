@@ -31,7 +31,13 @@ never edited.
 3. **Committed and pushed.** One commit per coherent unit, conventional message (`feat(gate):`,
    `fix(cli):`, `docs:`, `chore:`, `test:`), and `git push origin main` after every commit. Never
    leave work uncommitted at the end of a prompt.
-4. **Requests are captured.** Anything Scott asks for that is not being built now goes into the
+4. **Every new feature or setting reaches the owner's view.** The settings page
+   (`lib/configpage.js` FIELDS), `INSTRUCTIONS.md` (and its template copy `AUTOCLAUDE.md`),
+   `docs/USAGE.md` (configuration and command references) and `CHANGELOG.md` are updated in the
+   same change. `test/unit/docs-coverage.test.js` fails when a setting or a command is missing
+   from them (Scott, 2026-10-04: "Make sure the config page and instructions are updated
+   whenever new features are added everytime if they need to be").
+5. **Requests are captured.** Anything Scott asks for that is not being built now goes into the
    "Requested since the draft" table in `PLAN.md` with the date and his words. Nothing is dropped,
    and nothing is built early unless he says so.
 

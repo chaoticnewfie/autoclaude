@@ -476,3 +476,9 @@ One entry per working session: what was done, what was committed. Append only.
 - Released 1.1.0: main merged into phase10-sweeps (conflicts with the 1.0.1 hotfix resolved: the
   branch already had the same staging fix), full suite 806 of 806, branch merged into main, tag
   v1.1.0. DEFERRED 25 (leftovers after a completed run; the ~/.claude.json race).
+- Scott asked whether pausing, updating and resuming a running project is safe, which new
+  settings to check, and that the settings page and instructions always follow new features.
+  Checked: every setting has a page field except version and the unenforced maxMinutesPerStep;
+  an older run state takes the new keys on load. Added test/unit/docs-coverage.test.js (settings
+  on the page and in USAGE, commands in USAGE and INSTRUCTIONS, the template copy identical), the
+  rule in CLAUDE.md, clearer update steps and `autoclaude version` in INSTRUCTIONS. 1.1.1.

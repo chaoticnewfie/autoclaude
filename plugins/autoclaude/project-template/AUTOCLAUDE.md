@@ -327,16 +327,23 @@ Every command explains itself:  autoclaude <command> --help
 
 ## 14. Updating and uninstalling
 
-Update (pause any run first):
+Update, with a run going:
 
-    claude plugin marketplace update autoclaude
-    claude plugin update autoclaude@autoclaude
-
-Then close the run window, start it again with autoclaude run, and autoclaude resume.
+1. autoclaude pause, and wait for the "Paused for review" message (it pauses after the step it
+   is on is committed, so nothing is half done).
+2. Close the run window.
+3. Update, from any terminal:
+       claude plugin marketplace update autoclaude
+       claude plugin update autoclaude@autoclaude
+4. Open a new terminal in the project. autoclaude version shows the new version.
+5. Look at what is new: CHANGELOG.md in the AutoClaude repository, and autoclaude config for any
+   new settings (each has an explanation and a sensible default). autoclaude lint-plan shows
+   whether each phase still fits its check time.
+6. autoclaude run, then autoclaude resume. Restart any other Claude sessions too.
 
 To refresh a project's copy of these instructions after an update, delete its AUTOCLAUDE.md and
-run  autoclaude init  in the project. Init only adds files that are missing, so nothing else
-changes.
+run  autoclaude init  in the project, once no run is going (it changes a file in the project).
+Init only adds files that are missing, so nothing else changes.
 
 Uninstall:
 
@@ -448,4 +455,5 @@ your 5-hour window is nearly full and pauses at your weekly limit, like a run.
       autoclaude watchdog --install | --status | --uninstall
       autoclaude install-cli       reinstall the autoclaude command
       autoclaude uninstall         remove AutoClaude from this computer
+      autoclaude version           which AutoClaude this computer runs
       autoclaude help              the full list; add --help to any command for its details
