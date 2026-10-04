@@ -13,6 +13,11 @@
   on its own branch while the project's own plan and state wait.
 - `autoclaude sweep-status`, `sweep-stop` and `sweep-run`; accepted findings remembered in
   `autoclaude.accepted.json`.
+- **Phases that fit their verification**: the gate spreads one feature's verification over
+  turns when time is short; check times are recorded; `lint-plan`, `run --check` and planning
+  estimate each phase and planning splits one that does not fit; `autoclaude verify-per-step
+  <phase>` for a plan that keeps running out of time.
+- The security review runs alongside the browser checks once the checks pass (`checkers.parallel`).
 - Security findings from normal runs go to the gitignored `docs/private/SECURITY-FINDINGS.md`.
 - Playwright MCP pinned to a tested version, and its arbitrary-code tool denied to every browser
   checker.

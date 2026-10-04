@@ -127,6 +127,8 @@ Watching:
 - PROGRESS.md gets a line per step; the plan shows [~] for a step that is built and waiting for
   its feature's check, and [x] once the feature is verified.
 - The run branch (autoclaude/<plan name>) is pushed to GitHub after every verified feature.
+- Checking a big feature can take more than one turn: Claude is told to stop for a moment and
+  the check carries on where it left off. That is normal.
 
 Please don't:
 - Edit files, commit, or switch branches in the project folder while it runs. The run works on
@@ -167,7 +169,7 @@ settings page (autoclaude config).
 | A feature failed 3 times              | Read the newest report in .autoclaude/reports/ (it names the failing Accept lines), fix the code or rewrite the steps, then autoclaude resume |
 | Stuck                                 | Look at the run window and .autoclaude/logs/, then autoclaude resume |
 | Could not run (tester, bug bash, security) | A tool is broken (Playwright or Claude). Fix it, then autoclaude resume |
-| Out of time                           | A feature is too big to check in one go (30 minutes at most). Split it into smaller phases or make the tests faster, then autoclaude resume |
+| Out of time                           | One part of a feature's check (a test command, or the browser check of a very big feature) doesn't fit in 30 minutes. Run autoclaude verify-per-step <phase> (it then checks that feature step by step), then autoclaude resume. Or split the phase, or make the tests faster |
 | Passed but was not committed          | git is broken or missing. Fix it, then autoclaude resume (it commits first) |
 | Push failed                           | The work is safe locally; fix GitHub access. The next feature's push retries |
 | Weekly usage limit                    | Wait for your weekly reset, then autoclaude resume            |
@@ -256,6 +258,8 @@ The settings you are most likely to change:
 | Setting                         | What it does                                                |
 |---------------------------------|-------------------------------------------------------------|
 | Verify at                       | "phase" checks once per feature (default); "step" checks every step |
+| Room a phase may use            | how much of the 30 minutes one part of a feature's check may need (default 70%); planning splits phases to fit |
+| Phases verified step by step    | phases that are checked one step at a time (autoclaude verify-per-step) |
 | Pause for review                | never, after each feature, or after each step               |
 | Weekly usage pause              | stop when weekly usage reaches this percent (default 85)    |
 | Resume after the weekly reset   | carry on by itself after the reset                          |
@@ -263,6 +267,7 @@ The settings you are most likely to change:
 | Models                          | Opus (the newest) everywhere by default; Sonnet is the lowest allowed |
 | Builder effort                  | unset = your own Claude Code default (ultracode = xhigh)    |
 | Checker effort                  | tester, bug bash, security review, decider (default xhigh)  |
+| Checkers side by side           | the security review runs alongside the browser checks (default) |
 | Alerts                          | the channel, and which informational messages you get       |
 | Checks, dev server              | your test commands, and how to start the app for the browser checks |
 | Deny rules, permissions         | what the run must never run, and what it may do outside the project |
@@ -430,7 +435,8 @@ your 5-hour window is nearly full and pauses at your weekly limit, like a run.
       autoclaude run --plan <file> run a sweep's fix plan on its own branch
 
     Checking
-      autoclaude lint-plan         check the plan's format
+      autoclaude lint-plan         check the plan's format, and whether each phase fits its check time
+      autoclaude verify-per-step <n>  check phase n step by step (when it keeps running out of time)
       autoclaude checks            run the project's checks like the run does
       autoclaude guard-test "..."  would the run be allowed to run this command?
       autoclaude usage             your 5-hour and weekly Claude usage

@@ -346,6 +346,14 @@ Claude Code session in that window starting on the first step.
   pushes the branch and the tag (when `git.push` is true, the default), sends the "Phase N
   verified" alert, and has the supervisor start a fresh builder session for the next feature.
   With `gate.verifyAt: "step"` every step is verified on its own, as before.
+- **A verification can span turns.** The gate runs the checks one by one, then the browser
+  tester and the bug bash, with the security review alongside them (`checkers.parallel`). When the
+  time left in a turn is too short for the next part, it keeps what is done and tells the builder
+  to end its turn; the next turn carries on where it stopped, so a big feature no longer fails on
+  time alone. If the files change between turns, the verification starts again; a third change
+  pauses the run as stuck. Only a single part that cannot fit even in a fresh turn runs out of
+  time (section 9). Every verification records each check's time, which `lint-plan`,
+  `run --check` and planning use to estimate whether each phase fits (`gate.fitPct`).
 - **The folder belongs to the run.** The run switches this folder to the branch
   `autoclaude/<plan title>`. While it runs, do not edit files, commit, switch branches or start
   the app on the dev server's port in this folder; use a separate clone for other work. Opening
@@ -526,7 +534,7 @@ in and run `autoclaude run` in the project, or let the watchdog do it.
 | `security` | The last attempt failed on a security finding at or above `security.blockOn`; the step is marked `[!]` | Read the findings in the latest report (`SECURITY-FINDINGS.md` holds only non-blocking ones), decide, `autoclaude resume` |
 | `stuck` | The builder stopped making progress | Look at the run window, `.autoclaude/logs/supervisor.log` and `.autoclaude/logs/gate.log`, then `autoclaude resume` |
 | `infra` | The browser tester, the bug bash or the security reviewer could not run twice (usually Playwright or the `claude` command) | Fix the named tool, `autoclaude resume` |
-| `out-of-time` | A feature's verification did not fit in one gate run twice: the checks plus the checkers take longer than the hook allows (`gate.timeoutSec`, at most 30 minutes). Also when a passed feature's commit was cut off twice (for example by a slow pre-commit hook) and the files changed each time | Split the phase into smaller features, make the checks faster (keep each `timeoutSec` well below `gate.timeoutSec`), lower `tester.maxTurns`, or turn off `bugBash.atPhaseEnd`; then `autoclaude resume` |
+| `out-of-time` | One part of a feature's verification did not fit in a whole turn twice (a check that runs longer than `gate.timeoutSec` allows, or the browser check of a very big feature), or a passed feature's commit was cut off twice with the files changed each time | `autoclaude verify-per-step <phase>` (that feature is then verified step by step), then `autoclaude resume`; or split the phase, make the check faster or split it into several checks |
 | `commit-failed` | A step passed but git could not commit it; the work is safe in the working tree | Fix git (often: git not on the PATH the run started with), then `autoclaude resume`, which commits it first |
 | `weekly-limit` | Weekly usage reached `usage.weeklyPauseAtPct` (between steps), or 99% when a usage limit stopped the builder | Wait for the reset and `autoclaude resume`, or set `usage.autoResumeAfterWeeklyReset` |
 
@@ -630,6 +638,7 @@ These are the built-in defaults:
 | `builder.model`, `tester.model`, `security.model` | The models for the builder (and its decider), the browser tester and bug bash, and the security reviewer. All default to `opus`. Allowed: `opus` or `sonnet`, which always mean the newest of each, or a full `claude-opus-*` or `claude-sonnet-*` id. Haiku is refused |
 | `builder.effort` | `null` (the default) follows your own Claude Code effort setting, read again at every launch. Or one of `low`, `medium`, `high`, `xhigh`, `max` for this run only; `ultracode` is accepted and runs at `xhigh`, because a run never uses ultracode's multi-agent workflows. |
 | `checkers.effort` | The reasoning effort of everything that checks the builder's work: the browser tester, bug bash, security reviewer and decider. One of `low`, `medium`, `high`, `xhigh` (the default) or `max`, or `null` for your own Claude Code effort setting. Higher catches more small problems; these checks are a small part of a run's time |
+| `checkers.parallel` | `security` (the default): once the checks pass, the security review runs alongside the browser tester and bug bash. `off`: all one after the other. `all`: the tester and the bug bash overlap too; only for apps whose test data can take both at once, since they share one dev server and the bug bash tries to break things |
 | `devServer` | How to start the app for the browser checks: `command`, the `url` it serves, the `healthPath` that answers when it is up, and how long to wait. A wrong URL fails every UI step; an empty one skips the browser checks |
 | `checks` | Commands the gate runs when it verifies, in order, stopping at the first failure: `{ "name", "command", "timeoutSec", "needsDevServer", "requires" }`. `name` and `command` are required; `timeoutSec` defaults to 900; `needsDevServer: true` starts the dev server first and needs `devServer` set; `requires` is a command that must succeed first (for example `docker version`), tried by the preflight so a missing tool fails before the run, not hours in. Each check must exit non-zero on failure. They run in `cmd.exe` on Windows and `/bin/sh` elsewhere, with the PATH the run recorded; `autoclaude checks` runs them the same way |
 | `tester` | The browser tester: model, turn budget (`maxTurns` tool calls; the bug bash gets one and a half times that), time limit |
@@ -641,6 +650,8 @@ These are the built-in defaults:
 | `git.push` | Push the run branch and its tag after each verified feature, and HANDOFF.md at the end. The builder may also push (never force-push). `false` keeps everything local |
 | `gate.timeoutSec` | The time budget for one verification: the checks, then the browser tester, bug bash and security reviewer; at most 1800, which is Claude Code's limit for the hook that runs the gate. A check's own `timeoutSec` is cut to what is left. The checkers share the rest, so a later one is never starved; one stopped by the budget is "out of time", and twice in a row pauses the run (`out-of-time`, section 9) |
 | `gate.verifyAt` | `phase` (the default): verify once per feature, at its last step. `step`: verify every step on its own |
+| `gate.fitPct` | How much of `gate.timeoutSec` one part of a verification may need (default 70, from 30 to 95). The gate runs a feature's checks, browser tester, bug bash and security review in one turn when they fit, and carries the rest to the next turn when time is short, so a big feature no longer fails on time alone; what must fit is each single part. `lint-plan` and `run --check` estimate every phase from the recorded check times and warn about a phase whose largest part does not fit; planning splits such phases by itself |
+| `gate.stepPhases` | Phase numbers verified step by step even when `verifyAt` is `phase`. Set it with `autoclaude verify-per-step <phase>` (and `--off`), the way out for a plan that keeps running out of time; project-only
 | `notify.morningSummaryAt` | `"HH:MM"` local time for a daily summary, or `null` |
 | `notify.events` | The alerts you can switch (section 6); critical alerts are always sent |
 | `review.pauseAt` | `never`, `phase-end` or `every-step` |
@@ -960,6 +971,7 @@ the sweep's questions.
 | `resume` | Carry on after a pause |
 | `answer "<text>"` | Answer a blocked question |
 | `nudge "<prompt>"` | Restart the builder with a one-off prompt |
+| `verify-per-step <phase> [--off]` | Verify that phase step by step (`gate.stepPhases`); for a plan that keeps running out of time. Refused while a run is running |
 | `lint-plan [file]` | Check the plan's structure |
 | `checks` | Run the configured checks exactly as the gate does |
 | `guard-test "<command>"` | Show whether the guard would deny a command, for the Bash and PowerShell tools |
