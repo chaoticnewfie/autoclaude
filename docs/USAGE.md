@@ -650,7 +650,7 @@ These are the built-in defaults:
 | `git.push` | Push the run branch and its tag after each verified feature, and HANDOFF.md at the end. The builder may also push (never force-push). `false` keeps everything local |
 | `gate.timeoutSec` | The time budget for one verification: the checks, then the browser tester, bug bash and security reviewer; at most 1800, which is Claude Code's limit for the hook that runs the gate. A check's own `timeoutSec` is cut to what is left. The checkers share the rest, so a later one is never starved; one stopped by the budget is "out of time", and twice in a row pauses the run (`out-of-time`, section 9) |
 | `gate.verifyAt` | `phase` (the default): verify once per feature, at its last step. `step`: verify every step on its own |
-| `gate.fitPct` | How much of `gate.timeoutSec` one part of a verification may need (default 70, from 30 to 95). The gate runs a feature's checks, browser tester, bug bash and security review in one turn when they fit, and carries the rest to the next turn when time is short, so a big feature no longer fails on time alone; what must fit is each single part. `lint-plan` and `run --check` estimate every phase from the recorded check times and warn about a phase whose largest part does not fit; planning splits such phases by itself |
+| `gate.fitPct` | How much of a turn's time one part of a verification may need (default 70, from 30 to 95). A turn has `gate.timeoutSec` less 60 seconds kept for the commit (never under 120), so 1740 s and a limit of 1218 s per part by default. The gate runs a feature's checks, browser tester, bug bash and security review in one turn when they fit, and carries the rest to the next turn when time is short, so a big feature no longer fails on time alone; what must fit is each single part. `lint-plan` and `run --check` estimate every phase from the recorded check times (each check's recent median plus a quarter, as the gate weighs it) and warn about a phase whose largest part does not fit; planning splits such phases by itself |
 | `gate.stepPhases` | Phase numbers verified step by step even when `verifyAt` is `phase`. Set it with `autoclaude verify-per-step <phase>` (and `--off`), the way out for a plan that keeps running out of time; project-only
 | `notify.morningSummaryAt` | `"HH:MM"` local time for a daily summary, or `null` |
 | `notify.events` | The alerts you can switch (section 6); critical alerts are always sent |
@@ -965,6 +965,7 @@ the sweep's questions.
 | `sweep-stop [<id>]` | Stop a sweep for good (the watchdog then leaves it alone) |
 | `sweep-run <id>` | Carry on with a stopped or paused sweep; the sweep window runs this too |
 | `status [--all]` | The run's state; `--all` for every registered project |
+| | While a verification is carried over to the next turn, `status` shows the phase, the parts done and the parts left |
 | `config` | Open the settings page in your browser (section 11) |
 | `pause [--now]` | Pause after the next committed step, or at once |
 | `note "<text>"` | Leave a note for the builder |
