@@ -89,6 +89,39 @@ export const SECRET_RULES = Object.freeze([
 
 const PLACEHOLDER_RE = /(?:example|changeme|change_me|placeholder|your[_-]|xxxx|<|\$\{|%[A-Z_]+%|\{\{|dummy|test|fake|sample|redacted|\*\*\*|\benv\b|process\.env|getenv|os\.environ|secret_file|_file\b)/i;
 
+// What a secret rule (ours or gitleaks') found, in words for a finding's title: "A GitHub token".
+const SECRET_LABELS = Object.freeze({
+  "aws-access-key": "An AWS access key",
+  "github-token": "A GitHub token",
+  "anthropic-key": "An Anthropic API key",
+  "openai-key": "An OpenAI API key",
+  "slack-token": "A Slack token",
+  "stripe-live": "A Stripe-style secret key",
+  "google-api-key": "A Google API key",
+  "private-key": "A private key",
+  "jwt": "A JSON Web Token",
+  "url-with-password": "A URL with a password in it",
+  "discord-webhook": "A Discord webhook URL",
+  "ntfy-token": "An ntfy access token",
+  "tailscale-key": "A Tailscale key",
+  "npm-token": "An npm access token",
+  "generic-assignment": "A hard-coded password or key"
+});
+// gitleaks' rule ids (stripe-access-token, github-pat, aws-access-token, ...) by the service they
+// name; a rule none of these names keeps its id in the title.
+const SECRET_LABEL_WORDS = [
+  [/stripe/i, "A Stripe-style secret key"], [/github|^gh[pousr]\b/i, "A GitHub token"], [/gitlab/i, "A GitLab token"], [/aws|amazon/i, "An AWS key"],
+  [/anthropic/i, "An Anthropic API key"], [/openai/i, "An OpenAI API key"], [/slack/i, "A Slack token"], [/private[-_]?key/i, "A private key"],
+  [/jwt/i, "A JSON Web Token"], [/gcp|google/i, "A Google API key"], [/npm/i, "An npm access token"], [/discord/i, "A Discord token or webhook"],
+  [/twilio/i, "A Twilio key"], [/sendgrid/i, "A SendGrid key"], [/azure/i, "An Azure key"], [/password/i, "A password"]
+];
+export function secretLabel(rule) {
+  const r = String(rule || "");
+  if (SECRET_LABELS[r]) return SECRET_LABELS[r];
+  const hit = SECRET_LABEL_WORDS.find(([re]) => re.test(r));
+  return hit ? hit[1] : `A secret (rule ${r || "unknown"})`;
+}
+
 // One line, returns [{ name, severity, cwe, value }]. A gated rule needs the captured value to
 // look like a real secret (entropy and no placeholder); the rest fire on the pattern alone.
 export function scanLine(line) {
@@ -152,10 +185,11 @@ export function defaultRun(exe, args = [], { cwd = process.cwd(), env = process.
 // false only for what needs the owner (a history rewrite, a major upgrade, no fix published, a
 // judgement about a source). ownerAction: what only the owner can do even after the fix (rotate
 // a key at its provider). anchor: a fixed key for the fingerprint (findings.anchorOf), so the
-// same hit keeps its fingerprint from one sweep to the next; never a secret value.
-function candidate({ category, severity, cwe = null, cvss = null, fixedVersion = null, confidence, file, line = 0, evidence, impact, fix, testIdea, autoFixSafe = false, ownerAction = null, anchor = null, commit = null }, redact) {
+// same hit keeps its fingerprint from one sweep to the next; never a secret value. title: one
+// plain line naming the problem and where, masked like the evidence (the report's heading).
+function candidate({ title = "", category, severity, cwe = null, cvss = null, fixedVersion = null, confidence, file, line = 0, evidence, impact, fix, testIdea, autoFixSafe = false, ownerAction = null, anchor = null, commit = null }, redact) {
   return {
-    kind: "security", category, severity, cwe, cvss, fixedVersion,
+    kind: "security", title: redact(String(title || "")), category, severity, cwe, cvss, fixedVersion,
     confidence, file: String(file || "").replace(/\\/g, "/"), line: Number(line) || 0,
     evidence: redact(String(evidence || "")), impact, fix, testIdea, tier: "A", autoFixSafe,
     ...(ownerAction ? { ownerAction } : {}),
@@ -202,6 +236,7 @@ export function scanTree({ root, files, exclude, redact }) {
       for (const hit of scanLine(lines[i])) {
         const fixture = isFixturePath(rel);
         candidates.push(candidate({
+          title: `${secretLabel(hit.name)} in ${rel.replace(/\\/g, "/")}${fixture ? " (a test or example file)" : ""}`,
           category: "secrets",
           severity: fixture ? "low" : hit.severity,
           cwe: hit.cwe,
@@ -224,6 +259,11 @@ export function scanTree({ root, files, exclude, redact }) {
 
 const HISTORY_CAP = 96 * 1024 * 1024;
 
+// "A GitHub token in the git history of Dockerfile (commit c6a815d0cd2c)".
+function historyTitle(label, file, commit) {
+  return `${label} in the git history${file ? ` of ${file}` : ""}${commit ? ` (commit ${String(commit).slice(0, 12)})` : ""}`;
+}
+
 // Secrets anywhere in the git history (added lines across every ref), so a secret that was
 // committed then deleted is still found. A real secret in history always needs the owner to
 // rotate it, so the fix line says so and these are never auto-fixable.
@@ -240,6 +280,7 @@ export function scanHistoryText(stdout, redact) {
       for (const hit of scanLine(l.slice(1))) {
         const fixture = isFixturePath(file);
         candidates.push(candidate({
+          title: historyTitle(secretLabel(hit.name), file, commit),
           category: "secrets",
           severity: fixture ? "low" : hit.severity,
           cwe: hit.cwe,
@@ -279,6 +320,7 @@ export function scanSensitiveAndGitignore({ root, tracked, redact }) {
     if (SENSITIVE_NAME_RE.test(p) && !SENSITIVE_OK_RE.test(p)) {
       const isDump = /\.(?:sql|dump|bak|sqlite3?|db)$/i.test(p);
       candidates.push(candidate({
+        title: isDump ? `A database dump or local database is committed: ${p}` : `A file that usually holds secrets is committed: ${p}`,
         category: "secrets",
         severity: isDump ? "high" : "high",
         cwe: "CWE-312",
@@ -304,6 +346,7 @@ export function scanSensitiveAndGitignore({ root, tracked, redact }) {
   const missing = want.filter((w) => !(giText && w.re.test(giText)));
   if (missing.length) {
     candidates.push(candidate({
+      title: giText === null ? "No .gitignore at the project root" : `.gitignore does not cover ${missing.map((m) => m.name).join(" or ")}`,
       category: "config",
       severity: "medium",
       cwe: "CWE-538",
@@ -353,16 +396,41 @@ export function severityFromCvss(score) {
   return "low";
 }
 
+// "minimist 0.0.8 has 2 known vulnerabilities (fixed in 1.2.6)": a vulnerable package in words.
+// viaPackages: the vulnerable packages it depends on, when it has no advisory of its own.
+// fixVia: { name, version } when an upgrade of another package (a parent) is the fix.
+function advisoryTitle({ name, version = null, count = 0, viaPackages = [], fixedVersion = null, fixVia = null, fixInRange = false, noFix = false }) {
+  const what = `${name}${version ? ` ${version}` : ""}`;
+  const has = count > 0 ? `has ${count === 1 ? "a known vulnerability" : `${count} known vulnerabilities`}`
+    : viaPackages.length ? `is vulnerable through ${viaPackages.slice(0, 3).join(", ")}${viaPackages.length > 3 ? " and more" : ""}`
+      : "has known vulnerabilities";
+  const fix = fixVia ? ` (upgrading ${fixVia.name}${fixVia.version ? ` to ${fixVia.version}` : ""} fixes it)`
+    : fixedVersion ? ` (fixed in ${fixedVersion})` : fixInRange ? " (a fixed version is inside its allowed range)" : noFix ? " (no fixed version published yet)" : "";
+  return `${what} ${has}${fix}`;
+}
+
+// The installed version of a package in a parsed package-lock.json (lockfile v2/v3 `packages`, or
+// v1 `dependencies`), else null.
+export function lockedVersion(lock, name) {
+  if (!lock || typeof lock !== "object" || !name) return null;
+  const p = lock.packages && lock.packages[`node_modules/${name}`];
+  if (p && typeof p.version === "string") return p.version;
+  const d = lock.dependencies && lock.dependencies[name];
+  return d && typeof d.version === "string" ? d.version : null;
+}
+
 // npm audit --json --package-lock-only: parses the v7+ `vulnerabilities` map. The exit code is
-// nonzero when it finds something, so the JSON, not the code, decides.
-export function parseNpmAudit(stdout, redact) {
+// nonzero when it finds something, so the JSON, not the code, decides. lock: the parsed
+// package-lock.json, for the installed versions the titles name (optional).
+export function parseNpmAudit(stdout, redact, { lock = null } = {}) {
   const candidates = [];
   let data; try { data = JSON.parse(stdout); } catch { return { candidates, ok: false }; }
   const vulns = data && data.vulnerabilities;
   if (!vulns || typeof vulns !== "object") return { candidates, ok: true };
   for (const [name, v] of Object.entries(vulns)) {
     if (!v || typeof v !== "object") continue;
-    const via = Array.isArray(v.via) ? v.via.find((x) => x && typeof x === "object") : null;
+    const vias = Array.isArray(v.via) ? v.via : [];
+    const via = vias.find((x) => x && typeof x === "object") || null;
     const cwe = via && Array.isArray(via.cwe) && via.cwe.length ? via.cwe[0] : null;
     const cvss = via && via.cvss && via.cvss.vectorString ? via.cvss.vectorString : null;
     // npm's fixAvailable: true (npm audit fix resolves it inside the allowed ranges), an object
@@ -374,6 +442,13 @@ export function parseNpmAudit(stdout, redact) {
     const fixable = fa === true || (!!fixObj && !major);
     const fixName = fixObj && fixObj.name && fixObj.name !== name ? String(fixObj.name) : name;
     candidates.push(candidate({
+      title: advisoryTitle({
+        name, version: lockedVersion(lock, name), count: vias.filter((x) => x && typeof x === "object").length,
+        viaPackages: [...new Set(vias.filter((x) => typeof x === "string"))],
+        // npm names another package when a parent's upgrade is the fix.
+        fixedVersion: fixName === name ? fixedVersion : null, fixVia: fixName !== name ? { name: fixName, version: fixedVersion } : null,
+        fixInRange: fa === true, noFix: !fa
+      }),
       category: "deps", severity: severityFromNpm(v.severity), cwe, cvss, fixedVersion,
       confidence: 8, file: "package-lock.json", line: 0,
       evidence: `npm advisory for ${name} (${v.range || "range unknown"})${via && via.title ? `: ${via.title}` : ""}`,
@@ -447,6 +522,7 @@ export async function scanOsv({ fetchImpl, ecosystem, packages, file, redact }) 
     const pkg = packages[i];
     const ids = vulns.map((v) => v.id).filter(Boolean);
     candidates.push(candidate({
+      title: advisoryTitle({ name: pkg.name, version: pkg.version, count: ids.length || vulns.length }),
       category: "deps", severity: "medium", cwe: null, cvss: null, fixedVersion: null,
       confidence: 7, file, line: 0,
       evidence: `OSV advisory for ${pkg.name} ${pkg.version} (${ids.slice(0, 5).join(", ")}${ids.length > 5 ? ", ..." : ""})`,
@@ -477,6 +553,7 @@ export function scanLockfileHygiene({ root, redact }) {
     const resolved = typeof p.resolved === "string" ? p.resolved : "";
     if (resolved && /^(https?:\/\/)/.test(resolved) && !/registry\.npmjs\.org|registry\.yarnpkg\.com/.test(resolved)) {
       candidates.push(candidate({
+        title: `${name.replace(/^.*node_modules\//, "") || name} is installed from outside the public npm registry`,
         category: "deps", severity: "medium", cwe: "CWE-829", confidence: 6,
         file: "package-lock.json", line: 0,
         evidence: `${name} is resolved from outside the public npm registry (${resolved.replace(/\/\/[^@/]+@/, "//") })`,
@@ -555,6 +632,7 @@ export function parseGitleaks(stdout, redact) {
     const line = Number.isInteger(Number(g.StartLine)) && Number(g.StartLine) > 0 ? Number(g.StartLine) : 0;
     const fixture = isFixturePath(file);
     candidates.push(candidate({
+      title: historyTitle(secretLabel(rule), file, commit),
       category: "secrets", severity: fixture ? "low" : "high", cwe: "CWE-798",
       confidence: fixture ? 2 : 7,
       file: file || "(history)", line: 0,
@@ -658,6 +736,7 @@ export function parseOsvScanner(stdout, redact) {
       const major = !!fixed && isMajorUpgrade(pk.version, fixed);
       const eco = String(pk.ecosystem || "unknown");
       candidates.push(candidate({
+        title: advisoryTitle({ name: pk.name, version: pk.version || null, count: ids.length || vulns.length, fixedVersion: fixed, noFix: !fixed }),
         category: "deps", severity, cwe, cvss, fixedVersion: fixed,
         confidence: 8, file: file || "(package files)", line: 0,
         evidence: `osv-scanner: ${pk.name} ${pk.version || "?"} (${eco}) has ${ids.length} advisor${ids.length === 1 ? "y" : "ies"}: ${ids.slice(0, 5).join(", ")}${ids.length > 5 ? ", ..." : ""}`,
@@ -778,7 +857,9 @@ export async function runSecurityScanners({ root, env = process.env, options = {
         if (!l.npm && osv.ok) continue;
         if (l.npm) {
           const r = await run("npm", ["audit", "--json", "--package-lock-only"], { cwd: root, env, timeoutMs: 120000 });
-          const parsed = parseNpmAudit(r.stdout, redact);
+          let lock = null;
+          try { lock = JSON.parse(fs.readFileSync(path.join(root, l.file), "utf8")); } catch {}
+          const parsed = parseNpmAudit(r.stdout, redact, { lock });
           if (parsed.ok) { candidates.push(...parsed.candidates); examined.push(`npm advisories (${l.file})`); }
           else notExamined.push(`npm advisories for ${l.file} (npm audit output could not be read)`);
           writeRaw(`advisories-${l.file.replace(/[^A-Za-z0-9.]/g, "_")}`, { ok: parsed.ok, hits: parsed.candidates.length });

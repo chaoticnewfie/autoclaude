@@ -368,6 +368,36 @@ test("a fix-up pass whose checks fail three times pauses in the pass; resume car
   assert.ok(treeClean(root));
 });
 
+// A check scripted by run: it fails on the runs numbered in `fail` (1 is its first run in the
+// project), printing "flaky boom on run <n>", and passes on the others.
+const scripted = (name, fail) => ({ name, command: `${node} -e "const f=require('fs'),p='.autoclaude/runs-${name}';f.appendFileSync(p,'x');const n=f.readFileSync(p,'utf8').length;if([${fail.join(",")}].includes(n)){console.log('flaky boom on run '+n);process.exit(1)}"`, timeoutSec: 60 });
+const runsOf = (root, name) => { try { return fs.readFileSync(path.join(root, ".autoclaude", `runs-${name}`), "utf8").length; } catch { return 0; } };
+
+test("the fix-up checks run a failed check once more too: failing twice is an attempt; failing, then passing, closes the feature with the check marked flaky", async () => {
+  const root = scratch();
+  const { deps: b } = fakeBrowser({ tester: withFollowUp });
+  await build(root, ["S1.1", "S1.2"], b);
+  let r = await ready(root, "S1.3", b);
+  assert.match(r.reason, /^Phase 1 passed its verification, with 1 non-blocking finding/);
+  settleFindings(root);
+  editConfig(root, (c) => ({ ...c, checks: [scripted("unit", [1, 2, 3])] }));
+  r = await ready(root, "S1.3", b);
+  assert.match(r.reason, /^The fix-up checks of Phase 1 \(attempt 1\/3\) failed: check "unit" failed\./, JSON.stringify(r.events));
+  assert.match(r.reason, /was run once more right away, and failed again: a real failure, not a flaky check/);
+  assert.deepEqual([runsOf(root, "unit"), loadState(root).attempts["S1.3"]], [2, 1]);
+  r = await ready(root, "S1.3", b);
+  assert.match(r.reason, /^Phase 1 \(Lists\) verified and committed/, JSON.stringify(r.events));
+  assert.ok(r.events.some((e) => e.type === "check-flaky" && e.check === "unit" && e.step === "S1.3"), JSON.stringify(r.events));
+  assert.equal(runsOf(root, "unit"), 4);
+  assert.match(git(root, "log", "-1", "--format=%B").stdout, /\n- unit \(after the fix-up\): passed in \d+ s \(flaky: passed on a rerun\)\n/);
+  assert.match(fs.readFileSync(path.join(root, ".autoclaude", "reports", "S1.3-fixup-2.md"), "utf8"), /\n## Check "unit": passed on a rerun \(FLAKY\)\n[\s\S]*flaky boom on run 3\n/);
+  const s = loadState(root);
+  assert.deepEqual([s.attempts["S1.3"], s.fixup, s.currentStep], [0, null, "S2.1"]);
+  assert.deepEqual(s.flakyChecks.map((e) => [e.name, e.step, e.phase, e.feature, e.stage]), [["unit", "S1.3", 1, true, "fixup"]]);
+  assert.match(fs.readFileSync(path.join(root, ".autoclaude", "logs", "gate.log"), "utf8"), /the fix-up checks of Phase 1 at S1\.3: check "unit" is FLAKY: it failed \(exit code 1\), then passed when run once more/);
+  assert.ok(treeClean(root));
+});
+
 test("a plan of no-ui features: no browser check, the security review gets the whole phase, a one-step last phase completes with the hand-back and the footprint", async () => {
   const root = scratch({ plan: NO_UI });
   const { calls, deps: b } = fakeBrowser({});

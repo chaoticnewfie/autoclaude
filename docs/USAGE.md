@@ -346,6 +346,11 @@ Claude Code session in that window starting on the first step.
   pushes the branch and the tag (when `git.push` is true, the default), sends the "Phase N
   verified" alert, and has the supervisor start a fresh builder session for the next feature.
   With `gate.verifyAt: "step"` every step is verified on its own, as before.
+- **A failed check runs once more.** When a check fails, the gate runs it again right away before
+  counting anything. If it passes the second time, it counts as passed and is reported as flaky
+  (in the verification report, the commit and HANDOFF.md, which tells you which tests to fix);
+  if it fails again, the attempt counts as usual. A check that ran out of its own time limit is
+  not run again.
 - **A verification can span turns.** The gate runs the checks one by one, then the browser
   tester and the bug bash, with the security review alongside them (`checkers.parallel`). When the
   time left in a turn is too short for the next part, it keeps what is done and tells the builder

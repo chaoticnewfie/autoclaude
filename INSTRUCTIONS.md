@@ -167,6 +167,7 @@ settings page (autoclaude config).
 | Phase N verified                      | Nothing: a feature is done and pushed. The message says what is next |
 | Blocked on a question                 | Answer it (section 8)                                         |
 | A feature failed 3 times              | Read the newest report in .autoclaude/reports/ (it names the failing Accept lines), fix the code or rewrite the steps, then autoclaude resume |
+| Flaky checks (in the plan-complete message) | A test failed once and passed when run again. It didn't stop the run, but fix that test (HANDOFF.md names it) |
 | Stuck                                 | Look at the run window and .autoclaude/logs/, then autoclaude resume |
 | Could not run (tester, bug bash, security) | A tool is broken (Playwright or Claude). Fix it, then autoclaude resume |
 | Out of time                           | One part of a feature's check (a test command, or the browser check of a very big feature) doesn't fit in 30 minutes. Run autoclaude verify-per-step <phase> (it then checks that feature step by step), then autoclaude resume. Or split the phase, or make the tests faster |

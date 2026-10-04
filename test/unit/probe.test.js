@@ -367,3 +367,40 @@ test("runHttpProbe: the verbose-errors probe can be switched off, by its own nam
     assert.equal(out.coverage.examined.some((e) => /verbose errors/.test(e)), false);
   }
 });
+
+// P10.14: the live proof's probe findings (SEC-013, 014, 020) reached the report with no title.
+test("every probe finding has a plain title naming the problem, with the cookie name masked", async () => {
+  const plain = (t) => t;
+  const headers = checkSecurityHeaders(res({ headers: {} }), "https://x/", true, plain);
+  assert.deepEqual(headers.map((f) => [f.anchor, f.title]), [
+    ["header:content-security-policy", "No Content-Security-Policy header"],
+    ["header:strict-transport-security", "No Strict-Transport-Security header on an https site"],
+    ["header:frame-options", "No X-Frame-Options header or CSP frame-ancestors: other sites can frame the page"],
+    ["header:x-content-type-options", "No X-Content-Type-Options: nosniff header"],
+    ["header:referrer-policy", "No Referrer-Policy header"]
+  ]);
+  const cookie = checkCookies(res({ headers: { "set-cookie": ["session=abcdef; Path=/"] } }), "https://x/", true, plain)[0];
+  assert.equal(cookie.title, "Cookie [redacted, 7 chars] is missing the HttpOnly, Secure, SameSite flags");
+  const cors = checkCors(res({ headers: { "access-control-allow-origin": "https://evil.example", "access-control-allow-credentials": "true" } }), "http://x/", "https://evil.example", plain);
+  assert.match(cors[0].title, /^CORS lets any site read responses with the visitor's credentials/);
+  assert.equal(checkCors(res({ headers: { "access-control-allow-origin": "*", "access-control-allow-credentials": "true" } }), "http://x/", "https://o", plain)[0].title, "CORS allows any origin (*) together with credentials");
+  const base = "http://127.0.0.1:4173";
+  const allow = ["127.0.0.1:4173"];
+  const exposed = await checkExposedFiles({ base, allow, redact: plain, fetchImpl: fakeFetch({
+    "/.git/HEAD": res({ status: 200, body: "ref: refs/heads/main\n" }),
+    "/.env": res({ status: 200, body: "SECRET_KEY=abc\n" }),
+    "GET /": res({ status: 200, body: "//# sourceMappingURL=/app.js.map" }),
+    "/app.js.map": res({ status: 200, body: `{"version":3,"sources":["a.js"],"mappings":"AAAA"}` })
+  }).fn });
+  assert.deepEqual(exposed.map((f) => f.title), ["A .git directory is served at /.git/HEAD", "A .env file is served at /.env", "A JavaScript source map is served"]);
+  const errors = await checkVerboseErrors({ base, allow, redact: plain, fetchImpl: fakeFetch({ "*": res({ status: 500, body: "Error\n    at Object.handler (/home/app/server.js:42:13)" }) }).fn });
+  assert.equal(errors[0].title, "Error responses show a stack trace or a server file path");
+  const authz = await checkAuthBypass({ base, map: { protectedRoutes: ["/admin", "/account"] }, allow, redact: plain, fetchImpl: fakeFetch({ "GET /admin": res({ status: 200 }), "GET /account": res({ status: 204 }) }).fn });
+  assert.deepEqual(authz.map((f) => f.title), ["/admin answers without a login", "/account may answer without a login (status 204)"]);
+  const rate = await checkRateLimit({ base, map: { loginPath: "/login" }, allow: [{ origin: "127.0.0.1:4173", methods: "*" }], redact: plain, attempts: 3, fetchImpl: fakeFetch({ "POST /login": res({ status: 401 }) }).fn });
+  assert.equal(rate[0].title, "No rate limit on the login route /login");
+  // Through runHttpProbe too, and through the redactor like the evidence.
+  const all = await runHttpProbe({ targets: [{ url: base, mode: "readonly" }], tests: {}, fetchImpl: fakeFetch({ "GET /": res({ status: 200, body: "home" }) }).fn, redact: mark });
+  assert.ok(all.candidates.length >= 4);
+  for (const c of all.candidates) assert.match(c.title, /^\[r\]\S.{8,}/, JSON.stringify(c));
+});

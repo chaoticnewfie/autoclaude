@@ -177,6 +177,96 @@ test("fail then pass: the step passes on the second attempt and the attempt coun
   assert.match(fs.readFileSync(path.join(root, "PROGRESS.md"), "utf8"), /\(attempt 2\)/);
 });
 
+// ---------- flaky checks (P10.14, D62) ----------
+
+// A check scripted by run: it fails on the runs numbered in `fail` (1 is its first run in the
+// project), printing "flaky boom on run <n>", and passes on the others. Every run adds one
+// character to .autoclaude/runs-<name> (gitignored).
+const scripted = (name, fail) => ({ name, command: `${node} -e "const f=require('fs'),p='.autoclaude/runs-${name}';f.appendFileSync(p,'x');const n=f.readFileSync(p,'utf8').length;if([${fail.join(",")}].includes(n)){console.log('flaky boom on run '+n);process.exit(1)}"`, timeoutSec: 60 });
+const runsOf = (root, name) => { try { return fs.readFileSync(path.join(root, ".autoclaude", `runs-${name}`), "utf8").length; } catch { return 0; } };
+const types = (r) => r.events.map((e) => e.type);
+const gateLog = (root) => fs.readFileSync(path.join(root, ".autoclaude", "logs", "gate.log"), "utf8");
+
+test("a check that fails and then passes when run once more counts as passed: no attempt, flaky in the report, the commit body, gate.log and the run state; only the passing run's time is recorded", async () => {
+  const root = scratch("happy", [scripted("unit", [1])]);
+  const recorded = [];
+  const recordCheckTimes = (_root, results) => { recorded.push(results.map((x) => [x.name, x.ok])); };
+  writeReady(root, "S1.1");
+  let r = await gate(root, { recordCheckTimes });
+  assert.equal(r.decision, "block", JSON.stringify(r.events));
+  assert.match(r.reason, /^S1\.1 verified and committed/);
+  assert.deepEqual(types(r).filter((t) => /^(check-rerun|check-flaky|failed|passed)$/.test(t)), ["check-rerun", "check-flaky", "passed"]);
+  assert.equal(runsOf(root, "unit"), 2, "run once more right away");
+  let s = loadState(root);
+  assert.equal(s.attempts["S1.1"] || 0, 0);
+  assert.deepEqual(s.flakyChecks.map(({ at, ...e }) => e), [{ name: "unit", step: "S1.1", phase: 1, feature: false, stage: "verify", firstReason: "exit code 1" }]);
+  assert.ok(s.flakyChecks[0].at >= s.startedAt);
+  assert.match(gitBody(root), /\nChecks:\n- unit: passed in \d+ s \(flaky: passed on a rerun\)\n/);
+  const report = fs.readFileSync(path.join(root, ".autoclaude", "reports", "S1.1-1.md"), "utf8");
+  assert.match(report, /\n## Check "unit": passed on a rerun \(FLAKY\)\n\n`[^`]+` in \d+ s\n\nIt failed first \(exit code 1, after \d+ s\), was run once more right away, and passed\. It counts as passed, but the check is flaky: its test should be fixed so it passes every time\.\n\nThe failed run's last lines:\n\n```\nflaky boom on run 1\n```\n/);
+  assert.doesNotMatch(report, /run 2/);
+  assert.match(gateLog(root), /S1\.1: check "unit" is FLAKY: it failed \(exit code 1\), then passed when run once more \(in \d+ s\); it counts as passed/);
+  assert.deepEqual(recorded, [[["unit", true]]], "the check times get the passing run only");
+
+  // The next step's check passes the first time: no rerun, and nothing flaky about it.
+  writeReady(root, "S1.2");
+  r = await gate(root, { recordCheckTimes });
+  assert.match(r.reason, /^S1\.2 verified and committed/, JSON.stringify(r.events));
+  assert.equal(types(r).includes("check-rerun"), false);
+  assert.equal(runsOf(root, "unit"), 3);
+  assert.match(gitBody(root), /\nChecks:\n- unit: passed in \d+ s\n\n/);
+  s = loadState(root);
+  assert.equal(s.flakyChecks.length, 1, "kept for the hand-back");
+  assert.equal(spawnSync("git", ["status", "--porcelain"], { cwd: root, encoding: "utf8", env }).stdout.trim(), "");
+});
+
+test("a check that fails when run once more too is a failure as before: one attempt, and the report says it failed twice; a check that did not run is not run again", async () => {
+  const root = scratch("happy", [scripted("unit", [1, 2])]);
+  writeReady(root, "S1.1");
+  let r = await gate(root);
+  assert.equal(r.decision, "block", JSON.stringify(r.events));
+  assert.match(r.reason, /^S1\.1 attempt 1\/3 failed: check "unit" failed\./);
+  assert.match(r.reason, /It failed \(exit code 1\), was run once more right away, and failed again: a real failure, not a flaky check\./);
+  assert.match(r.reason, /flaky boom on run 2/, "the rerun's output");
+  assert.equal(runsOf(root, "unit"), 2);
+  assert.deepEqual(types(r).filter((t) => /^check-/.test(t)), ["check-rerun"]);
+  let s = loadState(root);
+  assert.equal(s.attempts["S1.1"], 1);
+  assert.equal(s.flakyChecks, undefined);
+  assert.equal(stepById(planOf(root), "S1.1").marker, " ");
+  assert.match(gateLog(root), /S1\.1: check "unit" failed \(exit code 1\), and failed again when run once more \(exit code 1\)/);
+  // The next attempt passes on its first run: verified at attempt 2, nothing flaky.
+  writeReady(root, "S1.1");
+  r = await gate(root);
+  assert.match(r.reason, /^S1\.1 verified and committed/, JSON.stringify(r.events));
+  assert.equal(runsOf(root, "unit"), 3);
+  assert.equal(loadState(root).flakyChecks, undefined);
+
+  // A check that needs the dev server in a project without one did not run: not run again.
+  const root2 = scratch("happy", [{ ...scripted("e2e", []), needsDevServer: true }]);
+  writeReady(root2, "S1.1");
+  r = await gate(root2);
+  assert.match(r.reason, /^S1\.1 attempt 1\/3 failed: check "e2e" did not run/, JSON.stringify(r.events));
+  assert.equal(types(r).includes("check-rerun"), false);
+  assert.equal(runsOf(root2, "e2e"), 0);
+});
+
+test("step mode: the second run of the checks with the findings filed reruns a failed check too; flaky there, it passes, the commit body marks it, and the completion alert names the run's flaky checks", async () => {
+  const root = scratch("broken", [scripted("unit", [2])]);
+  const { runSecurity } = fakeSecurity([secLow]);
+  writeReady(root, "S1.1");
+  const r = await gate(root, { runSecurity });
+  assert.equal(r.decision, "allow", JSON.stringify(r.events));
+  assert.equal(loadState(root).status, "complete");
+  assert.equal(runsOf(root, "unit"), 3, "once, then twice with the findings filed");
+  assert.match(gitBody(root), /\nChecks:\n- unit: passed in \d+ s\n- security review: passed in \d+ s\n- unit \(with the findings filed\): passed in \d+ s \(flaky: passed on a rerun\)\n/);
+  assert.match(fs.readFileSync(path.join(root, ".autoclaude", "reports", "S1.1-1.md"), "utf8"), /\n## Check "unit": passed on a rerun \(FLAKY\) \(with the findings filed\)\n[\s\S]*flaky boom on run 2/);
+  assert.deepEqual(loadState(root).flakyChecks.map((e) => [e.name, e.step, e.feature, e.stage]), [["unit", "S1.1", false, "recheck"]]);
+  // The flaky check was found in the stop that completed the plan, and still reached the alert.
+  assert.match(sent.at(-1).title, /plan complete/);
+  assert.match(sent.at(-1).message, /\nFlaky checks: unit: each failed, then passed when run again; fix the tests\.\n/);
+});
+
 test("blocked marker: the step is marked [?], the run pauses, the owner is notified with the question", async () => {
   const root = scratch();
   writeBlocked(root, "S1.1", "Should I use cookies or local storage? Options: cookies, localStorage.");

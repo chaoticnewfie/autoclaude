@@ -2,14 +2,15 @@
 // on a generated plan, handoffFileFor), written at plan completion
 // for the owner in plain language. What was built (with commits), what is left for the owner
 // with exact commands, secrets the run created (names only, never values), open findings,
-// decisions to review, the run's own decisions, the push state and what the run left on this
-// computer. The counts come from lib/summary.js, so the completion alert says the same thing.
+// decisions to review, flaky checks to fix, the run's own decisions, the push state and what the
+// run left on this computer. The counts come from lib/summary.js, so the completion alert says
+// the same thing.
 // Synchronous on purpose, like the other file writers the gate uses. Node built-ins only.
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { writeFileAtomic } from "./fsatomic.js";
 import { MARKERS } from "./plan.js";
-import { collectHandback, pushLine, pushStatus, handoffFileName } from "./summary.js";
+import { collectHandback, pushLine, pushStatus, handoffFileName, flakyChecksOfRun, flakyByCheck, flakyWhere } from "./summary.js";
 
 // The hand-back's file name lives in lib/summary.js, which the alerts share with this module:
 // HANDOFF.md, or HANDOFF-<NAME>.md for a run on a generated plan (`autoclaude run --plan`).
@@ -132,8 +133,9 @@ function notIgnored(root, files, env) {
 }
 
 // Writes HANDOFF.md and returns { path, summary } with summary = { built, ownerItems,
-// secretsCreated, openFindings, ownerReviewDecisions, runDecisions, push, footprint }.
-// runDecisions is a count. A write failure comes back as { path: null, summary, error }.
+// secretsCreated, openFindings, ownerReviewDecisions, runDecisions, flakyChecks, push, footprint }.
+// runDecisions is a count; flakyChecks the run's entries of state.flakyChecks (lib/summary.js
+// flakyChecksOfRun). A write failure comes back as { path: null, summary, error }.
 export function writeHandoff({ root, config, state, parsed, footprint = null, now = new Date(), env = process.env, commits = null }) {
   const st = state || {};
   const got = collectHandback({ root, config, state: st, parsed, env });
@@ -147,6 +149,7 @@ export function writeHandoff({ root, config, state, parsed, footprint = null, no
     openFindings: got.openFindings,
     ownerReviewDecisions: got.ownerReviewDecisions,
     runDecisions: got.runDecisions.length,
+    flakyChecks: flakyChecksOfRun(st),
     push: st.pushState || null,
     footprint: footprint || null
   };
@@ -191,6 +194,8 @@ export function renderHandoff({ config, state, parsed, got, summary, branch, exp
   const sec = summary.openFindings.filter((f) => f.source === "security").length;
   L.push(`- Open findings: ${summary.openFindings.length ? `${summary.openFindings.length} (${[sec ? plural(sec, "security finding") : null, summary.openFindings.length - sec ? plural(summary.openFindings.length - sec, "follow-up") : null].filter(Boolean).join(", ")})` : "none"}.`);
   L.push(`- Decisions the run made: ${summary.runDecisions}.`);
+  const flaky = flakyByCheck(summary.flakyChecks);
+  if (flaky.length) L.push(`- Flaky checks: ${flaky.length} (${flaky.map((f) => code(f.name)).join(", ")}), to fix.`);
   L.push(`- ${pushedAfter ? `Push before this file was committed: ${pushStatus(summary.push, config)}` : pushLine(summary.push, config)}`);
   L.push(`- This computer: ${footprintSummary(fp)}.`, "");
 
@@ -261,6 +266,14 @@ export function renderHandoff({ config, state, parsed, got, summary, branch, exp
     L.push("None.");
   }
   L.push("");
+
+  // Only a run that saw one says anything about flaky checks.
+  if (flaky.length) {
+    L.push("## Flaky checks", "");
+    L.push("These checks failed, then passed when the gate ran them again right away, so they counted as passed. A check that passes only some of the time hides real failures and costs the run time: fix each test so it passes every time.", "");
+    for (const f of flaky) L.push(`- ${code(f.name)}${f.count > 1 ? `, ${f.count} times` : ""}: ${f.entries.map((e) => flakyWhere(e, parsed)).join("; ")}.`);
+    L.push("");
+  }
 
   L.push("## What was built", "");
   for (const ph of b.phases) {

@@ -796,6 +796,37 @@ test("runOptimizeScanners finds what is provably unused, duplicated, outdated, l
   assert.ok(fs.existsSync(path.join(root, "src", "dead.js")), "nothing in the project is changed");
 });
 
+// P10.14: the live proof's scanner findings OPT-011, 013, 016 and 017 reached the report untitled.
+test("every optimize scanner candidate has a plain title naming the problem and the place", async () => {
+  const root = demoProject();
+  const r = await so.runOptimizeScanners({ root, env: cleanEnv(), options: { exclude: ["legacy/**"] }, sweepDir: path.join(root, ".autoclaude", "sweeps", "t"), run: demoRun(root), baseline: DEMO_BASELINE, which, now });
+  const titles = Object.fromEntries(r.candidates.map((c) => [`${c.category} ${c.file}`, c.title]));
+  assert.deepEqual(titles, {
+    "unused-file src/dead.js": "src/dead.js is not used anywhere",
+    "unused-file src/auth/session-old.js": "src/auth/session-old.js is not used anywhere",
+    "unused-export src/util.js": "The export internalOnly in src/util.js is used only inside its own file",
+    "unlisted-dependency src/index.js": "src/index.js imports chalk, which no package.json declares",
+    "unused-dependency package.json": "left-pad is declared in package.json but never used",
+    "outdated package.json": "lodash 4.17.20 can be updated to 4.17.21",
+    "major-upgrade package.json": "eslint has a new major version (8.57.0 to 9.10.0)",
+    "duplicate src/a.js": "14 lines repeated in src/a.js and src/b.js",
+    "commented-out src/util.js": "A block of commented-out code in src/util.js",
+    "stale-todo src/todo.js": `A TODO comment over ${so.STALE_TODO_DAYS} days old in src/todo.js`,
+    "flaky-test test/util.test.js": "The test \"x\" in test/util.test.js passed some identical runs and failed others",
+    "slow-test test/slow.test.js": "test/slow.test.js is one of the slowest test files: 20.0 s, 96% of the time of \"unit\""
+  });
+  // The proof's OPT-011: test/sec-015.test.js, 6.5 s of the 35.3 s the unit files take together.
+  const proof = so.testCandidates({ flaky: { rounds: 3, tests: [], files: [{ check: "unit", file: "test/x.test.js", passed: 2, runs: 3 }], suites: [{ check: "e2e", command: "npx playwright test", passed: 1, runs: 3 }] },
+    testFiles: [{ check: "unit", runner: "node", rounds: 3, files: [{ file: "test/sec-015.test.js", ms: 6532, samples: [6532, 6738, 6471] }, { file: "test/rest.test.js", ms: 28768, samples: [28768] }] }] });
+  assert.deepEqual(proof.map((c) => c.title), [
+    "test/x.test.js passed some identical runs and failed others",
+    "The check \"e2e\" passed some identical runs and failed others",
+    "test/rest.test.js is one of the slowest test files: 28.8 s, 81% of the time of \"unit\"",
+    "test/sec-015.test.js is one of the slowest test files: 6.5 s, 19% of the time of \"unit\""
+  ]);
+  for (const c of [...r.candidates, ...proof]) assert.ok(typeof c.title === "string" && c.title.length > 10, JSON.stringify(c));
+});
+
 test("runOptimizeScanners reports missing or failing tools as not checked, never as clean", async () => {
   const root = demoProject();
   const sweepDir = path.join(root, "sw");

@@ -214,7 +214,8 @@ duplicate kept on purpose), or knows to be a false alarm, is recorded in
 accepted instead of reporting it again. Each entry holds the finding's fingerprint (from
 `findings.json` in the sweep's folder) and a short reason, never the finding's details. A
 finding merged from several sources has more than one; the report's Fingerprint row then reads
-like `abc (also def)`, and any of them works:
+like `abc (also def)`. Record one entry for each of them, so the finding stays accepted whichever
+source finds it next time:
 
 ```json
 [

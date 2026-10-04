@@ -6,7 +6,8 @@ import path from "node:path";
 import {
   FINDING_SCHEMA, CANDIDATES_SCHEMA, VERDICT_SCHEMA, SEVERITIES, ACCEPTED_FILE, FINDINGS_SCHEMA_VERSION,
   redact, redactDeep, maskValue, fingerprint, normalizeFinding, dedupe, numberFindings, sortFindings, countBySeverity,
-  gateSeverity, areaOf, loadAccepted, readAccepted, saveAccepted, applyAccepted, writeReport, canonicalCategory
+  gateSeverity, areaOf, loadAccepted, readAccepted, saveAccepted, applyAccepted, writeReport, canonicalCategory,
+  fileMentions, placesOf
 } from "../../plugins/autoclaude/lib/findings.js";
 
 const tmpDir = () => fs.mkdtempSync(path.join(os.tmpdir(), "autoclaude-findings-"));
@@ -490,6 +491,176 @@ test("a scanner's anchor decides its fingerprint; a session cannot set one; dedu
   assert.match(fs.readFileSync(path.join(dir, "report.md"), "utf8"), new RegExp(`Fingerprint \\| \`${merged[0].fingerprint}\` \\(also \`${scannerFp}\`\\)`));
 });
 
+// ---------- one problem reported twice in one file, or from each end of a copy (P10.14) ----------
+//
+// Shapes copied from the live proof's findings.json (spikes/out/todo-live, sweeps 20261004-0010
+// and 20261004-0929), trimmed.
+
+const LEGACY_JS = "// Old import format, from before the JSON API. Nothing uses this any more.\nexport function parseLegacy(text) {\n  return text.split(\",\");\n}\n";
+const CONFIG_JS = "// Payment settings.\nexport const PAYMENT_KEY = process.env.PAYMENT_KEY || \"\";\n";
+
+// Every line of these files differs, so each line anchors its own fingerprint.
+const numbered = (n) => Array.from({ length: n }, (_, i) => `const step${i + 1} = ${i + 1};`).join("\n") + "\n";
+
+function proofProject() {
+  const root = tmpDir();
+  for (const [rel, text] of [["lib/legacy.js", LEGACY_JS], ["lib/config.js", CONFIG_JS], ["Dockerfile", "FROM node:24\nWORKDIR /app\nCOPY . .\nENV ADMIN_TOKEN=${ADMIN_TOKEN}\n"],
+    ["server.js", numbered(100)], ["test/sec-015.test.js", numbered(60)], ["e2e/todo.spec.js", numbered(20)], ["package-lock.json", "{}\n"]]) {
+    fs.mkdirSync(path.dirname(path.join(root, rel)), { recursive: true });
+    fs.writeFileSync(path.join(root, rel), text);
+  }
+  return root;
+}
+
+// OPT-013 (knip, the whole file) and OPT-007 (a reviewer, line 1).
+const OPT_013 = { category: "unused-file", severity: "low", confidence: 7, file: "lib/legacy.js", line: 0, title: "", tier: "A", autoFixSafe: true, tool: "knip 6.39.0 + reference search", source: "scanner optimize",
+  evidence: "knip flags the file as unused; a search of the whole repository (code, tests, package.json scripts, CI, Dockerfiles and compose files, manifests, config and docs) finds no reference to it, and it matches no entry-point convention.",
+  impact: "5 lines that are read, built and maintained for nothing.", fix: "Delete the file (git keeps the history)." };
+const OPT_007 = { category: "unused-file", title: "Delete unused lib/legacy.js (parseLegacy)", severity: "low", confidence: 9, file: "lib/legacy.js", line: 1, tier: "A", autoFixSafe: true, area: "lib", source: "session area-lib",
+  evidence: "\"// Old import format, from before the JSON API. Nothing uses this any more.\" / \"export function parseLegacy(text) {\". (1) Nothing imports ./lib/legacy.js or calls parseLegacy.",
+  fix: "git rm lib/legacy.js. Nothing else references it, so no other edit is needed." };
+// OPT-011 (baseline timing, the whole file) and OPT-005 (a reviewer, the line that holds it open).
+const OPT_011 = { category: "slow-test", severity: "low", confidence: 8, file: "test/sec-015.test.js", line: 0, title: "", tier: "B", tool: "baseline timing", source: "scanner optimize",
+  evidence: "median 6.5 s over 3 runs, 19% of the 35.3 s all 20 files of \"unit\" take together" };
+const OPT_005 = { category: "slow-test", title: "sec-015 leaves a 5 s timeout timer pending, holding the test file open after its tests finish", severity: "medium", confidence: 8, file: "test/sec-015.test.js", line: 41, tier: "B", source: "session area-test",
+  evidence: "const outcome = await Promise.race([closed, new Promise((resolve) => setTimeout(() => resolve(\"still open\"), 5000))]);  -- the timer is never cleared." };
+// SEC-007 (gitleaks: the key in lib/config.js's history, line 2 at that commit) and SEC-008 (a reviewer, line 2).
+const SEC_007 = { category: "secrets", severity: "high", cwe: "CWE-798", confidence: 7, file: "lib/config.js", line: 0, title: "", autoFixSafe: false, source: "scanner security",
+  evidence: "gitleaks rule stripe-access-token matched in git history at commit 734d093f053a in lib/config.js line 2 (the value is not shown)",
+  ownerAction: "Rotate the value at the service that issued it; rewriting the git history is your decision.",
+  anchor: "gitleaks:734d093f053a1ee067a1eed6a51ae286c7014119:lib/config.js:stripe-access-token:2", commit: "734d093f053a1ee067a1eed6a51ae286c7014119" };
+const SEC_008 = { category: "secrets", title: "Stripe-shaped payment key hardcoded in lib/config.js in git history (commit 734d093), still reachable after the env-var change", severity: "high", cwe: "CWE-798", confidence: 7,
+  file: "lib/config.js", line: 2, autoFixSafe: false, source: "session area-lib",
+  evidence: "gitleaks rule stripe-access-token matched lib/config.js line 2 at commit 734d093 'payment settings'. The next commit replaced it with process.env.PAYMENT_KEY (the current line 2).",
+  ownerAction: "Revoke/rotate the key at the payment provider." };
+
+test("dedupe merges a whole-file report with one that names a line in that file: the line's place and title, both sources, every fingerprint", () => {
+  const root = proofProject();
+  const opt = dedupe([OPT_013, OPT_007, OPT_011, OPT_005], { kind: "optimize", root });
+  assert.equal(opt.length, 2, JSON.stringify(opt.map((f) => [f.file, f.line])));
+  const legacy = opt.find((f) => f.file === "lib/legacy.js");
+  assert.deepEqual([legacy.line, legacy.title, legacy.confidence], [1, "Delete unused lib/legacy.js (parseLegacy)", 9]);
+  assert.deepEqual(legacy.sources, ["session area-lib", "scanner optimize"], "Found by lists both");
+  const scannerFp = normalizeFinding(OPT_013, { kind: "optimize", root }).fingerprint;
+  const sessionFp = normalizeFinding(OPT_007, { kind: "optimize", root }).fingerprint;
+  assert.deepEqual(legacy.fingerprints, [sessionFp, scannerFp], "no fingerprint changes; the kept report's comes first");
+  assert.equal(legacy.fingerprint, sessionFp);
+  const slow = opt.find((f) => f.file === "test/sec-015.test.js");
+  assert.deepEqual([slow.line, slow.severity, slow.sources], [41, "medium", ["session area-test", "scanner optimize"]]);
+  // An owner who accepted the scanner's report earlier still has it accepted.
+  assert.equal(applyAccepted(opt, [{ fingerprint: scannerFp, kind: "optimize", reason: "accepted: loaded by name" }]).accepted.length, 1);
+
+  const sec = dedupe([SEC_008, SEC_007], { kind: "security", root });
+  assert.equal(sec.length, 1);
+  assert.deepEqual([sec[0].line, sec[0].title, sec[0].sources], [2, SEC_008.title, ["session area-lib", "scanner security"]]);
+  assert.ok(sec[0].fingerprints.includes(normalizeFinding(SEC_007, { kind: "security", root }).fingerprint));
+  // The order they come in does not matter, and the more severe severity is kept.
+  const flipped = dedupe([{ ...SEC_007, severity: "critical" }, SEC_008], { kind: "security", root });
+  assert.deepEqual([flipped.length, flipped[0].line, flipped[0].severity, flipped[0].title], [1, 2, "critical", SEC_008.title]);
+  // The report shows one finding found by both.
+  const dir = tmpDir();
+  writeReport(dir, { kind: "optimize", confirmed: numberFindings(opt, "optimize") });
+  const md = fs.readFileSync(path.join(dir, "report.md"), "utf8");
+  assert.equal((md.match(/^### OPT-\d{3} .*legacy/gm) || []).length, 1, "one heading for lib/legacy.js");
+  assert.match(md, /\| Where \| `lib\/legacy\.js:1` \|/);
+  assert.match(md, /\| Found by \| session area-lib, scanner optimize \|/);
+});
+
+test("dedupe keeps different problems in one file apart: two scanner hits, two missing headers, two session bugs, another package, another line, and anything ambiguous", () => {
+  const root = proofProject();
+  const count = (list, kind) => dedupe(list, { kind, root }).length;
+  // SEC-001 (the token in the working tree, with the reviewers who saw it) and SEC-006 (gitleaks:
+  // the same token in the history): two scanner hits, two fixes (a commit; a rotation).
+  const SEC_001 = { category: "secrets", severity: "critical", file: "Dockerfile", line: 4, evidence: "github-token in the working tree (value ghp_[redacted, 40 chars])", anchor: "secret:github-token:ghp_[redacted, 40 chars]", source: "scanner security", autoFixSafe: true };
+  const SEC_001_REVIEW = { category: "secrets", title: "GitHub token hard-coded in the Dockerfile", severity: "critical", file: "Dockerfile", line: 4, evidence: "ENV ADMIN_TOKEN=ghp_...", source: "session crosscut-infra" };
+  const SEC_006 = { category: "secrets", severity: "high", file: "Dockerfile", line: 0, evidence: "gitleaks rule github-pat matched in git history at commit c6a815d0cd2c in Dockerfile line 4 (the value is not shown)", anchor: "gitleaks:c6a815d0cd2cfd3bc5204bb5111a66e7ee432c94:dockerfile:github-pat:4", source: "scanner security" };
+  assert.equal(count([SEC_001, SEC_001_REVIEW, SEC_006], "security"), 2);
+  // SEC-013, 014, 020 (three headers the probe found missing on the page) and SEC-025 (a reviewer: no security headers in server.js).
+  const URL = "http://127.0.0.1:4173/";
+  const probe = (anchor, evidence) => ({ category: "headers", severity: "medium", file: URL, line: 0, anchor, evidence, source: "scanner probe" });
+  const headers = [probe("header:content-security-policy", "no Content-Security-Policy header on the main response"), probe("header:frame-options", "no X-Frame-Options header and no frame-ancestors in the CSP"),
+    probe("header:x-content-type-options", "no X-Content-Type-Options: nosniff header"),
+    { category: "headers", title: "No security headers on any response (server.js)", severity: "low", file: "server.js", line: 25, evidence: "server.js:25 sets only content-type", source: "session area-root" }];
+  assert.equal(count(headers, "security"), 4);
+  assert.equal(count([...headers.slice(0, 3), { ...headers[0], line: 1, anchor: undefined, source: "session browser-0", evidence: "the page has no CSP" }], "security"), 4, "a URL has no lines to merge on");
+  // Two bugs in server.js from the reviewers, one about the whole file: two findings.
+  const bugs = [{ category: "bug", title: "server.js has no error handling around its routes", severity: "medium", file: "server.js", line: 0, evidence: "no try/catch in the handler", source: "session area-root" },
+    { category: "bug", title: "A request for the path // crashes the server", severity: "critical", file: "server.js", line: 73, evidence: "new URL() runs before the try block", source: "session area-root" }];
+  assert.equal(count(bugs, "optimize"), 2);
+  // ...unless the whole-file one points at that line, or the category is about the whole file.
+  assert.equal(count([{ ...bugs[0], evidence: "server.js:73 parses the URL outside the try block" }, bugs[1]], "optimize"), 1);
+  assert.equal(count([{ category: "unused-file", file: "e2e/todo.spec.js", line: 0, evidence: "no runner", source: "session area-e2e" }, { category: "unused-file", file: "e2e/todo.spec.js", line: 1, evidence: "nothing runs it", source: "session crosscut" }], "optimize"), 1);
+  // A package advisory and a report about another package in the same lockfile; the same package merges.
+  const minimist = { category: "deps", severity: "critical", file: "package-lock.json", line: 0, anchor: "pkg:npm:minimist", evidence: "osv-scanner: minimist 0.0.8 (npm) has 2 advisories: GHSA-vh95-rmgr-6w4m, GHSA-xvch-5gv4-984h", source: "scanner security" };
+  assert.equal(count([minimist, { category: "dependencies", title: "lodash 4.17.20 is pinned", file: "package-lock.json", line: 120, evidence: "lodash 4.17.20 has a prototype pollution advisory", source: "session crosscut-infra" }], "security"), 2);
+  assert.equal(count([minimist, { category: "dependencies", title: "minimist 0.0.8 is pinned", file: "package-lock.json", line: 14, evidence: "minimist 0.0.8 (prototype pollution)", source: "session crosscut-infra" }], "security"), 1);
+  // A whole-file report that names another line of its file.
+  assert.equal(count([{ ...SEC_007, evidence: "gitleaks rule stripe-access-token matched in git history at commit 734d093f053a in lib/config.js line 40" }, SEC_008], "security"), 2);
+  // Ambiguous: one whole-file report and two lines far apart, or two whole-file reports for one line.
+  assert.equal(count([OPT_011, OPT_005, { ...OPT_005, line: 10, title: "sec-015 starts the server twice", evidence: "before() and the first test both start it" }], "optimize"), 3);
+  const history = (commit, rule, masked) => ({ category: "secrets", severity: "high", file: "lib/config.js", line: 0, evidence: `${rule} added in git history at commit ${commit} in lib/config.js (value ${masked})`,
+    anchor: `history:${commit}:${rule}:${masked}`, source: "scanner security" });
+  assert.equal(count([history("734d093", "stripe-live", "sk_l[redacted, 32 chars]"), history("9f0e1d2", "aws-access-key", "AKIA[redacted, 20 chars]"), SEC_008], "security"), 3);
+});
+
+// OPT-019 and OPT-023: the formatList copy, seen from lib/format.js and from server.js.
+const OPT_019 = { category: "duplicate", title: "Reuse lib/format.js formatList in /api/summary instead of its inline copy", severity: "low", confidence: 6, file: "lib/format.js", line: 2, tier: "B", area: "lib", source: "session area-lib",
+  evidence: "lib/format.js:4 \"for (const t of items) lines.push((t.done ? \\\"[x] \\\" : \\\"[ ] \\\") + t.text);\" matches server.js:90 \"for (const t of store.list()) lines.push(...)\", and both then join with a newline. formatList is imported nowhere.",
+  reproduce: "Grep \"formatList\": only the definition at lib/format.js:2. Compare lib/format.js:3-5 with server.js:89-92: same loop, same join." };
+const OPT_023 = { category: "duplicate", title: "The /api/summary route in server.js re-implements formatList from lib/format.js", severity: "low", confidence: 6, file: "server.js", line: 89, tier: "B", source: "session area-root",
+  evidence: "server.js:89-90: const lines = []; for (const t of store.list()) lines.push(...);\nlib/format.js:3-4: const lines = []; for (const t of items) lines.push(...);\nNo code imports formatList.",
+  reproduce: "Grep the repository for 'formatList': only its definition at lib/format.js:2. Grep for 'format.js': only package.json:9 (lint)." };
+
+test("dedupe merges a duplicate-code pair reported from each of its two places into one finding that names both", () => {
+  const list = dedupe([OPT_023, OPT_019], { kind: "optimize" });
+  assert.equal(list.length, 1);
+  const f = list[0];
+  assert.deepEqual(placesOf(f), [{ file: "lib/format.js", line: 2 }, { file: "server.js", line: 89 }]);
+  assert.equal(f.title, OPT_019.title);
+  assert.deepEqual(f.sources.sort(), ["session area-lib", "session area-root"]);
+  assert.equal(f.fingerprints.length, 2);
+  const dir = tmpDir();
+  writeReport(dir, { kind: "optimize", confirmed: numberFindings(list, "optimize") });
+  const md = fs.readFileSync(path.join(dir, "report.md"), "utf8");
+  assert.match(md, /\| Where \| `lib\/format\.js:2` and `server\.js:89` \|/);
+  assert.equal((md.match(/^### OPT-/gm) || []).length, 1);
+  // The jscpd hit (OPT-016) and a review of another copy elsewhere in its partner file: two.
+  const jscpd = { category: "duplicate", severity: "low", file: "test/sec-012.test.js", line: 1, evidence: "15 lines at test/sec-012.test.js:1-15 repeat at test/sec-019.test.js:1-15", source: "scanner optimize" };
+  const other = { category: "duplicate", title: "Another copy", file: "test/sec-019.test.js", line: 40, evidence: "test/sec-019.test.js:40-52 repeats test/sec-012.test.js:30-42", source: "session area-test" };
+  assert.equal(dedupe([jscpd, other], { kind: "optimize" }).length, 2, "lines that do not meet stay apart");
+  assert.equal(dedupe([jscpd, { ...other, line: 2, evidence: "test/sec-019.test.js:1-13 repeats the helper of test/sec-012.test.js:1-13" }], { kind: "optimize" }).length, 1, "the other end of the jscpd hit");
+  // One-sided: only one of them names the other.
+  assert.equal(dedupe([OPT_019, { ...OPT_023, evidence: "an inline loop builds the summary", reproduce: "", title: "The summary is built inline" }], { kind: "optimize" }).length, 2);
+  // A third copy that names the two: the pair still merges, the third stays (it is named by neither).
+  const third = { category: "duplicate", title: "A third copy of the loop", file: "lib/report.js", line: 5, evidence: "the same loop as lib/format.js:3 and server.js:89", source: "session area-lib" };
+  assert.equal(dedupe([OPT_019, OPT_023, third], { kind: "optimize" }).length, 2);
+  // Three copies each naming both others: no single partner, so nothing is merged.
+  const copy = (file, a, b) => ({ category: "duplicate", title: `A copy in ${file}`, file, line: 1, evidence: `the same loop as ${a}:1 and ${b}:1`, source: "session area-lib" });
+  assert.equal(dedupe([copy("lib/a.js", "lib/b.js", "lib/c.js"), copy("lib/b.js", "lib/a.js", "lib/c.js"), copy("lib/c.js", "lib/a.js", "lib/b.js")], { kind: "optimize" }).length, 3);
+});
+
+test("fileMentions matches a project path whole, with the lines it gives", () => {
+  assert.deepEqual(fileMentions("lib/format.js:4 matches server.js:90; compare lib/format.js:3-5 with server.js:89-92", "server.js"), [{ from: 90, to: 90 }, { from: 89, to: 92 }]);
+  assert.deepEqual(fileMentions("matched in git history at commit 734d093f053a in lib/config.js line 2 (the value", "lib/config.js"), [{ from: 2, to: 2 }]);
+  assert.deepEqual(fileMentions("see ./lib\\config.js (lines 3 to 5) and `lib/config.js`", "lib/config.js"), [{ from: 3, to: 5 }, { from: 0, to: 0 }]);
+  assert.deepEqual(fileMentions("test/helpers/server.js:30 and server.json and server.js.map", "server.js"), [], "another file that ends the same is not a mention");
+  assert.deepEqual(fileMentions("anything", "http://127.0.0.1:4173/"), []);
+  assert.deepEqual(placesOf({ file: "a.js", line: 3 }), [{ file: "a.js", line: 3 }]);
+  assert.deepEqual(placesOf({ file: "a.js", line: 3, locations: [{ file: "a.js", line: 3 }, { file: ".\\b.js", line: "7" }, { file: "a.js", line: 3 }] }), [{ file: "a.js", line: 3 }, { file: "b.js", line: 7 }]);
+});
+
+test("a scanner's title never decides its fingerprint, so the titles scanners now write changed none", () => {
+  const root = proofProject();
+  const scanner = { kind: "optimize", category: "slow-test", file: "test/sec-015.test.js", line: 0, evidence: "", source: "scanner optimize" };
+  const titled = { ...scanner, title: "test/sec-015.test.js is one of the slowest test files" };
+  assert.equal(fingerprint(titled), fingerprint(scanner), "without the project");
+  assert.equal(fingerprint(titled, { root }), fingerprint(scanner, { root }), "with the project");
+  assert.equal(normalizeFinding(titled, { kind: "optimize", root }).fingerprint, normalizeFinding(scanner, { kind: "optimize", root }).fingerprint);
+  // A session's title still counts where nothing else can (as before).
+  const session = { kind: "optimize", category: "bug", file: "a.js", evidence: "", source: "session area-src" };
+  assert.notEqual(fingerprint({ ...session, title: "one" }), fingerprint({ ...session, title: "two" }));
+});
+
 // ---------- the report ----------
 
 function sampleFindings() {
@@ -577,7 +748,7 @@ test("writeReport: findings.json carries schemaVersion 1, counts and every list;
   assert.match(md, /Confirmed: 0 \(critical 0, high 0, medium 0, low 0\)/);
 });
 
-test("writeReport: an optimize report shows the fix tier and the baseline, whatever its shape", () => {
+test("writeReport: an optimize report shows the fix tier and the baseline, whatever its shape, in plain words", () => {
   const dir = tmpDir();
   const confirmed = numberFindings([normalizeFinding({ category: "duplicates", title: "Two copies of the price code", severity: "medium", file: "src/cart/price.js", tier: "B", autoFixSafe: true }, { kind: "optimize" })], "optimize");
   const baseline = {
@@ -592,12 +763,69 @@ test("writeReport: an optimize report shows the fix tier and the baseline, whate
   assert.match(md, /\| Fix tier \| B \(behind pinned tests\) \|/);
   assert.equal(/\| CWE \|/.test(md), false, "no CWE row in an optimize report");
   assert.match(md, /## Baseline/);
-  assert.match(md, /\| buildMs \| 8200 \|/);
-  assert.match(md, /\| bundle\.gzipBytes \| 140000 \|/);
-  assert.match(md, /\| flaky \| test\/clock\.test\.js \|/);
-  assert.match(md, /### pages\n\n\| url \| loadMs \| requests \|\n\|---\|---\|---\|\n\| \/ \| 320 \| 14 \|\n\| \/cart \| 410 \| 22 \|/);
-  assert.match(md, /### checks\n\n\| name \| durationMs \| ok \|/);
-  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(dir, "findings.json"), "utf8")).baseline.bundle, { rawBytes: 512000, gzipBytes: 140000 });
+  for (const want of [/\| Build \| 8\.2 s \|/, /\| Bundle size \| 137 KB gzip, 500 KB before compression \|/, /\| Flaky \| test\/clock\.test\.js \|/, /\| Packages \| 412 \|/, /\| Dev server start \| 2\.3 s \|/,
+    /### Pages\n\n\| Page \| Load \| Requests \|\n\|---\|---\|---\|\n\| \/ \| 320 ms \| 14 \|\n\| \/cart \| 410 ms \| 22 \|/,
+    /### Checks\n\n\| Check \| Command \| Result \| Time \|\n\|---\|---\|---\|---\|\n\| unit \| - \| passed \| 41\.0 s \|/]) assert.match(md, want);
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(dir, "findings.json"), "utf8")).baseline.bundle, { rawBytes: 512000, gzipBytes: 140000 }, "findings.json keeps the raw numbers");
+});
+
+// The live proof's baseline (20261004-0929-optimize), trimmed: its report showed version, at,
+// envSource, checksGreen, flaky.rounds, coverage.notExamined and a test-file list as raw JSON.
+const PROOF_BASELINE = {
+  version: 1, at: "2026-10-04T14:29:18.809Z", envSource: "run",
+  checks: [{ name: "lint", command: "npm run lint", ok: true, ms: 4161, reason: null }, { name: "unit", command: "npm test", ok: true, ms: 10711, reason: null }],
+  checksGreen: true,
+  testFiles: [{ check: "unit", runner: "node", rounds: 3, files: [{ file: "test/sec-015.test.js", ms: 6532, samples: [6532, 6738, 6471], ok: true, tests: 4 }, { file: "test/sec-010.test.js", ms: 861, samples: [861, 987, 827], ok: true, tests: 2 }] }],
+  flaky: { rounds: 3, tests: [], files: [], suites: [] },
+  build: null, bundle: null,
+  packages: { lockfile: "package-lock.json", count: 0, direct: 0 },
+  devServer: { url: "http://127.0.0.1:4173", ok: true, reused: false, startMs: 3357, error: null },
+  pages: [{ url: "http://127.0.0.1:4173/", loads: 5, loadMsMedian: 326, loadMsMin: 229, loadMsMax: 1534, domContentLoadedMs: 265, requests: 2, transferKb: 2.5, failedRequests: 0, duplicateApiCalls: [], heavyAssets: [], consoleErrors: 0 }],
+  coverage: { examined: ["packages: 0 in package-lock.json", "dev server: ready in 3.4 s"], notExamined: ["build time and bundle size: not checked (no build script)"] },
+  pagesAt: "2026-10-04T14:45:45.032Z"
+};
+
+test("writeReport: the optimize baseline in plain labels, readable times and sizes, no internal fields, and what was not checked", () => {
+  const dir = tmpDir();
+  writeReport(dir, { kind: "optimize", baseline: PROOF_BASELINE });
+  const md = fs.readFileSync(path.join(dir, "report.md"), "utf8");
+  const section = md.slice(md.indexOf("## Baseline"), md.indexOf("## Appendix"));
+  for (const raw of ["version", "envSource", "checksGreen", "flaky.rounds", "notExamined", "coverage.", "startMs", "loadMsMedian", "transferKb", "pagesAt", "durationMs", "| at |", "| ok |", "{\"file\""]) {
+    assert.equal(section.includes(raw), false, `no raw field name or JSON: ${raw}\n${section}`);
+  }
+  for (const want of [
+    "| Measured at | 2026-10-04 14:29 UTC |", "| Checks | all 2 passed |", "| Build | not checked (no build script) |", "| Bundle size | not checked (no build script) |",
+    "| Packages | 0 in package-lock.json, 0 declared directly |", "| Dev server start | 3.4 s (http://127.0.0.1:4173) |", "| Flaky tests | none in 3 identical runs |", "| Pages measured at | 2026-10-04 14:45 UTC |",
+    "### Checks\n\n| Check | Command | Result | Time |\n|---|---|---|---|\n| lint | npm run lint | passed | 4.2 s |\n| unit | npm test | passed | 10.7 s |",
+    "### Test files of \"unit\" (node, 3 runs each)\n\n| File | Median | Each run | Tests | Result |", "| test/sec-015.test.js | 6.5 s | 6.5 s, 6.7 s, 6.5 s | 4 | passed |", "| test/sec-010.test.js | 861 ms | 861 ms, 987 ms, 827 ms | 2 | passed |",
+    "| Page | Loads | Median load | Fastest | Slowest | DOM ready | Requests | Transferred | Failed requests | Repeated API calls | Heavy assets | Console errors |",
+    "| http://127.0.0.1:4173/ | 5 | 326 ms | 229 ms | 1.5 s | 265 ms | 2 | 2.5 KB | 0 | none | none | 0 |",
+    "### Not checked\n\n- build time and bundle size: not checked (no build script)"
+  ]) assert.ok(section.includes(want), `missing: ${want}\n${section}`);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(dir, "findings.json"), "utf8")).baseline.version, 1, "findings.json keeps every field");
+});
+
+test("writeReport: a baseline with a build, a bundle, a failed check, a flaky test and a server already running reads as plainly", () => {
+  const dir = tmpDir();
+  writeReport(dir, { kind: "optimize", baseline: {
+    version: 1, at: "2026-10-04T09:00:00.000Z", envSource: "dotenv",
+    checks: [{ name: "unit", command: "npm test", ok: false, ms: 65000, reason: "exit code 1" }], checksGreen: false,
+    testFiles: [], flaky: { rounds: 3, tests: [{ check: "unit", file: "test/clock.test.js", name: "ticks", passed: 2, failed: 1, runs: 3 }], files: [{ check: "unit", file: "test/net.test.js", passed: 1, runs: 3 }], suites: [] },
+    build: { command: "npm run build", ok: true, ms: 12300, fromCheck: null, reason: null },
+    bundle: { dir: "dist", files: 12, rawBytes: 512000, gzipBytes: 140000, mapBytes: 2 * 1024 * 1024, byType: { js: { files: 3, rawBytes: 400000, gzipBytes: 120000 } }, largest: [{ file: "assets/index.js", rawBytes: 380000, gzipBytes: 110000 }], skipped: 0, truncated: false },
+    packages: null, devServer: { url: "http://127.0.0.1:5173", ok: true, reused: true, startMs: null, error: null }, pages: null,
+    coverage: { examined: [], notExamined: ["package count: not checked (no lockfile or package.json)", "dev-server start time: not checked (a server was already answering at its URL)", "per-file times of \"unit\": not checked (only node --test, vitest and jest report them)", "page timings: not checked yet (the browser walk adds them)"] }
+  } });
+  const md = fs.readFileSync(path.join(dir, "report.md"), "utf8");
+  for (const want of [
+    "| Checks | 1 of 1 failed |", "| unit | npm test | failed: exit code 1 | 1 min 5 s |", "| Build | 12.3 s (npm run build) |",
+    "| Bundle size | dist, 12 files: 137 KB gzip, 500 KB before compression; source maps 2.0 MB more |", "### Bundle by type\n\n| Type | Files | Size | Gzip |\n|---|---|---|---|\n| js | 3 | 391 KB | 117 KB |",
+    "| assets/index.js | 371 KB | 107 KB |", "| Packages | not checked (no lockfile or package.json) |", "| Dev server start | not measured: a server was already answering at http://127.0.0.1:5173 |",
+    "| Flaky tests | 2 found in 3 identical runs (listed below) |", "| \"ticks\" | test/clock.test.js | 2 of 3 |", "| the whole file (no single test was named) | test/net.test.js | 1 of 3 |",
+    "| Test file times | not checked (only node --test, vitest and jest report them) |",
+    "| Page timings | not checked yet (the browser walk adds them) |", "- page timings: not checked yet (the browser walk adds them)"
+  ]) assert.ok(md.includes(want), `missing: ${want}`);
+  assert.equal(md.includes("dotenv"), false, "the env source is internal");
 });
 
 test("writeReport takes the sweep's own names: usage at start and end, agents, options", () => {

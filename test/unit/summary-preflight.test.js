@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { buildSummary, progressEntries, parseDecisions, runDecisions, ownerReviewDecisions, decisionsMark, decisionsAtStart, parseTableRows, isOpenStatus, unresolvedRows, isPrivateDoc, afterRunSection, afterRunItems, pushLine, pushStatus } from "../../plugins/autoclaude/lib/summary.js";
+import { buildSummary, progressEntries, parseDecisions, runDecisions, ownerReviewDecisions, decisionsMark, decisionsAtStart, parseTableRows, isOpenStatus, unresolvedRows, isPrivateDoc, afterRunSection, afterRunItems, pushLine, pushStatus, flakyChecksOfRun, flakyByCheck, flakyWhere } from "../../plugins/autoclaude/lib/summary.js";
 import { preflight, checkRunnable, playwrightBrowsersDir, formatPreflight, checkRequirements } from "../../plugins/autoclaude/lib/preflight.js";
 import { recordRunEnv, recordCheckTimes } from "../../plugins/autoclaude/lib/checks.js";
 import { mergeConfig } from "../../plugins/autoclaude/lib/config.js";
@@ -238,6 +238,42 @@ test("buildSummary (complete): only the run's decisions, owner-review decisions 
   assert.match(odd, /Left for you: 1 item: Run deploy\.sh\./);
   assert.match(odd, /Open items: 4 follow-ups\./);
   assert.match(odd, /For your review: 2 decisions/);
+});
+
+// ---------- flaky checks (P10.14, D62) ----------
+
+const FLAKY_PLAN = "# P plan\n\n## Phase 1: Lists\n- [x] **S1.1** One\n  - Accept: a\n- [x] **S1.3** Three\n  - Accept: c\n\n## Phase 2: More\n- [x] **S2.2** Five\n  - Accept: e\n";
+const flakyAt = (name, step, phase, feature, stage, at) => ({ name, step, phase, feature, stage, at, firstReason: "exit code 1" });
+
+test("flaky checks: only the run's own, grouped by check, said where; the alert gives them one short line, and none when there are none", () => {
+  const startedAt = "2026-10-04T08:00:00.000Z";
+  const flakyChecks = [
+    flakyAt("unit", "S1.1", 1, false, "verify", "2026-10-03T23:00:00.000Z"),
+    flakyAt("unit", "S1.3", 1, true, "verify", "2026-10-04T09:00:00.000Z"),
+    flakyAt("e2e", "S2.2", 2, true, "fixup", "2026-10-04T10:00:00.000Z"),
+    flakyAt("unit", "S3.1", 3, false, "recheck", "2026-10-04T11:00:00.000Z"),
+    null, { name: "" }, { step: "S1.1" }
+  ];
+  const run = flakyChecksOfRun({ startedAt, flakyChecks });
+  assert.deepEqual(run.map((e) => e.step), ["S1.3", "S2.2", "S3.1"], "an earlier run's entry and broken ones are left out");
+  assert.equal(flakyChecksOfRun({ flakyChecks }).length, 4, "no start recorded: every entry");
+  assert.deepEqual(flakyChecksOfRun({}), []);
+  assert.deepEqual(flakyByCheck(run).map((f) => [f.name, f.count, f.entries.map((e) => e.step)]), [["unit", 2, ["S1.3", "S3.1"]], ["e2e", 1, ["S2.2"]]]);
+  const parsed = parsePlan(FLAKY_PLAN);
+  assert.deepEqual(run.map((e) => flakyWhere(e, parsed)), ["Phase 1 (Lists), verified at S1.3", "the fix-up checks of Phase 2 (More) at S2.2", "S3.1, in Phase 3, with its findings filed"]);
+  assert.equal(flakyWhere({ name: "unit", step: "S1.1", phase: 1, feature: false, stage: "verify" }, parsed), "S1.1, in Phase 1 (Lists)");
+  assert.equal(flakyWhere({ name: "unit", step: "S9", phase: null, stage: "verify" }), "S9");
+
+  const root = tmp("autoclaude-sum-flaky-");
+  fs.mkdirSync(path.join(root, "docs"));
+  const config = mergeConfig({});
+  const text = buildSummary({ root, config, state: { status: "complete", startedAt, flakyChecks }, parsed });
+  assert.match(text, /\nOpen items: none\.\nFlaky checks: unit \(2 times\), e2e: each failed, then passed when run again; fix the tests\.\n/);
+  // The hand-back's own list, when there is one; the top three and how many more.
+  const handoff = { path: path.join(root, "HANDOFF.md"), summary: { flakyChecks: ["a", "b", "c", "d"].map((n, i) => flakyAt(n, "S1.1", 1, false, "verify", `2026-10-04T1${i}:00:00.000Z`)) } };
+  assert.match(buildSummary({ root, config, state: { status: "complete", startedAt }, parsed, handoff }), /\nFlaky checks: a, b, c \(\+1 more\): each failed, then passed when run again; fix the tests\.\n/);
+  assert.doesNotMatch(buildSummary({ root, config, state: { status: "complete", startedAt, flakyChecks: [flakyChecks[0]] }, parsed }), /Flaky/, "only an earlier run's: nothing");
+  assert.doesNotMatch(buildSummary({ root, config, state: { status: "complete", startedAt }, parsed }), /Flaky/);
 });
 
 test("checkRunnable: absolute paths, PATH lookups and npm scripts", () => {

@@ -489,7 +489,9 @@ test("supervise: claude resolved to an npm claude.cmd starts, and gets its argum
   // An npm-style shim in a folder with a space: it hands %* to node, like npm's claude.cmd.
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "autoclaude npm "));
   const out = path.join(dir, "argv.json");
-  fs.writeFileSync(path.join(dir, "cli.js"), `require("fs").writeFileSync(${JSON.stringify(out)}, JSON.stringify(process.argv.slice(2)));`);
+  // Written to a side file and renamed, so the file exists only once it is complete (under load
+  // the test once read it between its creation and its content).
+  fs.writeFileSync(path.join(dir, "cli.js"), `const fs = require("fs"); fs.writeFileSync(${JSON.stringify(out + ".tmp")}, JSON.stringify(process.argv.slice(2))); fs.renameSync(${JSON.stringify(out + ".tmp")}, ${JSON.stringify(out)});`);
   const shim = path.join(dir, "claude.cmd");
   fs.writeFileSync(shim, `@ECHO off\r\nSETLOCAL\r\n"${process.execPath}" "${path.join(dir, "cli.js")}" %*\r\n`);
   const env = { PATH: process.env.PATH || process.env.Path, CLAUDE_CONFIG_DIR: fs.mkdtempSync(path.join(os.tmpdir(), "autoclaude-sup-cfg-")), AUTOCLAUDE_CLAUDE_BIN: shim };

@@ -287,6 +287,59 @@ test("writeHandoff and the alert list Docker objects not tied to the project, wi
   assert.match(alert, /Docker: removed 1 unused thing the run created, 1 container it started still running, left alone 2 not tied to this project\./);
 });
 
+// ---------- flaky checks (P10.14, D62) ----------
+
+test("writeHandoff lists the run's flaky checks by check, says where each was flaky and that its test needs fixing; a run without one says nothing about them", () => {
+  const root = tmp();
+  const plan = "# Lists plan\n\n## Phase 1: Lists\n- [x] **S1.1** One\n  - Accept: a\n- [x] **S1.2** Two\n  - Accept: b\n\n## Phase 2: More\n- [x] **S2.1** Three\n  - Accept: c\n";
+  const startedAt = "2026-10-04T08:00:00.000Z";
+  const entry = (name, step, phase, feature, stage, at) => ({ name, step, phase, feature, stage, at, firstReason: "exit code 1" });
+  const flakyChecks = [
+    entry("unit", "S1.1", 1, false, "verify", "2026-10-03T20:00:00.000Z"),
+    entry("unit", "S1.2", 1, true, "verify", "2026-10-04T09:00:00.000Z"),
+    entry("e2e", "S1.2", 1, true, "fixup", "2026-10-04T09:30:00.000Z"),
+    entry("unit", "S2.1", 2, false, "recheck", "2026-10-04T10:00:00.000Z")
+  ];
+  const write = (state) => writeHandoff({ root, config: mergeConfig({ git: { push: false } }), state: { status: "complete", startedAt, ...state }, parsed: parsePlan(plan), footprint: null, env, commits: [] });
+  const r = write({ flakyChecks });
+  assert.deepEqual(r.summary.flakyChecks.map((e) => `${e.name}@${e.step}`), ["unit@S1.2", "e2e@S1.2", "unit@S2.1"], "only this run's");
+  const text = fs.readFileSync(r.path, "utf8");
+  assert.match(text, /\n- Flaky checks: 2 \(`unit`, `e2e`\), to fix\.\n/);
+  assert.match(text, /\n## Open findings\n\nNone\.\n\n## Flaky checks\n\nThese checks failed, then passed when the gate ran them again right away, so they counted as passed\. A check that passes only some of the time hides real failures and costs the run time: fix each test so it passes every time\.\n\n- `unit`, 2 times: Phase 1 \(Lists\), verified at S1\.2; S2\.1, in Phase 2 \(More\), with its findings filed\.\n- `e2e`: the fix-up checks of Phase 1 \(Lists\) at S1\.2\.\n\n## What was built\n/);
+  assert.doesNotMatch(text, /S1\.1, in Phase 1/, "an earlier run's flaky check is not this run's");
+  assert.doesNotMatch(text, /\n{3,}/);
+  // No flaky check in this run: no line, no section.
+  for (const state of [{}, { flakyChecks: [flakyChecks[0]] }]) {
+    const quiet = write(state);
+    assert.deepEqual(quiet.summary.flakyChecks, []);
+    assert.doesNotMatch(fs.readFileSync(quiet.path, "utf8"), /[Ff]laky/);
+  }
+});
+
+test("a check that was flaky in the run's last verification is in the hand-back and the completion alert", async () => {
+  const root = tmp();
+  const node = JSON.stringify(process.execPath);
+  // It fails on its first run and passes on every other.
+  const flaky = { name: "unit", command: `${node} -e "const f=require('fs'),p='.autoclaude/runs-unit';f.appendFileSync(p,'x');if(f.readFileSync(p,'utf8').length===1){console.log('flaky boom');process.exit(1)}"`, timeoutSec: 60 };
+  prepareFixture({ dest: root, plan: "broken", git: true, checks: [flaky], devServer: { command: null, url: null, healthPath: "/", startTimeoutSec: 10 }, env });
+  const cfgFile = path.join(root, "autoclaude.config.json");
+  fs.writeFileSync(cfgFile, JSON.stringify({ ...JSON.parse(fs.readFileSync(cfgFile, "utf8")), gate: { verifyAt: "step" } }, null, 2) + "\n");
+  git(root, ["commit", "-q", "-am", "verify per step"]);
+  saveState(root, { ...defaultState(), status: "running", currentStep: "S1.1", tickedByGate: [], startedAt: new Date().toISOString(), baseCommit: git(root, ["rev-parse", "HEAD"]) });
+  writeReady(root, "S1.1");
+  const sent = [];
+  const r = await runGate({ cwd: root, session_id: "s", hook_event_name: "Stop", stop_hook_active: false }, { env, root, notify: async (m) => { sent.push(m); return { ok: true }; }, stdout: { write() {} }, runTester: null, runSecurity: null, noteFootprint: null, finishFootprint: null });
+  assert.equal(r.decision, "allow", JSON.stringify(r.events));
+  assert.ok(r.events.some((e) => e.type === "check-flaky"), JSON.stringify(r.events));
+  assert.equal(loadState(root).status, "complete");
+  const text = fs.readFileSync(path.join(root, HANDOFF_FILE), "utf8");
+  assert.match(text, /\n- Flaky checks: 1 \(`unit`\), to fix\.\n/);
+  assert.match(text, /\n## Flaky checks\n\n[^\n]+fix each test so it passes every time\.\n\n- `unit`: S1\.1, in Phase 1 \(Impossible\)\.\n/);
+  assert.equal(git(root, ["log", "-1", "--format=%s"]), "autoclaude: hand-back");
+  assert.match(sent.at(-1).title, /plan complete/);
+  assert.match(sent.at(-1).message, /\nFlaky checks: unit: each failed, then passed when run again; fix the tests\.\n/);
+});
+
 // ---------- a run on a generated plan (P10.7) ----------
 
 test("handoffFileFor names a generated plan's hand-back after it; handoffFileName uses it only while that plan is the run's override", () => {

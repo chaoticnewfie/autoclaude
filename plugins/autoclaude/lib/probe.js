@@ -238,9 +238,10 @@ function baseUrl(url) { return String(url).replace(/\/+$/, ""); }
 // they are autoFixSafe (D58: fix right away fixes them); ownerAction names what only the owner
 // can do besides (rotate what a served .env held, block a path at a server outside the
 // repository). anchor: the check's fixed key, so the fingerprint stays the same next sweep.
-function finding({ category, severity, cwe = null, confidence, endpoint, evidence, impact, fix, testIdea, autoFixSafe = true, ownerAction = null, anchor = null }, redact) {
+// title: one plain line naming the problem (the report's heading; the URL is in its Where row).
+function finding({ title = "", category, severity, cwe = null, confidence, endpoint, evidence, impact, fix, testIdea, autoFixSafe = true, ownerAction = null, anchor = null }, redact) {
   return {
-    kind: "security", category, severity, cwe, cvss: null, fixedVersion: null,
+    kind: "security", title: redact(String(title || "")), category, severity, cwe, cvss: null, fixedVersion: null,
     confidence, file: endpoint, line: 0,
     evidence: redact(String(evidence || "")), impact, fix, testIdea, tier: "A", autoFixSafe,
     ...(ownerAction ? { ownerAction } : {}),
@@ -305,12 +306,12 @@ export function checkSecurityHeaders(res, endpoint, isHttps, redact) {
   const out = [];
   const has = (n) => !!headerVal(res, n);
   const csp = headerVal(res, "content-security-policy");
-  if (!csp) out.push(finding({ category: "headers", severity: "medium", cwe: "CWE-1021", confidence: 8, endpoint, evidence: "no Content-Security-Policy header on the main response", impact: "Without a CSP, an injected script has nothing stopping it from running.", fix: "Add a Content-Security-Policy that restricts scripts to trusted sources.", testIdea: "The response carries a Content-Security-Policy header.", anchor: "header:content-security-policy" }, redact));
-  if (isHttps && !has("strict-transport-security")) out.push(finding({ category: "headers", severity: "medium", cwe: "CWE-319", confidence: 8, endpoint, evidence: "no Strict-Transport-Security header on an https response", impact: "A browser may be downgraded to http on a later visit.", fix: "Add Strict-Transport-Security with a long max-age.", testIdea: "The https response carries Strict-Transport-Security.", anchor: "header:strict-transport-security" }, redact));
+  if (!csp) out.push(finding({ title: "No Content-Security-Policy header", category: "headers", severity: "medium", cwe: "CWE-1021", confidence: 8, endpoint, evidence: "no Content-Security-Policy header on the main response", impact: "Without a CSP, an injected script has nothing stopping it from running.", fix: "Add a Content-Security-Policy that restricts scripts to trusted sources.", testIdea: "The response carries a Content-Security-Policy header.", anchor: "header:content-security-policy" }, redact));
+  if (isHttps && !has("strict-transport-security")) out.push(finding({ title: "No Strict-Transport-Security header on an https site", category: "headers", severity: "medium", cwe: "CWE-319", confidence: 8, endpoint, evidence: "no Strict-Transport-Security header on an https response", impact: "A browser may be downgraded to http on a later visit.", fix: "Add Strict-Transport-Security with a long max-age.", testIdea: "The https response carries Strict-Transport-Security.", anchor: "header:strict-transport-security" }, redact));
   const frameAncestors = csp && /frame-ancestors/i.test(csp);
-  if (!has("x-frame-options") && !frameAncestors) out.push(finding({ category: "headers", severity: "medium", cwe: "CWE-1021", confidence: 8, endpoint, evidence: "no X-Frame-Options header and no frame-ancestors in the CSP", impact: "The page can be framed by another site (clickjacking).", fix: "Add X-Frame-Options: DENY, or frame-ancestors 'none' in the CSP.", testIdea: "Framing is refused by a header.", anchor: "header:frame-options" }, redact));
-  if (String(headerVal(res, "x-content-type-options") || "").toLowerCase() !== "nosniff") out.push(finding({ category: "headers", severity: "low", cwe: "CWE-16", confidence: 8, endpoint, evidence: "no X-Content-Type-Options: nosniff header", impact: "A browser may guess a response's type and treat it as something executable.", fix: "Add X-Content-Type-Options: nosniff.", testIdea: "The response sets X-Content-Type-Options: nosniff.", anchor: "header:x-content-type-options" }, redact));
-  if (!has("referrer-policy")) out.push(finding({ category: "headers", severity: "low", cwe: "CWE-200", confidence: 7, endpoint, evidence: "no Referrer-Policy header", impact: "Full URLs may leak to other sites through the Referer header.", fix: "Add a Referrer-Policy such as strict-origin-when-cross-origin.", testIdea: "The response sets a Referrer-Policy.", anchor: "header:referrer-policy" }, redact));
+  if (!has("x-frame-options") && !frameAncestors) out.push(finding({ title: "No X-Frame-Options header or CSP frame-ancestors: other sites can frame the page", category: "headers", severity: "medium", cwe: "CWE-1021", confidence: 8, endpoint, evidence: "no X-Frame-Options header and no frame-ancestors in the CSP", impact: "The page can be framed by another site (clickjacking).", fix: "Add X-Frame-Options: DENY, or frame-ancestors 'none' in the CSP.", testIdea: "Framing is refused by a header.", anchor: "header:frame-options" }, redact));
+  if (String(headerVal(res, "x-content-type-options") || "").toLowerCase() !== "nosniff") out.push(finding({ title: "No X-Content-Type-Options: nosniff header", category: "headers", severity: "low", cwe: "CWE-16", confidence: 8, endpoint, evidence: "no X-Content-Type-Options: nosniff header", impact: "A browser may guess a response's type and treat it as something executable.", fix: "Add X-Content-Type-Options: nosniff.", testIdea: "The response sets X-Content-Type-Options: nosniff.", anchor: "header:x-content-type-options" }, redact));
+  if (!has("referrer-policy")) out.push(finding({ title: "No Referrer-Policy header", category: "headers", severity: "low", cwe: "CWE-200", confidence: 7, endpoint, evidence: "no Referrer-Policy header", impact: "Full URLs may leak to other sites through the Referer header.", fix: "Add a Referrer-Policy such as strict-origin-when-cross-origin.", testIdea: "The response sets a Referrer-Policy.", anchor: "header:referrer-policy" }, redact));
   return out;
 }
 
@@ -324,6 +325,7 @@ export function checkCookies(res, endpoint, isHttps, redact) {
     if (isHttps && !/;\s*secure/.test(flags)) missing.push("Secure");
     if (!/;\s*samesite=/.test(flags)) missing.push("SameSite");
     if (missing.length) out.push(finding({
+      title: `Cookie ${maskValue(name)} is missing the ${missing.join(", ")} flag${missing.length === 1 ? "" : "s"}`,
       category: "cookies", severity: missing.includes("HttpOnly") ? "medium" : "low", cwe: "CWE-1004", confidence: 8,
       endpoint, evidence: `cookie ${maskValue(name)} is missing ${missing.join(", ")}`,
       impact: "A session cookie without these flags is easier to steal or misuse.",
@@ -339,13 +341,13 @@ export function checkCors(res, endpoint, probedOrigin, redact) {
   const acac = String(headerVal(res, "access-control-allow-credentials") || "").toLowerCase() === "true";
   const out = [];
   if (acao && acao === probedOrigin && acac) {
-    out.push(finding({ category: "cors", severity: "high", cwe: "CWE-942", confidence: 8, endpoint,
+    out.push(finding({ title: "CORS lets any site read responses with the visitor's credentials (the request Origin is reflected)", category: "cors", severity: "high", cwe: "CWE-942", confidence: 8, endpoint,
       evidence: `the response reflected the request Origin (${probedOrigin}) in Access-Control-Allow-Origin with Allow-Credentials: true`,
       impact: "Any site can make credentialed cross-origin requests and read the responses.",
       fix: "Allow only a fixed list of trusted origins, and never reflect the request Origin while allowing credentials.",
       testIdea: "A request with an untrusted Origin is not reflected with credentials allowed.", anchor: "cors:reflected-origin" }, redact));
   } else if (acao === "*" && acac) {
-    out.push(finding({ category: "cors", severity: "high", cwe: "CWE-942", confidence: 8, endpoint,
+    out.push(finding({ title: "CORS allows any origin (*) together with credentials", category: "cors", severity: "high", cwe: "CWE-942", confidence: 8, endpoint,
       evidence: "Access-Control-Allow-Origin is * with Allow-Credentials: true",
       impact: "A wildcard origin with credentials exposes authenticated responses to any site.",
       fix: "Do not combine a wildcard origin with credentials; allow a fixed list of origins instead.",
@@ -365,7 +367,7 @@ export async function checkExposedFiles({ base, allow, fetchImpl, logFile, redac
     const r = await guardedFetch({ url: base + e.path, allow, fetchImpl, logFile });
     if (r.refused || r.error || !r.res) continue;
     if (r.res.status === 200 && e.sig.test(r.bodyText || "")) {
-      out.push(finding({ category: "exposure", severity: "high", cwe: e.cwe, confidence: 8, endpoint: base + e.path,
+      out.push(finding({ title: `${e.what[0].toUpperCase()}${e.what.slice(1)} is served at ${e.path}`, category: "exposure", severity: "high", cwe: e.cwe, confidence: 8, endpoint: base + e.path,
         evidence: `${e.path} is served (status 200 and looks like ${e.what})`,
         impact: "A sensitive file is reachable over HTTP, exposing source history or configuration.",
         fix: `Stop serving ${e.path}: block dotfiles at the web server, and keep ${e.what} out of the served root.`,
@@ -382,7 +384,7 @@ export async function checkExposedFiles({ base, allow, fetchImpl, logFile, redac
       if (isAllowed(mapUrl, allow)) {
         const mr = await guardedFetch({ url: mapUrl, allow, fetchImpl, logFile });
         if (mr.res && mr.res.status === 200 && /"sources"|"mappings"/.test(mr.bodyText || "")) {
-          out.push(finding({ category: "exposure", severity: "low", cwe: "CWE-540", confidence: 7, endpoint: mapUrl,
+          out.push(finding({ title: "A JavaScript source map is served", category: "exposure", severity: "low", cwe: "CWE-540", confidence: 7, endpoint: mapUrl,
             evidence: "a JavaScript source map is served in this environment",
             impact: "Source maps expose original source, which aids an attacker reading the client code.",
             fix: "Do not serve source maps in production builds.",
@@ -402,7 +404,7 @@ export async function checkVerboseErrors({ base, allow, fetchImpl, logFile, reda
   const probe = base + "/autoclaude-sweep-probe-%27%22%3C%3E";
   const r = await guardedFetch({ url: probe, allow, fetchImpl, logFile });
   if (r.res && ERROR_SIGNATURES.test(r.bodyText || "")) {
-    out.push(finding({ category: "errors", severity: "medium", cwe: "CWE-209", confidence: 7, endpoint: probe,
+    out.push(finding({ title: "Error responses show a stack trace or a server file path", category: "errors", severity: "medium", cwe: "CWE-209", confidence: 7, endpoint: probe,
       evidence: `the error response leaks a stack trace or file path (status ${r.res.status})`,
       impact: "Verbose errors disclose internal structure, file paths and library versions.",
       fix: "Return a generic error page in this environment and log the detail server-side only.",
@@ -425,13 +427,13 @@ export async function checkAuthBypass({ base, map, allow, fetchImpl, logFile, re
     const location = r.location || "";
     const toLogin = status >= 300 && status < 400 && /login|signin|sign-in|auth/i.test(location);
     if (status === 200) {
-      out.push(finding({ category: "authz", severity: "high", cwe: "CWE-862", confidence: 6, endpoint: url,
+      out.push(finding({ title: `${route} answers without a login`, category: "authz", severity: "high", cwe: "CWE-862", confidence: 6, endpoint: url,
         evidence: `${route} answered with 200 and no credentials`,
         impact: "A route the app map marks as protected is reachable without logging in.",
         fix: "Require and check authentication on this route before serving it.",
         testIdea: "The route returns 401 or redirects to login without a session.", anchor: `authz:${String(route).toLowerCase()}` }, redact));
     } else if (!toLogin && status !== 401 && status !== 403 && status < 500 && status !== 404) {
-      out.push(finding({ category: "authz", severity: "medium", cwe: "CWE-862", confidence: 4, endpoint: url,
+      out.push(finding({ title: `${route} may answer without a login (status ${status})`, category: "authz", severity: "medium", cwe: "CWE-862", confidence: 4, endpoint: url,
         evidence: `${route} answered with ${status} and no credentials (no login redirect, 401 or 403)`,
         impact: "A protected route may be partly reachable without a session.",
         fix: "Confirm this route requires authentication.",
@@ -456,7 +458,7 @@ export async function checkRateLimit({ base, map, allow, fetchImpl, logFile, red
     if (r.res.status === 429) { limited = true; break; }
   }
   if (answered >= attempts && !limited) {
-    return [finding({ category: "rate-limit", severity: "medium", cwe: "CWE-307", confidence: 6, endpoint: url,
+    return [finding({ title: `No rate limit on the login route ${loginPath}`, category: "rate-limit", severity: "medium", cwe: "CWE-307", confidence: 6, endpoint: url,
       evidence: `${attempts} rapid failed login attempts, none answered with 429`,
       impact: "No rate limit on login allows credential stuffing and brute-force attacks.",
       fix: "Add rate limiting or lockout on repeated failed login attempts.",

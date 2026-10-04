@@ -29,6 +29,10 @@ const env = gitEnv({ ...process.env, PATH: `${path.dirname(process.execPath)}${p
 // Every check appends to one file, so the fake clock can move with the checks that ran.
 const counting = (name, extra = {}) => ({ name, command: `${node} -e "require('fs').appendFileSync('.autoclaude/check-runs','x')"`, timeoutSec: 60, ...extra });
 const FAIL = { name: "unit", command: `${node} -e "console.log('boom'); process.exit(1)"`, timeoutSec: 60 };
+// Counted the same way, and scripted by run: it fails on the runs numbered in `fail` (1 is its
+// first run), printing "flaky boom on run <n>", and passes on the others.
+const scripted = (name, fail, extra = {}) => ({ name, command: `${node} -e "const f=require('fs'),p='.autoclaude/runs-${name}';f.appendFileSync('.autoclaude/check-runs','x');f.appendFileSync(p,'x');const n=f.readFileSync(p,'utf8').length;if([${fail.join(",")}].includes(n)){console.log('flaky boom on run '+n);process.exit(1)}"`, timeoutSec: 60, ...extra });
+const runsOf = (root, name) => { try { return fs.readFileSync(path.join(root, ".autoclaude", `runs-${name}`), "utf8").length; } catch { return 0; } };
 
 const FEATURES = "# Features plan\n\n## Phase 1: Lists\n- [ ] **S1.1** One\n  - Accept: the page shows one\n  - Tags: ui\n- [ ] **S1.2** Two\n  - Accept: the page shows two\n  - Tags: ui\n- [ ] **S1.3** Three\n  - Accept: the store counts three\n  - Test: test/todos.test.js\n  - Tags: no-ui\n\n## Phase 2: More\n- [ ] **S2.1** Four\n  - Accept: the page shows four\n  - Tags: ui\n- [ ] **S2.2** Five\n  - Accept: the page shows five\n  - Tags: ui\n\n## Phase 3: Store\n- [ ] **S3.1** Six\n  - Accept: the store keeps six\n  - Test: test/todos.test.js\n  - Tags: no-ui\n";
 
@@ -724,4 +728,95 @@ test("a step's second run of the checks with its findings filed is staged too: c
   assert.match(shown, /late\.js/);
   assert.match(git(root, "log", "-1", "--format=%B").stdout, /\n- a \(with the findings filed\): passed in \d+ s\n- b \(with the findings filed\): passed in \d+ s\n/);
   assert.ok(treeClean(root));
+});
+
+// ---------- a failed check's rerun, staged (P10.14, D62) ----------
+
+const RERUN_CARRIED = /check "(\w+)" failed: it runs once more in the next stop before it counts \(one that passes then is a flaky check, not a failure\), then the browser tester, the bug bash and the security review\. No attempt was counted\. End your turn now without changing anything: the next stop carries on from here/;
+
+test("a failed check whose rerun does not fit in what is left of the stop is carried over with its first failure kept, never counted, even as the stop's first part: the next stop's run is the rerun, and a pass there is flaky", async () => {
+  // After another part: a and b take 700 s each, and b is expected to need 875 s (700 s and a
+  // quarter), so its rerun does not fit in the 340 s left after a and b's first run.
+  let root = scratch({ checks: [counting("a"), scripted("b", [1], { timeoutSec: 900 })] });
+  let h = harness(root, {}, {}, { readCheckTimes: () => ({ b: { recentMs: [700000], medianMs: 700000 } }) });
+  await build(h, ["S1.1", "S1.2"]);
+  let r = await h.ready("S1.3");
+  assert.equal(r.decision, "block", JSON.stringify(r.events));
+  assert.match(r.reason, new RegExp(`^The verification of Phase 1 \\(Lists\\) goes on in the next turn: check "a" is done, and ${RERUN_CARRIED.source}`));
+  assert.ok(types(r).includes("staged") && types(r).includes("check-rerun"));
+  let s = loadState(root);
+  assert.deepEqual([s.verifying.done, s.verifying.left, s.verifying.rerun.key, s.verifying.rerun.first.reason], [["check:0:a"], ["check:1:b", "tester", "bugbash", "security"], "check:1:b", "exit code 1"]);
+  assert.match(s.verifying.rerun.first.tail, /flaky boom on run 1/);
+  assert.deepEqual([s.attempts["S1.3"] || 0, s.outOfTime["S1.3"] || 0, markers(root), runsOf(root, "b")], [0, 0, "xxx   ", 1]);
+  assert.match(fs.readFileSync(path.join(root, ".autoclaude", "logs", "gate.log"), "utf8"), /check "b" failed \(exit code 1\), and its rerun is expected to need 875 s, with 340 s of this stop left; check "b", the browser tester, the bug bash and the security review carried to the next stop/);
+  r = await h.stop();
+  assert.match(r.reason, /^Phase 1 \(Lists\) verified and committed/, JSON.stringify(r.events));
+  assert.equal(runsOf(root, "b"), 2, "its first run in the earlier stop, its rerun in this one");
+  assert.deepEqual(h.calls, ["tester:S1.3[S1.1,S1.2]", "security:S1.3", "bugbash:S1.3"]);
+  assert.match(git(root, "log", "-1", "--format=%B").stdout, /\nChecks:\n- a: passed in \d+ s\n- b: passed in \d+ s \(flaky: passed on a rerun\)\n/);
+  const report = fs.readFileSync(path.join(root, ".autoclaude", "reports", "S1.3-1.md"), "utf8");
+  assert.match(report, /\n## Check "b": passed on a rerun \(FLAKY\)\n[\s\S]*flaky boom on run 1\n[\s\S]*ran over 2 stops/);
+  s = loadState(root);
+  assert.deepEqual([s.verifying, s.attempts["S1.3"], s.outOfTime["S1.3"]], [null, 0, 0]);
+  assert.deepEqual(s.flakyChecks.map((e) => [e.name, e.step, e.phase, e.feature, e.stage]), [["b", "S1.3", 1, true, "verify"]]);
+  assert.ok(treeClean(root));
+
+  // The stop's first part: b alone, expected to need 1500 s; its first run takes 1200 s, and its
+  // rerun does not fit in the 540 s left. Carried over too: not out of time.
+  root = scratch({ checks: [scripted("b", [1], { timeoutSec: 1700 })] });
+  h = harness(root, {}, {}, { readCheckTimes: () => ({ b: { recentMs: [1200000], medianMs: 1200000 } }) }, { perCheck: 1200 });
+  await build(h, ["S1.1", "S1.2"]);
+  r = await h.ready("S1.3");
+  assert.match(r.reason, new RegExp(`^The verification of Phase 1 \\(Lists\\) goes on in the next turn: ${RERUN_CARRIED.source}`), JSON.stringify(r.events));
+  s = loadState(root);
+  assert.deepEqual([s.verifying.done, s.verifying.rerun.key, s.outOfTime["S1.3"] || 0, s.attempts["S1.3"] || 0], [[], "check:0:b", 0, 0]);
+  r = await h.stop();
+  assert.match(r.reason, /^Phase 1 \(Lists\) verified and committed/, JSON.stringify(r.events));
+  assert.equal(runsOf(root, "b"), 2);
+  assert.match(git(root, "log", "-1", "--format=%B").stdout, /\nChecks:\n- b: passed in \d+ s \(flaky: passed on a rerun\)\n/);
+
+  // The rerun is expected to fit (c expects its timeoutSec, 9 s) but finds 9.5 s, less than the
+  // 10 s a check is started with: carried over too, never out of time.
+  root = scratch({ checks: [counting("a"), scripted("c", [1], { timeoutSec: 9 })] });
+  h = harness(root, {}, {}, {}, { perCheck: 865.25 });
+  await build(h, ["S1.1", "S1.2"]);
+  r = await h.ready("S1.3");
+  assert.match(r.reason, new RegExp(`^The verification of Phase 1 \\(Lists\\) goes on in the next turn: check "a" is done, and ${RERUN_CARRIED.source}`), JSON.stringify(r.events));
+  assert.match(fs.readFileSync(path.join(root, ".autoclaude", "logs", "gate.log"), "utf8"), /check "c" failed \(exit code 1\), and its rerun had too little of this stop left to start/);
+  assert.deepEqual([loadState(root).verifying.rerun.key, loadState(root).outOfTime["S1.3"] || 0, runsOf(root, "c")], ["check:1:c", 0, 1]);
+  r = await h.stop();
+  assert.match(r.reason, /^Phase 1 \(Lists\) verified and committed/, JSON.stringify(r.events));
+  assert.match(git(root, "log", "-1", "--format=%B").stdout, /\n- c: passed in \d+ s \(flaky: passed on a rerun\)\n/);
+});
+
+test("a rerun carried to the next stop that fails again is one attempt, as any failure; one that runs out of time there, as the stop's first part, is out of time", async () => {
+  const start = (fail) => {
+    const root = scratch({ checks: [scripted("b", fail, { timeoutSec: 1700 })] });
+    return { root, h: harness(root, {}, {}, { readCheckTimes: () => ({ b: { recentMs: [1200000], medianMs: 1200000 } }) }, { perCheck: 1200 }) };
+  };
+  let { root, h } = start([1, 2]);
+  await build(h, ["S1.1", "S1.2"]);
+  let r = await h.ready("S1.3");
+  assert.match(r.reason, RERUN_CARRIED, JSON.stringify(r.events));
+  r = await h.stop();
+  assert.equal(r.decision, "block", JSON.stringify(r.events));
+  assert.match(r.reason, /^Phase 1 \(Lists\), verified at S1\.3, attempt 1\/3 failed: check "b" failed\./);
+  assert.match(r.reason, /It failed \(exit code 1\), was run once more right away, and failed again: a real failure, not a flaky check\./);
+  assert.equal(runsOf(root, "b"), 2);
+  let s = loadState(root);
+  assert.deepEqual([s.attempts["S1.3"], s.outOfTime["S1.3"] || 0, s.verifying, s.flakyChecks, markers(root)], [1, 0, null, undefined, "~~    "]);
+  assert.deepEqual(h.calls, [], "nothing started after the failed check");
+
+  // The rerun's stop has 5 s left once it begins, too little to start it: out of time, since it
+  // is that stop's first part, and the ticks come out.
+  ({ root, h } = start([1]));
+  await build(h, ["S1.1", "S1.2"]);
+  r = await h.ready("S1.3");
+  assert.match(r.reason, RERUN_CARRIED, JSON.stringify(r.events));
+  const late = () => { let n = 0; const at = T0 + 900 * 3600000; return () => at + (n++ === 0 ? 0 : 1735000); };
+  r = await h.stop({ clock: late() });
+  assert.match(r.reason, /^The verification of Phase 1 \(Lists\) ran out of time: check "b" ran out of the gate's time/, JSON.stringify(r.events));
+  s = loadState(root);
+  assert.deepEqual([s.outOfTime["S1.3"], s.attempts["S1.3"] || 0, s.verifying, markers(root), runsOf(root, "b")], [1, 0, null, "~~    ", 1]);
+  assert.match(fs.readFileSync(path.join(root, ".autoclaude", "logs", "gate.log"), "utf8"), /check "b" failed \(exit code 1\), and its rerun ran out of the gate's time/);
 });

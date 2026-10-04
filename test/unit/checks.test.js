@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { runChecks, tailLines, TAIL_LINES, DEFAULT_CHECK_TIMEOUT_SEC, isGitBashOnlyDir, withoutGitBashDirs, checksEnv, recordRunEnv, readRunEnv, runEnvFile, describeChecksEnv, recordCheckTimes, readCheckTimes, checkTimesFile, medianOf, RECENT_RUNS } from "../../plugins/autoclaude/lib/checks.js";
+import { runChecks, tailLines, TAIL_LINES, DEFAULT_CHECK_TIMEOUT_SEC, isGitBashOnlyDir, withoutGitBashDirs, checksEnv, recordRunEnv, readRunEnv, runEnvFile, describeChecksEnv, recordCheckTimes, readCheckTimes, checkTimesFile, medianOf, RECENT_RUNS, rerunWanted, failureBrief, FLAKY_TAIL_LINES } from "../../plugins/autoclaude/lib/checks.js";
 
 const node = JSON.stringify(process.execPath);
 const passing = (name = "pass") => ({ name, command: `${node} -e "console.log('ok from ${name}')"`, timeoutSec: 60 });
@@ -135,6 +135,34 @@ test("runChecks with no checks passes with an empty result list", async () => {
   assert.deepEqual(r, { ok: true, results: [], failed: null });
   const r2 = await runChecks(undefined);
   assert.equal(r2.ok, true);
+});
+
+// ---------- flaky checks (P10.14, D62) ----------
+
+test("rerunWanted: only a check that ran and exited non-zero is run again; not one that did not run, hit its own timeout or was stopped at the gate's deadline", async () => {
+  const failed = (await runChecks([failing("f")])).failed;
+  assert.equal(rerunWanted(failed), true, "a non-zero exit");
+  const hung = (await runChecks([slow()])).failed;
+  assert.deepEqual([hung.ran, hung.timedOut, hung.outOfTime, rerunWanted(hung)], [true, true, false, false], "its own timeoutSec, all used up");
+  assert.equal(rerunWanted((await runChecks([passing()])).results[0]), false, "a pass");
+  assert.equal(rerunWanted((await runChecks([{ ...passing("e2e"), needsDevServer: true }])).failed), false, "no dev server: did not run");
+  assert.equal(rerunWanted((await runChecks([passing("late")], { deadlineMs: Date.now() + 2000 })).failed), false, "no time left to start");
+  const cut = (await runChecks([{ ...slow("long"), timeoutSec: 600 }], { deadlineMs: Date.now() + 1500, minMs: 500 })).failed;
+  assert.deepEqual([cut.ran, cut.outOfTime, rerunWanted(cut)], [true, true, false], "stopped at the gate's deadline");
+  const missing = path.join(os.tmpdir(), "autoclaude-definitely-missing-dir-" + process.pid);
+  assert.equal(rerunWanted((await runChecks([passing("nocwd")], { cwd: missing })).failed), false, "could not start");
+  assert.equal(rerunWanted({ ...failed, skipped: true }), false);
+  assert.equal(rerunWanted(null), false);
+});
+
+test("failureBrief keeps what the report of a flaky check needs, small enough for the run state: the reason, the time and the last 20 lines", () => {
+  assert.equal(FLAKY_TAIL_LINES, 20);
+  const tail = Array.from({ length: 40 }, (_, i) => `line ${i + 1}`).join("\n");
+  const b = failureBrief({ name: "unit", command: "npm test", ran: true, ok: false, code: 1, timedOut: false, durationMs: 4200, reason: "exit code 1", tail, stdout: "x".repeat(100000), stderr: "y" });
+  assert.deepEqual(b, { name: "unit", command: "npm test", code: 1, timedOut: false, durationMs: 4200, reason: "exit code 1", tail: Array.from({ length: 20 }, (_, i) => `line ${i + 21}`).join("\n") });
+  // A result with no reason or tail of its own still says why, and keeps the output's last lines.
+  assert.deepEqual(failureBrief({ name: "e2e", ran: true, ok: false, code: null, timedOut: true, stdout: "a\nb\n", stderr: "c" }), { name: "e2e", command: null, code: null, timedOut: true, durationMs: 0, reason: "timed out", tail: "a\nb\nc" });
+  assert.equal(failureBrief({ name: "x", code: 3 }).reason, "exit code 3");
 });
 
 test("a check without timeoutSec runs under the 900 s default instead of no limit", async () => {

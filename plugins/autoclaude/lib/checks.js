@@ -109,12 +109,44 @@ function joinOutput(stdout, stderr) {
   return out.endsWith("\n") ? out + err : `${out}\n${err}`;
 }
 
+// ---------- flaky checks (P10.14, D62) ----------
+// The gate runs a check that failed once more before it counts the failure: one that passes
+// then counts as passed and is reported as flaky. `autoclaude checks` runs every check once and
+// shows what it got.
+
+// The last lines of a failed run kept for the report when the rerun passes.
+export const FLAKY_TAIL_LINES = 20;
+
+// A check that failed for real: it ran and exited non-zero. Not one that did not run (no dev
+// server, could not start, no time left) or was stopped at the gate's deadline, which says
+// nothing about the check, and not one that hit its own timeoutSec: it has used all of it, and a
+// rerun would take as long again.
+export function rerunWanted(result) {
+  return !!(result && result.ran && !result.ok && !result.outOfTime && !result.timedOut && !result.skipped);
+}
+
+// What the gate keeps of a failed first run while its rerun goes on, in this stop or the next:
+// small enough for the run state.
+export function failureBrief(result, n = FLAKY_TAIL_LINES) {
+  const r = result || {};
+  return {
+    name: r.name || null,
+    command: r.command || null,
+    code: r.code ?? null,
+    timedOut: !!r.timedOut,
+    durationMs: Number.isFinite(r.durationMs) ? r.durationMs : 0,
+    reason: r.reason || (r.timedOut ? "timed out" : `exit code ${r.code ?? "none"}`),
+    tail: tailLines(r.tail || joinOutput(r.stdout, r.stderr), n)
+  };
+}
+
 // ---------- check times (P10.13, D60) ----------
 // Every verification and `autoclaude checks` record how long each check took, so the phase
 // estimates (lib/estimate.js) use this computer's real times instead of each check's timeoutSec.
 // Kept per check name: the last RECENT_RUNS times and their median. Only passed runs count: a
 // failing run may have stopped early (a compile error, a runner that bails), and one stopped by a
-// timeout or the gate's deadline says only that the check needs longer, not how long. The file
+// timeout or the gate's deadline says only that the check needs longer, not how long. Of a check
+// that failed and then passed on its rerun, the gate hands in only the passing run. The file
 // lives in .autoclaude/, so it stays on this computer, whose speed it describes.
 
 export const CHECK_TIMES_FILE = "check-times.json";

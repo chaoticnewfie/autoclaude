@@ -13,6 +13,7 @@ import {
 } from "../../plugins/autoclaude/lib/sweep.js";
 import { WRAP_UP_PROMPT } from "../../plugins/autoclaude/lib/headless.js";
 import { pluginRoot } from "../../plugins/autoclaude/lib/paths.js";
+import * as findingsLib from "../../plugins/autoclaude/lib/findings.js";
 
 function tmp(prefix = "ac-sweep-") {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -924,6 +925,46 @@ test("the three-proof rule binds session candidates: an unused file or package n
   assert.equal(tierOf("lib/util.js"), "A");
   assert.ok(store.coverage.notExamined.some((n) => /^1 unused file or package candidate from the review sessions: not deleted automatically/.test(n)));
   assert.deepEqual(unusedProofs(sp).files, new Set(["lib/util.js"]));
+});
+
+// P10.14: the live proof listed lib/legacy.js twice (knip's whole-file hit and a reviewer's line
+// 1) and the formatList copy twice (once from each end). The merge stage, with the real findings
+// helpers, makes each one finding.
+test("the merge stage makes a whole-file scanner hit and a reviewer's line in that file one finding, and a copy seen from both ends one finding naming both", async () => {
+  const root = makeProject();
+  const run = recordingRun({}, async ({ role }) => {
+    if (role === "sweep-area-src") {
+      return okResult({ findings: [
+        { category: "unused-file", title: "Delete unused lib/util.js", severity: "low", file: "lib/util.js", line: 1, evidence: "export const util = 2; is imported nowhere", impact: "dead", fix: "git rm lib/util.js", testIdea: "t", confidence: 9, tier: "A" },
+        { category: "duplicate", title: "src/app.js repeats the constant of lib/util.js", severity: "low", file: "src/app.js", line: 1, evidence: "src/app.js:1 has the same constant as lib/util.js:1", impact: "i", fix: "f", testIdea: "t", confidence: 6, tier: "B" },
+        { category: "duplicate", title: "lib/util.js is copied in src/app.js", severity: "low", file: "lib/util.js", line: 1, evidence: "lib/util.js:1 is repeated at src/app.js:1", impact: "i", fix: "f", testIdea: "t", confidence: 6, tier: "B" }
+      ], coverage: { examined: ["src"], notExamined: [] }, notes: "" });
+    }
+    if (/^sweep-area-/.test(role)) return okResult({ findings: [], coverage: { examined: [role], notExamined: [] }, notes: "" });
+    return null;
+  });
+  const knipHit = { kind: "optimize", title: "lib/util.js is not used anywhere", category: "unused-file", severity: "low", confidence: 7, file: "lib/util.js", line: 0, tier: "A", autoFixSafe: true, tool: "knip 6.39.0 + reference search",
+    evidence: "knip flags the file as unused; a search of the whole repository finds no reference to it, and it matches no entry-point convention.", impact: "1 line read for nothing.", fix: "Delete the file (git keeps the history).", testIdea: "t" };
+  const { result, sp } = await startAndRun(root, "optimize", { modules: ["unused", "duplicates"], depth: "quick", after: "report" }, {
+    run,
+    dedupe: findingsLib.dedupe, loadAccepted: findingsLib.loadAccepted, applyAccepted: findingsLib.applyAccepted, numberFindings: findingsLib.numberFindings,
+    recordBaseline: async () => ({ version: 1, checksGreen: true, coverage: { examined: [], notExamined: [] } }),
+    runOptimizeScanners: async ({ sweepDir }) => {
+      fs.writeFileSync(path.join(sweepDir, "scanners", "unused.json"), JSON.stringify({ files: { kept: ["lib/util.js"], dropped: [] }, exports: { kept: [], dropped: [] }, dependencies: { kept: [], dropped: [] } }));
+      return { candidates: [knipHit], coverage: { examined: [], notExamined: [] }, leads: [] };
+    }
+  });
+  assert.equal(result.status, "done", result.error);
+  const store = JSON.parse(fs.readFileSync(sp.storeFile, "utf8"));
+  assert.equal(store.findings.length, 2, JSON.stringify(store.findings.map((f) => [f.id, f.category, f.file, f.line])));
+  const unused = store.findings.find((f) => f.category === "unused-file");
+  assert.deepEqual([unused.file, unused.line, unused.title, unused.tier], ["lib/util.js", 1, "Delete unused lib/util.js", "A"]);
+  assert.deepEqual(unused.sources.sort(), ["scanner optimize", "session area-src"]);
+  assert.equal(unused.fingerprints.length, 2);
+  const copy = store.findings.find((f) => f.category === "duplicate");
+  assert.deepEqual(copy.locations, [{ file: "lib/util.js", line: 1 }, { file: "src/app.js", line: 1 }]);
+  assert.equal(copy.fingerprints.length, 2);
+  assert.match(fs.readFileSync(path.join(sp.dir, "sweep.log"), "utf8"), /merge: 4 candidate\(s\) -> 2 after dedupe/);
 });
 
 test("fix right away with a check that needs the dev server: the sweep starts it for the green-baseline test, or leaves only that check out with a note", async () => {

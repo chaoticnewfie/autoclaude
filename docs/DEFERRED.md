@@ -311,3 +311,18 @@ counts as a dead window the watchdog reopens; `autoclaude sweep-stop` is the way
 session reports back, and run the browser output folder through the masker; (3) an
 `autoclaude run --drop-plan`; (4) mark a sweep stopped on SIGINT/SIGBREAK in sweep-run.
 **No rework.** All four are local to sweep.js, cli.js or tester.js.
+
+## 24. Duplicates the sweep's merge still misses
+
+**What.** Seen in the P10.12 proof after the P10.14 merge rules: the same problem as two
+whole-file findings in different categories (".gitignore does not cover .env" as secrets and as
+config), a package reported in both package-lock.json and package.json, and code copied to three
+places (only pairs merge).
+**Why it waits.** Each is shown once more than needed, never lost or wrongly fixed, and loosening
+the merge risks folding genuinely different problems together.
+**Trigger.** A real report where these repeats get in the way.
+**Path.** Category groups for the whole-file rule (secrets/config for ignore-file findings), the
+lockfile and manifest as one place for package findings, and clusters instead of pairs for
+duplicate code (findings.js dedupe).
+**No rework.** The merge already runs in three passes over the same list; each is a new pass or a
+wider match.

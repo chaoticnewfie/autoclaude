@@ -329,7 +329,9 @@ export function canonicalCategory(category, kind = "security") {
 //   - else, for a session's finding with a file (one that names no line in it, or a file that
 //     cannot be read, such as a URL path): the file alone;
 //   - else (no root, or a scanner's finding with no line in a readable file) the normalized
-//     evidence, then the title: deterministic checks write fixed text there.
+//     evidence, then the title: deterministic checks write fixed text there. A scanner's title
+//     never counts: scanners wrote none before P10.14, and the one they write now is generated
+//     text, so adding it changed no fingerprint.
 
 const MAX_ANCHOR_FILE = 2 * 1024 * 1024;
 const URL_FILE = /^[a-z][a-z0-9+.-]*:\/\//i;
@@ -449,7 +451,7 @@ export function anchorOf(finding, { root = null, cache = null } = {}) {
   }
   // A session's finding the code cannot place: the file it names is all that stays put.
   if (root && !exact && normFile(f.file)) return "file:";
-  return `text:${normalizeEvidence(f.evidence) || normalizeEvidence(f.title) || `line ${Number(f.line) || 0}`}`;
+  return `text:${normalizeEvidence(f.evidence) || (exact ? "" : normalizeEvidence(f.title)) || `line ${Number(f.line) || 0}`}`;
 }
 
 // The canonical category, the file and a hash of the anchor, as one opaque hash: it says nothing
@@ -566,17 +568,25 @@ export function sortFindings(findings) {
   return [...(findings || [])].sort(compareFindings);
 }
 
-// Findings reported more than once (two sessions, or a scanner and a session) become one: the
-// same fingerprint, or the same kind, canonical category (canonicalCategory) and file with lines
-// at most NEAR_LINES apart. The
-// strongest report is kept (severity, then confidence), with the highest confidence of the group
-// and every source that found it in `sources`. Every member's fingerprint is kept in
-// `fingerprints` (the kept one first), so an accepted entry made from any of them still matches
-// (applyAccepted). With { kind } (and root) every finding is first normalized (normalizeFinding):
-// raw candidates from sessions and scanners go in as they came.
+// Findings reported more than once (two sessions, or a scanner and a session) become one, in
+// three passes:
+//   1. the same fingerprint, or the same kind, canonical category (canonicalCategory) and file
+//      with lines at most NEAR_LINES apart;
+//   2. a report about a whole file (line 0) and one that names a line in that file, of one kind
+//      and canonical category (mergeFileLevel): the line's report is kept, it is the specific one;
+//   3. a duplicate-code pair reported from each of its two places (mergeClonePairs): one finding
+//      whose `locations` name both.
+// Pass 1 keeps the strongest report (severity, then confidence). Every merge keeps the highest
+// confidence of the group and every source that found it in `sources`, and every member's
+// fingerprint in `fingerprints` (the kept one first), so an accepted entry made from any of them
+// still matches (applyAccepted). No fingerprint is changed by a merge. With { kind } (and root)
+// every finding is first normalized (normalizeFinding): raw candidates from sessions and scanners
+// go in as they came.
 export function dedupe(findings, { kind = null, root = null } = {}) {
   const out = [];
-  const cats = []; // the canonical category of each entry of out
+  // Per entry of out: its canonical category, and whether a scanner reported it (or any report
+  // merged into it).
+  const info = [];
   const cache = new Map();
   for (const raw of findings || []) {
     if (!raw || typeof raw !== "object") continue;
@@ -584,19 +594,173 @@ export function dedupe(findings, { kind = null, root = null } = {}) {
     const srcs = [...(Array.isArray(f.sources) ? f.sources : []), ...(f.source ? [f.source] : [])];
     const fps = fingerprintsOf(f);
     const cat = canonicalCategory(f.category, f.kind);
+    const scanner = srcs.some(isScannerSource);
     const i = out.findIndex((g, j) => (g.kind || null) === (f.kind || null) && (g.fingerprints.some((x) => fps.includes(x)) || (
-      cats[j] === cat && normFile(g.file) === normFile(f.file) && normFile(f.file) !== ""
+      info[j].cat === cat && normFile(g.file) === normFile(f.file) && normFile(f.file) !== ""
       && Number(g.line) > 0 && Number(f.line) > 0 && Math.abs(Number(g.line) - Number(f.line)) <= NEAR_LINES)));
-    if (i < 0) { out.push({ ...f, sources: [...new Set(srcs)], fingerprints: fps }); cats.push(cat); continue; }
+    if (i < 0) { out.push({ ...f, sources: [...new Set(srcs)], fingerprints: fps }); info.push({ cat, scanner }); continue; }
     const g = out[i];
     const sources = [...new Set([...(g.sources || []), ...srcs])];
     const confidence = Math.max(Number(g.confidence) || 0, Number(f.confidence) || 0);
     const kept = compareFindings(f, g) < 0 ? f : g;
     const fingerprints = [...new Set([String(kept.fingerprint).toLowerCase(), ...g.fingerprints, ...fps])];
     out[i] = { ...kept, confidence, sources, fingerprints };
-    cats[i] = canonicalCategory(kept.category, kept.kind);
+    info[i] = { cat: canonicalCategory(kept.category, kept.kind), scanner: info[i].scanner || scanner };
+  }
+  mergeFileLevel(out, info);
+  mergeClonePairs(out, info);
+  return out;
+}
+
+const isScannerSource = (s) => /^scanner\b/i.test(String(s || ""));
+const lineOf = (f) => (Number(f && f.line) > 0 ? Math.floor(Number(f.line)) : 0);
+const sameFile = (a, b) => normFile(a.file).toLowerCase() === normFile(b.file).toLowerCase();
+// A project file, not a URL a live check names (a URL has no lines to compare).
+const projectFile = (f) => { const s = normFile(f && f.file); return s !== "" && !URL_FILE.test(s); };
+const escapeRe = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+const textOf = (f, keys) => keys.map((k) => f[k]).filter((t) => typeof t === "string" && t).join("\n");
+// Categories about a whole file by nature: two reports of one in a file are one problem.
+const WHOLE_FILE_CATEGORIES = new Set(["unused-file"]);
+
+// Where a text names a project file, with the lines it gives: "lib/format.js:3-4", "server.js:89",
+// "in lib/config.js line 2", "Dockerfile (lines 3 to 5)". [{ from, to }]; from is 0 for a mention
+// without a line. The path is matched whole: "server.js" is not in "test/helpers/server.js" or in
+// "server.json".
+export function fileMentions(text, file) {
+  const f = normFile(file);
+  if (!f || URL_FILE.test(f) || !text) return [];
+  const re = new RegExp(`(?<![\\w./-])(?:\\./)?${escapeRe(f)}(?![\\w-]|\\.\\w)(?::(\\d+)(?:\\s*[-–]\\s*(\\d+))?|,?\\s+\\(?lines?\\s+(\\d+)(?:\\s*(?:-|–|to)\\s*(\\d+))?)?`, "gi");
+  const out = [];
+  for (const m of String(text).replace(/\\/g, "/").matchAll(re)) {
+    const a = Number(m[1] || m[3]) || 0;
+    const b = Number(m[2] || m[4]) || a;
+    out.push({ from: Math.min(a, b), to: Math.max(a, b) });
   }
   return out;
+}
+
+const nearRange = (line) => (m) => m.from > 0 && line >= m.from - NEAR_LINES && line <= m.to + NEAR_LINES;
+
+// Whether a text points at a file near a line: a mention of the file whose lines take the line
+// in; any mention of it when no mention gives lines, or when the line is 0.
+function pointsAt(text, file, line) {
+  const ms = fileMentions(text, file);
+  if (!ms.length) return false;
+  const ranged = ms.filter((m) => m.from > 0);
+  return !ranged.length || !(line > 0) || ranged.some(nearRange(line));
+}
+
+// The package a scanner's advisory is about (its anchor pkg:<ecosystem>:<name>), else null.
+function packageOf(f) {
+  const m = /^pkg:[^:]+:(.+)$/i.exec(String((f && f.anchor) || "").trim());
+  return m ? m[1] : null;
+}
+const namesPackage = (text, name) => new RegExp(`(?<![\\w@/.-])${escapeRe(name)}(?![\\w-])`, "i").test(text);
+
+// The places a finding is about, [{ file, line }]: its own, or every place a merged duplicate-code
+// finding names.
+export function placesOf(f) {
+  const list = f && Array.isArray(f.locations) && f.locations.length ? f.locations : [f || {}];
+  const seen = new Set();
+  const out = [];
+  for (const p of list) {
+    const place = { file: normFile(p && p.file), line: lineOf(p) };
+    const key = `${place.file.toLowerCase()}:${place.line}`;
+    if (!seen.has(key)) { seen.add(key); out.push(place); }
+  }
+  return out;
+}
+
+// base with other merged in: the more severe severity, the highest confidence, every source and
+// every fingerprint (base's own first).
+function absorb(base, other, extra = {}) {
+  const severity = SEVERITY_RANK[severityOf(other.severity)] > SEVERITY_RANK[severityOf(base.severity)] ? other.severity : base.severity;
+  return {
+    ...base,
+    ...extra,
+    severity,
+    confidence: Math.max(Number(base.confidence) || 0, Number(other.confidence) || 0),
+    sources: [...new Set([...(Array.isArray(base.sources) ? base.sources : []), ...(Array.isArray(other.sources) ? other.sources : [])])],
+    fingerprints: [...new Set([...fingerprintsOf(base), ...fingerprintsOf(other)])]
+  };
+}
+
+function dropEntries(out, info, gone) {
+  for (const j of [...gone].sort((x, y) => y - x)) { out.splice(j, 1); info.splice(j, 1); }
+}
+
+// Pass 2: a report about a whole file (line 0) and one that names a line in it, of one kind and
+// canonical category, are one problem (the proof's knip "lib/legacy.js is unused" and a reviewer's
+// "delete lib/legacy.js" at line 1; gitleaks' key in lib/config.js's history and a reviewer's at
+// line 2). The line's report is kept (its place, title and text), with the more severe severity.
+// Never merged:
+//   - two scanner hits: a scanner does not repeat itself (another rule, header, package, commit),
+//     and its anchor already merged what was the same;
+//   - a whole-file report that names lines of its file elsewhere ("line 4"), with a line far
+//     from them;
+//   - two session reports, unless the whole-file one names that line or the category is about the
+//     whole file anyway (an unused file): two bugs in one file stay two;
+//   - a package advisory with a report that does not name the package;
+//   - anything ambiguous: a whole-file report that fits two lines, or a line two whole-file reports
+//     fit (two missing headers, two advisories).
+function mergeFileLevel(out, info) {
+  const whole = [];
+  const lined = [];
+  out.forEach((g, j) => { if (projectFile(g)) (lineOf(g) ? lined : whole).push(j); });
+  if (!whole.length || !lined.length) return;
+  // The lines each whole-file report names in its own file ("in lib/config.js line 2").
+  const hintsOf = new Map(whole.map((i) => [i, fileMentions(textOf(out[i], ["title", "evidence"]), out[i].file).filter((m) => m.from > 0)]));
+  const fits = (i, j) => {
+    const a = out[i];
+    const b = out[j];
+    if ((a.kind || null) !== (b.kind || null) || info[i].cat !== info[j].cat || !sameFile(a, b)) return false;
+    if (info[i].scanner && info[j].scanner) return false;
+    const hints = hintsOf.get(i);
+    if (hints.length && !hints.some(nearRange(lineOf(b)))) return false;
+    if (!info[i].scanner && !info[j].scanner && !hints.length && !WHOLE_FILE_CATEGORIES.has(info[i].cat)) return false;
+    for (const [x, y] of [[a, b], [b, a]]) {
+      const pkg = packageOf(x);
+      if (pkg && !namesPackage(textOf(y, ["title", "evidence", "fix"]), pkg)) return false;
+    }
+    return true;
+  };
+  const lines = new Map(whole.map((i) => [i, lined.filter((j) => fits(i, j))]));
+  const wholes = new Map(lined.map((j) => [j, whole.filter((i) => lines.get(i).includes(j))]));
+  const gone = new Set();
+  for (const i of whole) {
+    const js = lines.get(i);
+    if (js.length !== 1 || wholes.get(js[0]).length !== 1) continue;
+    const j = js[0];
+    out[j] = absorb(out[j], out[i]);
+    info[j] = { cat: info[j].cat, scanner: info[i].scanner || info[j].scanner };
+    gone.add(i);
+  }
+  dropEntries(out, info, gone);
+}
+
+// Pass 3: one duplicated piece of code reported from each of its two places (the proof's
+// "lib/format.js:2 is copied in server.js" and "server.js:89 re-implements lib/format.js"): two
+// duplicate-code findings in different files, each naming the other's file at (or near) the
+// other's line, or with no line. They become the stronger one, with `locations` naming both
+// places. A finding that fits more than one other is left alone.
+function mergeClonePairs(out, info) {
+  const dups = [];
+  out.forEach((g, j) => { if (info[j].cat === "duplicate" && projectFile(g)) dups.push(j); });
+  if (dups.length < 2) return;
+  const says = (g) => textOf(g, ["title", "evidence", "reproduce"]);
+  const partners = new Map(dups.map((a) => [a, dups.filter((b) => b !== a && (out[a].kind || null) === (out[b].kind || null) && !sameFile(out[a], out[b])
+    && pointsAt(says(out[a]), out[b].file, lineOf(out[b])) && pointsAt(says(out[b]), out[a].file, lineOf(out[a])))]));
+  const gone = new Set();
+  for (const a of dups) {
+    const p = partners.get(a);
+    if (gone.has(a) || p.length !== 1 || gone.has(p[0]) || partners.get(p[0]).length !== 1) continue;
+    const b = p[0];
+    const [keep, drop] = compareFindings(out[b], out[a]) < 0 ? [b, a] : [a, b];
+    out[keep] = absorb(out[keep], out[drop], { locations: placesOf({ locations: [...placesOf(out[keep]), ...placesOf(out[drop])] }) });
+    info[keep] = { cat: info[keep].cat, scanner: info[keep].scanner || info[drop].scanner };
+    gone.add(drop);
+  }
+  dropEntries(out, info, gone);
 }
 
 // SEC-001, SEC-002 ... (OPT- for optimize) in report order: most severe first.
@@ -704,7 +868,9 @@ const DEPTH_TEXT = {
 };
 
 const cell = (v) => String(v === null || v === undefined || v === "" ? "-" : v).replace(/\r?\n/g, " ").replace(/\|/g, "\\|");
-const where = (f) => `${f.file || "(no file)"}${Number(f.line) > 0 ? `:${f.line}` : ""}`;
+const placeText = (p) => `${p.file || "(no file)"}${p.line > 0 ? `:${p.line}` : ""}`;
+// Every place of a finding: one, or both of a merged duplicate-code finding.
+const where = (f) => placesOf(f).map(placeText).join(" and ");
 const cap = (s) => (s ? s[0].toUpperCase() + s.slice(1) : s);
 
 // A fence longer than any backtick run in the text, so evidence holding ``` stays one block.
@@ -765,7 +931,7 @@ function findingBlock(f, { kind, detail = true, fixable = true }) {
     kind === "security" ? ["CWE", f.cwe] : null,
     f.cvss ? ["CVSS", f.cvss] : null,
     f.fixedVersion ? ["Fixed version", f.fixedVersion] : null,
-    ["Where", `\`${where(f)}\``],
+    ["Where", placesOf(f).map((p) => `\`${placeText(p)}\``).join(" and ")],
     ["Area", areaOf(f)],
     ["Confidence", `${Number(f.confidence) || 0}/10`],
     verification(f) ? ["Verification", verification(f)] : null,
@@ -826,31 +992,213 @@ function coverageSection(coverage) {
   return L;
 }
 
-// The optimize baseline, whatever shape the scanner gave it: numbers and text as rows, lists of
-// records as tables, nested records with dotted names.
-function baselineSection(baseline) {
+// ---------- the optimize baseline, in plain words ----------
+//
+// The baseline as lib/scan-optimize.js records it (recordBaseline, recordBrowserBaseline): the
+// measures as rows, the checks, test file times, flaky tests, bundle and page timings as tables,
+// and what was not measured as a list. Times and sizes are written for people (4.2 s, 137 KB, a
+// UTC time), internal fields (version, envSource) are left out, and a measure that is missing says
+// "not checked" with the reason the baseline gave. A field of another shape is shown with its name
+// in words, so a newer or older baseline still reads.
+
+const BASELINE_INTERNAL = new Set(["version", "envSource"]);
+const MAX_BASELINE_ROWS = 200;
+const listOf = (v) => (Array.isArray(v) ? v : []);
+const isRecord = (v) => !!v && typeof v === "object" && !Array.isArray(v);
+const records = (v) => Array.isArray(v) && v.every(isRecord);
+
+function msText(v) {
+  const n = Number(v);
+  if (v === null || v === undefined || v === "" || !Number.isFinite(n)) return null;
+  if (n < 1000) return `${Math.round(n)} ms`;
+  if (n < 60000) return `${(n / 1000).toFixed(1)} s`;
+  const s = Math.round(n / 1000);
+  return `${Math.floor(s / 60)} min ${s % 60} s`;
+}
+
+function bytesText(v) {
+  const n = Number(v);
+  if (v === null || v === undefined || v === "" || !Number.isFinite(n)) return null;
+  if (n < 1024) return `${Math.round(n)} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(n < 10 * 1024 ? 1 : 0)} KB`;
+  return `${(n / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function kbText(v) {
+  const n = Number(v);
+  if (v === null || v === undefined || v === "" || !Number.isFinite(n)) return null;
+  return n >= 1024 ? `${(n / 1024).toFixed(1)} MB` : `${Math.round(n * 10) / 10} KB`;
+}
+
+// An ISO time as "2026-10-04 14:29 UTC"; anything else as it is.
+function whenText(v) {
+  if (v === null || v === undefined || v === "") return null;
+  const m = /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})(?::\d{2}(?:\.\d+)?)?Z$/.exec(String(v));
+  return m ? `${m[1]} ${m[2]} UTC` : String(v);
+}
+
+// A field name in words, its unit left to the value: loadMsMedian is "Load median", buildMs
+// "Build", gzipBytes "Gzip".
+function plainLabel(key) {
+  const w = String(key).replace(/([a-z0-9])([A-Z])/g, "$1 $2").replace(/[_.-]+/g, " ").trim().toLowerCase().split(/\s+/).filter(Boolean);
+  const kept = w.length > 1 ? w.filter((x) => !["ms", "bytes", "kb"].includes(x)) : w;
+  return cap(kept.join(" ")) || String(key);
+}
+
+// A value by its field's unit: milliseconds, bytes, kilobytes and times readable, yes and no for
+// true and false, lists joined.
+function plainValue(key, v) {
+  if (v === null || v === undefined || v === "") return "not measured";
+  if (typeof v === "boolean") return v ? "yes" : "no";
+  const k = String(key);
+  if (typeof v === "number") {
+    if (/Ms(?=[A-Z]|$)|^ms$/.test(k)) return msText(v);
+    if (/Bytes(?=[A-Z]|$)|^bytes$/.test(k)) return bytesText(v);
+    if (/Kb(?=[A-Z]|$)|^kb$/i.test(k)) return kbText(v);
+    return String(v);
+  }
+  if (typeof v === "string") return /(?:At|^at)$/.test(k) ? whenText(v) : v;
+  if (Array.isArray(v)) return v.length ? v.map((x) => (x && typeof x === "object" ? JSON.stringify(x) : String(x))).join(", ") : "none";
+  return JSON.stringify(v);
+}
+
+function mdTable(headers, rows) {
+  const L = [`| ${headers.map(cell).join(" | ")} |`, `|${headers.map(() => "---").join("|")}|`];
+  for (const r of rows.slice(0, MAX_BASELINE_ROWS)) L.push(`| ${r.map(cell).join(" | ")} |`);
+  if (rows.length > MAX_BASELINE_ROWS) L.push("", `(+${rows.length - MAX_BASELINE_ROWS} more in findings.json)`);
+  return L;
+}
+
+// A list of records as a table: the fields in first-seen order, each named by labels or in words.
+function recordTable(list, labels = {}) {
+  const cols = [...new Set(list.flatMap((x) => Object.keys(x)))];
+  return mdTable(cols.map((c) => labels[c] || plainLabel(c)), list.map((x) => cols.map((c) => plainValue(c, x[c]))));
+}
+
+const PAGE_LABELS = {
+  url: "Page", loads: "Loads", loadMsMedian: "Median load", loadMsMin: "Fastest", loadMsMax: "Slowest", domContentLoadedMs: "DOM ready",
+  requests: "Requests", transferKb: "Transferred", failedRequests: "Failed requests", duplicateApiCalls: "Repeated API calls", heavyAssets: "Heavy assets", consoleErrors: "Console errors"
+};
+
+function baselineSection(b) {
   const L = ["## Baseline", "", "Measured before any finding was acted on; a later change claims an improvement only above the noise.", ""];
   const rows = [];
   const tables = [];
+  const done = new Set(BASELINE_INTERNAL);
+  const has = (k) => Object.prototype.hasOwnProperty.call(b, k);
+  const notChecked = listOf(isRecord(b.coverage) ? b.coverage.notExamined : null).map((s) => (typeof s === "string" ? s : JSON.stringify(s)));
+  // A missing measure with the reason the baseline gave ("not checked (no build script)").
+  const why = (re) => {
+    const hit = notChecked.find((s) => re.test(s));
+    if (!hit) return "not checked";
+    const at = hit.indexOf(": ");
+    return at >= 0 ? hit.slice(at + 2) : hit;
+  };
+
+  if (has("at") && typeof b.at === "string") { rows.push(["Measured at", whenText(b.at)]); done.add("at"); }
+
+  if (records(b.checks)) {
+    done.add("checks").add("checksGreen");
+    const failed = b.checks.filter((c) => c.ok === false).length;
+    rows.push(["Checks", !b.checks.length ? why(/^check times/i) : failed ? `${failed} of ${b.checks.length} failed` : `all ${b.checks.length} passed`]);
+    if (b.checks.length) {
+      tables.push(["Checks", mdTable(["Check", "Command", "Result", "Time"], b.checks.map((c) => [c.name, c.command, c.ok === false ? `failed${c.reason ? `: ${c.reason}` : ""}` : c.ok === true ? "passed" : "-", msText(c.ms ?? c.durationMs)]))]);
+    }
+  } else if (typeof b.checksGreen === "boolean") {
+    rows.push(["All checks passed", b.checksGreen ? "yes" : "no"]);
+    done.add("checksGreen");
+  }
+
+  if (has("build") && (b.build === null || isRecord(b.build))) {
+    done.add("build");
+    const x = b.build;
+    rows.push(["Build", !x ? why(/^build/i) : x.ok === false ? `failed${x.reason ? ` (${x.reason})` : ""}` : `${msText(x.ms) || "time not measured"}${x.command ? ` (${x.command}${x.fromCheck ? `, timed as the check "${x.fromCheck}"` : ""})` : ""}`]);
+  }
+
+  if (has("bundle") && (b.bundle === null || isRecord(b.bundle))) {
+    done.add("bundle");
+    const x = b.bundle;
+    if (!x) rows.push(["Bundle size", why(/^bundle|^build/i)]);
+    else {
+      const size = [bytesText(x.gzipBytes) && `${bytesText(x.gzipBytes)} gzip`, bytesText(x.rawBytes) && `${bytesText(x.rawBytes)} before compression`].filter(Boolean).join(", ");
+      const head = [x.dir, typeof x.files === "number" ? `${x.files} file${x.files === 1 ? "" : "s"}` : null].filter(Boolean).join(", ");
+      rows.push(["Bundle size", `${head ? `${head}: ` : ""}${size || "not measured"}${Number(x.mapBytes) > 0 ? `; source maps ${bytesText(x.mapBytes)} more` : ""}`]);
+      const types = isRecord(x.byType) ? Object.entries(x.byType).filter(([, t]) => isRecord(t)) : [];
+      if (types.length) tables.push(["Bundle by type", mdTable(["Type", "Files", "Size", "Gzip"], types.map(([t, s]) => [t, s.files, bytesText(s.rawBytes), bytesText(s.gzipBytes)]))]);
+      if (records(x.largest) && x.largest.length) tables.push(["Largest files in the bundle", mdTable(["File", "Size", "Gzip"], x.largest.map((f) => [f.file, bytesText(f.rawBytes), bytesText(f.gzipBytes)]))]);
+    }
+  }
+
+  if (has("packages") && (b.packages === null || isRecord(b.packages))) {
+    done.add("packages");
+    const x = b.packages;
+    const parts = x ? [typeof x.count === "number" ? `${x.count} in ${x.lockfile || "the lockfile"}` : null, typeof x.direct === "number" ? `${x.direct} declared directly` : null].filter(Boolean) : [];
+    rows.push(["Packages", x ? parts.join(", ") || "not measured" : why(/^package count/i)]);
+  }
+
+  if (has("devServer") && (b.devServer === null || isRecord(b.devServer))) {
+    done.add("devServer");
+    const x = b.devServer;
+    rows.push(["Dev server start", !x ? why(/^dev-server/i)
+      : x.ok === false ? `did not start${x.error ? ` (${x.error})` : ""}`
+        : x.reused ? `not measured: a server was already answering${x.url ? ` at ${x.url}` : ""}`
+          : `${msText(x.startMs) || "not measured"}${x.url ? ` (${x.url})` : ""}`]);
+  }
+
+  if (has("flaky") && (b.flaky === null || isRecord(b.flaky))) {
+    done.add("flaky");
+    const x = b.flaky;
+    if (!x) rows.push(["Flaky tests", why(/flaky/i)]);
+    else {
+      const flips = [
+        ...listOf(x.tests).filter(isRecord).map((t) => [`"${t.name}"`, t.file, `${t.passed} of ${t.runs}`]),
+        ...listOf(x.files).filter(isRecord).map((f) => ["the whole file (no single test was named)", f.file, `${f.passed} of ${f.runs}`]),
+        ...listOf(x.suites).filter(isRecord).map((s) => [`the check "${s.check}"`, s.command, `${s.passed} of ${s.runs}`])
+      ];
+      const runs = Number(x.rounds) > 0 ? ` in ${x.rounds} identical runs` : "";
+      rows.push(["Flaky tests", flips.length ? `${flips.length} found${runs} (listed below)` : `none${runs}`]);
+      if (flips.length) tables.push(["Flaky tests", mdTable(["Test", "Where", "Runs passed"], flips)]);
+    }
+  }
+
+  if (records(b.testFiles)) {
+    done.add("testFiles");
+    if (!b.testFiles.some((s) => records(s.files) && s.files.length)) rows.push(["Test file times", why(/^test files|^per-file times/i)]);
+    for (const s of b.testFiles) {
+      const files = records(s.files) ? s.files : [];
+      if (!files.length) continue;
+      const how = [s.runner, Number(s.rounds) > 0 ? `${s.rounds} run${Number(s.rounds) === 1 ? "" : "s"} each` : null].filter(Boolean).join(", ");
+      tables.push([`Test files${s.check ? ` of "${s.check}"` : ""}${how ? ` (${how})` : ""}`, mdTable(["File", "Median", "Each run", "Tests", "Result"],
+        files.map((f) => [f.file, msText(f.ms), listOf(f.samples).map(msText).filter(Boolean).join(", "), f.tests, f.ok === false ? "failed in at least one run" : f.ok === true ? "passed" : "-"]))]);
+    }
+  }
+
+  if (records(b.pages)) {
+    done.add("pages");
+    if (b.pages.length) tables.push(["Pages", recordTable(b.pages, PAGE_LABELS)]);
+    else rows.push(["Page timings", why(/^page timings/i)]);
+  } else if (has("pages") && b.pages === null) {
+    done.add("pages");
+    rows.push(["Page timings", why(/^page timings/i)]);
+  }
+  if (has("pagesAt") && typeof b.pagesAt === "string") { rows.push(["Pages measured at", whenText(b.pagesAt)]); done.add("pagesAt"); }
+  if (isRecord(b.coverage)) done.add("coverage");
+
+  // Anything else, by its name in words.
   const walk = (obj, prefix) => {
     for (const [k, v] of Object.entries(obj)) {
-      const name = prefix ? `${prefix}.${k}` : k;
-      if (v === null || ["string", "number", "boolean"].includes(typeof v)) rows.push([name, v]);
-      else if (Array.isArray(v)) {
-        if (v.every((x) => x && typeof x === "object" && !Array.isArray(x))) tables.push([name, v]);
-        else rows.push([name, v.join(", ")]);
-      } else if (typeof v === "object") walk(v, name);
+      if (!prefix && done.has(k)) continue;
+      const label = prefix ? `${prefix} ${plainLabel(k).toLowerCase()}` : plainLabel(k);
+      if (records(v) && v.length) tables.push([label, recordTable(v)]);
+      else if (isRecord(v)) walk(v, label);
+      else rows.push([label, plainValue(k, v)]);
     }
   };
-  walk(baseline, "");
-  if (rows.length) L.push("| Measure | Value |", "|---|---|", ...rows.map(([k, v]) => `| ${cell(k)} | ${cell(v)} |`), "");
-  for (const [name, list] of tables) {
-    const cols = [...new Set(list.flatMap((x) => Object.keys(x)))];
-    L.push(`### ${name}`, "", `| ${cols.map(cell).join(" | ")} |`, `|${cols.map(() => "---").join("|")}|`);
-    for (const x of list.slice(0, 200)) L.push(`| ${cols.map((c) => cell(typeof x[c] === "object" && x[c] !== null ? JSON.stringify(x[c]) : x[c])).join(" | ")} |`);
-    if (list.length > 200) L.push("", `(+${list.length - 200} more in findings.json)`);
-    L.push("");
-  }
+  walk(b, "");
+
+  if (rows.length) L.push(...mdTable(["Measure", "Value"], rows), "");
+  for (const [name, t] of tables) L.push(`### ${name}`, "", ...t, "");
+  if (notChecked.length) L.push("### Not checked", "", ...notChecked.map((s) => `- ${s}`), "");
   return L;
 }
 

@@ -1,8 +1,8 @@
 // Run summaries (PLAN.md P6.5, P8.5): the plan-complete message and the optional morning
 // summary. Steps done, attempts, the run's own decisions, decisions for the owner to review, open
-// items, the push state, usage used and elapsed time. Built from the files the run already keeps;
-// nothing extra is tracked. The doc parsers here are shared with lib/handoff.js, so the alert and
-// HANDOFF.md always count the same things. Node built-ins only.
+// items, flaky checks, the push state, usage used and elapsed time. Built from the files and the
+// run state the run already keeps; nothing extra is tracked. The doc parsers here are shared with
+// lib/handoff.js, so the alert and HANDOFF.md always count the same things. Node built-ins only.
 import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
@@ -266,6 +266,43 @@ export function collectHandback({ root, config, state, parsed, env = process.env
   };
 }
 
+// ---------- flaky checks (P10.14, D62) ----------
+// The gate runs a check that failed once more before it counts; one that passes then counts as
+// passed and is recorded in state.flakyChecks: [{ name, step, phase, feature, stage ("verify",
+// "fixup" or "recheck"), at, firstReason }]. Shared by the hand-back and the alerts.
+
+// The entries of this run: recorded since it started (state.startedAt), so a later run of the
+// same project does not list an earlier run's.
+export function flakyChecksOfRun(state) {
+  const list = state && Array.isArray(state.flakyChecks) ? state.flakyChecks : [];
+  const since = state && typeof state.startedAt === "string" ? state.startedAt : null;
+  return list.filter((e) => e && typeof e === "object" && typeof e.name === "string" && e.name && !(since && typeof e.at === "string" && e.at < since));
+}
+
+// The entries by check, in the order each was first seen: [{ name, count, entries }].
+export function flakyByCheck(entries) {
+  const by = new Map();
+  for (const e of Array.isArray(entries) ? entries : []) {
+    if (!e || !e.name) continue;
+    if (!by.has(e.name)) by.set(e.name, { name: e.name, count: 0, entries: [] });
+    const g = by.get(e.name);
+    g.count++;
+    g.entries.push(e);
+  }
+  return [...by.values()];
+}
+
+// Where a check was flaky, in words: "Phase 1 (Lists), verified at S1.3", "the fix-up checks of
+// Phase 1 (Lists) at S1.3", "S1.1, in Phase 1 (Lists), with its findings filed". `parsed` gives
+// the phase titles when there is one.
+export function flakyWhere(e, parsed = null) {
+  const ph = parsed && Array.isArray(parsed.phases) && Number.isInteger(e.phase) ? parsed.phases.find((p) => p.num === e.phase) : null;
+  const phase = Number.isInteger(e.phase) ? `Phase ${e.phase}${ph ? ` (${ph.title})` : ""}` : null;
+  if (e.stage === "fixup") return `the fix-up checks of ${phase || "the feature"} at ${e.step}`;
+  if (e.feature && phase) return `${phase}, verified at ${e.step}`;
+  return `${e.step}${phase ? `, in ${phase}` : ""}${e.stage === "recheck" ? ", with its findings filed" : ""}`;
+}
+
 function count(n, one, many = `${one}s`) {
   return `${n} ${n === 1 ? one : many}`;
 }
@@ -360,6 +397,11 @@ export function buildSummary({ root, config, state, parsed, usage = null, now = 
     lines.push(`Open items: ${kinds}. Top: ${top}${openList.length > TOP ? ` (+${openList.length - TOP} more)` : ""}.`);
   } else {
     lines.push("Open items: none.");
+  }
+  const flaky = flakyByCheck(list("flakyChecks", flakyChecksOfRun(state)));
+  if (flaky.length) {
+    const top = flaky.slice(0, TOP).map((f) => `${clip(f.name, 60)}${f.count > 1 ? ` (${f.count} times)` : ""}`).join(", ");
+    lines.push(`Flaky checks: ${top}${flaky.length > TOP ? ` (+${flaky.length - TOP} more)` : ""}: each failed, then passed when run again; fix the tests.`);
   }
   if (s) lines.push(`Hand-back: ${path.basename(handoff.path || handoffFileName(root, config))} in the project folder.`);
   else if (complete && handoffIsFresh(root, config, state)) lines.push(`Hand-back: ${handoffFileName(root, config)} in the project folder.`);

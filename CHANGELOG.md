@@ -18,6 +18,7 @@
   estimate each phase and planning splits one that does not fit; `autoclaude verify-per-step
   <phase>` for a plan that keeps running out of time.
 - The security review runs alongside the browser checks once the checks pass (`checkers.parallel`).
+- A failed check runs once more before it counts; one that then passes is reported as flaky.
 - Security findings from normal runs go to the gitignored `docs/private/SECURITY-FINDINGS.md`.
 - Playwright MCP pinned to a tested version, and its arbitrary-code tool denied to every browser
   checker.

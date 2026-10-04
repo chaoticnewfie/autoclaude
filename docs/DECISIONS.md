@@ -1004,3 +1004,8 @@ paused the practice fix run, and 4 of 5 check failures in his DB run were flaky.
 
 **Rejected.** Counting every failure as before; releasing first and polishing in 1.1.1; releasing
 without seeing the phase split live.
+- **Addendum to D62 (2026-10-04), how the rerun was built.** Only a check that ran and exited
+  non-zero is rerun; one that hit its own timeoutSec is not (a hung check has used its whole time
+  already). A rerun that does not fit in the stop is carried over with its first failure kept,
+  so a part runs at most twice. Flaky checks are kept in the run state and scoped to the run, and
+  reach the report, the commit body, HANDOFF.md and the completion alert.

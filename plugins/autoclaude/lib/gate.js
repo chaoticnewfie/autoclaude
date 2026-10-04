@@ -16,6 +16,8 @@
 // they fit, each weighed by what it is expected to need; what does not fit is carried to the next
 // stop (state.verifying, D60), and the builder is told to end its turn. The checks of a fix-up
 // pass, and a step's second run of the checks with its findings filed, are staged the same way.
+// A check that fails runs once more before it counts (D62); one that passes then is flaky: it
+// counts as passed, and the report, the commit body and the hand-back say so.
 // A part that does not fit even in a stop of its own is "out of time", never the builder's
 // attempt, and pauses the run the second time. What a gate cut off by the hook leaves behind is picked up by the next
 // stop: a verification under way is undone (and counted), and a verified commit under way
@@ -32,7 +34,7 @@ import { parsePlan, stepById, nextStep, firstUnfinished, isPhaseEnd, isFeatureEn
 import { readText, readJson, writeFileAtomic, writeJsonAtomic, appendLine, ensureDir } from "./fsatomic.js";
 import { pendingVerifyFile, undoCutVerification, undoVerification, liveOtherGate, heldByLiveGate, phaseTag, verifyModeFor, reopenForMode, verifyPartName } from "./resume.js";
 import { readReady, clearReady, readBlocked, clearBlocked, readHeartbeat } from "./protocol.js";
-import { runChecks, MIN_CHECK_MS, DEFAULT_CHECK_TIMEOUT_SEC } from "./checks.js";
+import { runChecks, MIN_CHECK_MS, DEFAULT_CHECK_TIMEOUT_SEC, rerunWanted, failureBrief } from "./checks.js";
 import { writeReport, checkFailureSection, summarize, fence } from "./report.js";
 import { restartDevServer, stopDevServer } from "./devserver.js";
 import { runBrowserCheck, browserTimeoutSec, acceptCount, KINDS, untrackedSet, sweepStrays } from "./tester.js";
@@ -331,6 +333,22 @@ function pausedMeanwhile(root) {
 
 const noteKey = (n) => `${n && n.at}\u0000${n && n.text}`;
 
+// The run's flaky checks (state.flakyChecks, lib/summary.js) of `a` and `b`, each once, in order,
+// the newest FLAKY_KEEP of them.
+const FLAKY_KEEP = 100;
+function mergeFlaky(a, b) {
+  const seen = new Set();
+  const out = [];
+  for (const e of [...(Array.isArray(a) ? a : []), ...(Array.isArray(b) ? b : [])]) {
+    if (!e || typeof e !== "object") continue;
+    const k = `${e.at}\u0000${e.name}\u0000${e.step}\u0000${e.stage}`;
+    if (seen.has(k)) continue;
+    seen.add(k);
+    out.push(e);
+  }
+  return out.slice(-FLAKY_KEEP);
+}
+
 // The owner's pause request as it stands: changed on disk while this gate ran (`autoclaude
 // pause`, or `resume` withdrawing one) means the owner's value; otherwise the gate's own.
 function ownerPauseRequest(g, disk, own) {
@@ -348,6 +366,9 @@ function save(g, next) {
   for (const k of ["supervisorPid", "windowTitle", "builderSessionId", "sessionId"]) out[k] = disk[k];
   const known = new Set([...(next.pendingNotes || []).map(noteKey), ...g.loaded.notes]);
   out.pendingNotes = [...(next.pendingNotes || []), ...(disk.pendingNotes || []).filter((n) => !known.has(noteKey(n)))];
+  // The flaky checks this gate recorded on disk as it found them (noteRerun).
+  const flaky = mergeFlaky(disk.flakyChecks, next.flakyChecks);
+  if (flaky.length) out.flakyChecks = flaky;
   if (out.status === STATUS.running) out.pauseRequested = ownerPauseRequest(g, disk, out.pauseRequested);
   // The run was running when this gate began, so a pause on disk is the owner's (`pause --now`);
   // the paths that can take long check for it themselves, and this keeps it on any other.
@@ -543,8 +564,9 @@ async function decisionsSince(g) {
   return out;
 }
 
-// Every gate commit carries a body (P8.4): the Accept lines, the checks with their durations,
-// the decisions made since the previous gate commit, the findings filed and the report.
+// Every gate commit carries a body (P8.4): the Accept lines, the checks with their durations (a
+// check that passed only on its rerun marked flaky), the decisions made since the previous gate
+// commit, the findings filed and the report.
 async function commitMessage(g, { subject, lead, steps, timings = [], findings = 0, report = null }) {
   const lines = [subject, "", lead, "", "Accept:"];
   for (const s of steps) {
@@ -552,7 +574,7 @@ async function commitMessage(g, { subject, lead, steps, timings = [], findings =
     for (const a of s.accept) lines.push(`  - ${a}`);
   }
   lines.push("", timings.length ? "Checks:" : "Checks: none at this step.");
-  for (const t of timings) lines.push(`- ${t.name}: ${t.status}${t.ms !== null && t.ms !== undefined ? ` in ${secs(t.ms)}` : ""}`);
+  for (const t of timings) lines.push(`- ${t.name}: ${t.status}${t.ms !== null && t.ms !== undefined ? ` in ${secs(t.ms)}` : ""}${t.flaky ? " (flaky: passed on a rerun)" : ""}`);
   const decisions = await decisionsSince(g);
   lines.push("", decisions.length ? "Decisions since the previous gate commit:" : "Decisions since the previous gate commit: none.");
   for (const d of decisions) lines.push(`- ${d}`);
@@ -922,15 +944,38 @@ function checkParts(config, times, kind = "check") {
 // of the checks that ran, for the record of check times), sections, timings, ranHere, carry,
 // failedCheck } (failedCheck: one that failed, did not run, or ran out of time as the stop's
 // first part).
+// A check that fails for real (lib/checks.js rerunWanted) runs once more right away, as part of
+// the same part, before it counts (D62): one that passes then counts as passed and is flaky
+// (noteRerun), one that fails again is the failure, as before. The rerun is weighed like a part:
+// when it is not expected to fit in what is left of this stop, or is stopped at the deadline, the
+// part is carried over with its first failure kept (rec.rerun), and the next stop's run of it is
+// the rerun. A rerun is therefore out of time only as a stop's first part, with the whole stop.
 async function runCheckParts(g, rec, list, { step, devServerReady, ranHere = 0 }) {
   const out = { ran: [], sections: [], timings: [], ranHere, carry: null, failedCheck: null };
+  const run = async (p) => (await runChecks([p.check], { cwd: g.root, env: g.env, devServerReady, deadlineMs: g.deadlineMs, now: g.clock })).results[0];
   for (const p of list) {
     if (rec.done.includes(p.key)) continue;
     if (out.ranHere && g.deadlineMs - g.clock() < p.ms) { out.carry = `${p.name} is expected to need ${secs(p.ms)}`; break; }
-    const r = (await runChecks([p.check], { cwd: g.root, env: g.env, devServerReady, deadlineMs: g.deadlineMs, now: g.clock })).results[0];
+    // Its first run failed in an earlier stop: this run is its rerun.
+    let first = rec.rerun && rec.rerun.key === p.key ? rec.rerun.first : null;
+    if (first) g.ev("check-rerun", { check: p.check.name, step: step.id, carried: true });
+    let r = await run(p);
+    if (!first && rerunWanted(r)) {
+      first = failureBrief(r);
+      g.ev("check-rerun", { check: p.check.name, step: step.id });
+      const keep = (why) => { rec.rerun = { key: p.key, first }; out.carry = `${p.name} failed (${first.reason}), and its rerun ${why}`; };
+      if (g.deadlineMs - g.clock() < p.ms) { keep(`is expected to need ${secs(p.ms)}`); break; }
+      const again = await run(p);
+      if (again.outOfTime) { keep(again.ran ? "was stopped at the gate's deadline" : "had too little of this stop left to start"); break; }
+      // A rerun that could not even start leaves the first run's failure as it was.
+      if (again.ran) r = again;
+      else first = null;
+    }
     if (r.ran) out.ran.push(r);
     if (r.outOfTime && out.ranHere) { out.carry = `${p.name} was stopped at the gate's deadline`; break; }
-    checkSection(g, r, step, out.sections, out.timings);
+    if (rec.rerun && rec.rerun.key === p.key) rec.rerun = null;
+    checkSection(g, r, step, out.sections, out.timings, first);
+    if (first) noteRerun(g, rec, p, step, first, r);
     if (!r.ok) { out.failedCheck = r; break; }
     rec.done.push(p.key);
     out.ranHere++;
@@ -938,14 +983,41 @@ async function runCheckParts(g, rec, list, { step, devServerReady, ranHere = 0 }
   return out;
 }
 
-// A check's result in the report (sections) and in the commit body (timings).
-function checkSection(g, r, step, sections, timings) {
+// A check's result in the report (sections) and in the commit body (timings). `first` is the
+// failed first run (lib/checks.js failureBrief) of a check that was run once more: one that then
+// passed is flaky, with the first run's last lines in its section and `flaky` on its timing.
+function checkSection(g, r, step, sections, timings, first = null) {
   const passed = r.code === 0 && !r.timedOut;
   if (r.ran) {
-    sections.push({ title: `Check "${r.name}": ${passed ? "passed" : r.outOfTime ? "OUT OF TIME" : "FAILED"}`, body: `\`${r.command}\` in ${Math.round(r.durationMs / 1000)} s${passed ? "" : `\n\n${checkFailureSection(r).body}`}` });
-    timings.push({ name: r.name, status: passed ? "passed" : r.outOfTime ? "out of time" : "FAILED", ms: r.durationMs });
+    const flaky = passed && !!first;
+    const status = flaky ? "passed on a rerun (FLAKY)" : passed ? "passed" : r.outOfTime ? "OUT OF TIME" : "FAILED";
+    const rerun = !first ? ""
+      : flaky ? `\n\nIt failed first (${first.reason}, after ${secs(first.durationMs)}), was run once more right away, and passed. It counts as passed, but the check is flaky: its test should be fixed so it passes every time.\n\nThe failed run's last lines:\n\n${fence(first.tail || "(no output)")}`
+      : r.outOfTime ? `\n\nThis was its rerun: its first run failed (${first.reason}) in an earlier stop.`
+      : `\n\nIt failed (${first.reason}), was run once more right away, and failed again: a real failure, not a flaky check.`;
+    sections.push({ title: `Check "${r.name}": ${status}`, body: `\`${r.command}\` in ${secs(r.durationMs)}${rerun}${passed ? "" : `\n\n${checkFailureSection(r).body}`}` });
+    timings.push({ name: r.name, status: passed ? "passed" : r.outOfTime ? "out of time" : "FAILED", ms: r.durationMs, ...(flaky ? { flaky: true } : {}) });
   } else if (!r.skipped) {
     sections.push({ title: `Check "${r.name}": NOT RUN`, body: `\`${r.command}\` did not run: ${notRunReason(r, g.config, g.cli, step)}.` });
+  }
+}
+
+// A check run once more after it failed (runCheckParts): gate.log says how the rerun went, and
+// one that passed on it goes into the run state's flaky checks (state.flakyChecks, lib/summary.js)
+// at once, so the hand-back lists it whatever becomes of this verification.
+function noteRerun(g, rec, p, step, first, r) {
+  const where = rec.fixup ? `the fix-up checks of Phase ${rec.phase} at ${step.id}` : rec.feature && Number.isInteger(rec.phase) ? `Phase ${rec.phase} at ${step.id}` : step.id;
+  if (!r.ok) {
+    logLine(g.root, `${where}: check "${r.name}" failed (${first.reason}), and ${r.outOfTime ? "its rerun ran out of the gate's time" : `failed again when run once more (${r.reason || "no reason recorded"})`}`);
+    return;
+  }
+  g.ev("check-flaky", { check: r.name, step: step.id });
+  logLine(g.root, `${where}: check "${r.name}" is FLAKY: it failed (${first.reason}), then passed when run once more (in ${secs(r.durationMs)}); it counts as passed`);
+  const entry = { name: r.name, step: step.id, phase: step.phase ? step.phase.num : null, feature: !!rec.feature, stage: rec.fixup ? "fixup" : p.kind === "recheck" ? "recheck" : "verify", at: nowIso(g.deps), firstReason: first.reason };
+  try {
+    updateState(g.root, (s) => { s.flakyChecks = mergeFlaky(s.flakyChecks, [entry]); });
+  } catch (e) {
+    logLine(g.root, `could not record the flaky check: ${e && e.message ? e.message : e}`);
   }
 }
 
@@ -1072,7 +1144,7 @@ async function parkStaged(g, st, rec, snap, parts, { why, what, head, again }) {
   // meanwhile (lib/resume.js stagedVerification).
   Object.assign(rec, { parked: true, pid: null, at: new Date().toISOString(), left: left.map((p) => p.key) });
   const next = { ...st, verifying: rec, noProgress: 0, toolCallsAtLastGate: readHeartbeat(root).count };
-  ev("staged", { step: rec.stepId, turn: rec.turns, done: [...rec.done], left: left.map((p) => p.key), ...(rec.fixup ? { fixup: true } : {}) });
+  ev("staged", { step: rec.stepId, turn: rec.turns, done: [...rec.done], left: left.map((p) => p.key), ...(rec.fixup ? { fixup: true } : {}), ...(rec.rerun ? { rerun: rec.rerun.key } : {}) });
   logLine(root, `${what}: ${why}, with ${secs(Math.max(0, g.deadlineMs - g.clock()))} of this stop left; ${andList(left.map((p) => p.name))} carried to the next stop`);
   const meanwhile = pausedMeanwhile(root);
   save(g, meanwhile ? { ...next, status: STATUS.paused, pauseReason: meanwhile.pauseReason || "review", haltSession: !!meanwhile.haltSession } : next);
@@ -1083,7 +1155,14 @@ async function parkStaged(g, st, rec, snap, parts, { why, what, head, again }) {
     return allow(events);
   }
   const done = parts.filter((p) => rec.done.includes(p.key)).map((p) => p.name);
-  return block(`${head} in the next turn: ${andList(done)} ${done.length === 1 ? "is" : "are"} done, and ${andList(left.map((p) => p.name))} would not fit in what is left of this stop. Nothing failed and no attempt was counted. End your turn now without changing anything: the next stop carries on from here (a change to the files starts ${again} again from the beginning).`, events);
+  const isDone = done.length ? `${andList(done)} ${done.length === 1 ? "is" : "are"} done, and ` : "";
+  // A check that failed and whose rerun goes to the next stop (rec.rerun, runCheckParts).
+  const rerun = rec.rerun ? left.find((p) => p.key === rec.rerun.key) : null;
+  const rest = left.filter((p) => p !== rerun).map((p) => p.name);
+  const now = rerun
+    ? `${isDone}${rerun.name} failed: it runs once more in the next stop before it counts (one that passes then is a flaky check, not a failure)${rest.length ? `, then ${andList(rest)}` : ""}. No attempt was counted.`
+    : `${isDone}${andList(left.map((p) => p.name))} would not fit in what is left of this stop. Nothing failed and no attempt was counted.`;
+  return block(`${head} in the next turn: ${now} End your turn now without changing anything: the next stop carries on from here (a change to the files starts ${again} again from the beginning).`, events);
 }
 
 // Runs what is left of a verification in this stop. rec.done names the parts done in earlier
@@ -1961,7 +2040,9 @@ async function complete(g, state, parsed) {
   const p = progress(parsed);
   const first = !(state.completing && typeof state.completing === "object");
   let c = first ? { at: nowIso(deps) } : { ...state.completing };
-  const base = { ...state, currentStep: null, pauseRequested: false, fixup: null, closing: null, freshSession: false };
+  // The flaky checks this gate found are on disk only (noteRerun); the hand-back lists them.
+  const flaky = mergeFlaky(loadState(root).flakyChecks, state.flakyChecks);
+  const base = { ...state, currentStep: null, pauseRequested: false, fixup: null, closing: null, freshSession: false, ...(flaky.length ? { flakyChecks: flaky } : {}) };
   if (first) {
     save(g, { ...base, completing: c });
     stopDevServer({ root });

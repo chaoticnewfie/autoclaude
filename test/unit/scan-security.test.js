@@ -371,6 +371,87 @@ test("runSecurityScanners runs gitleaks and osv-scanner when Docker answers, and
   assert.ok(!JSON.stringify(out).includes("AKIAIOSFODNN7EXAMPLE") && !JSON.stringify(out).includes(LEAKED));
 });
 
+// ---------- titles (P10.14: the live proof's SEC-001, 002, 006, 007 and 019 had none) ----------
+
+// Built at run time: GitHub push protection refuses a key-shaped literal in the source.
+const STRIPE_STYLE = ["sk", "live", "4eC39HqLyjWDarjtT1zdp7dc"].join("_");
+const GH_TOKEN = ["ghp", "Ab1Cd2Ef3Gh4Ij5Kl6Mn7Op8Qr9St0Uv1Wx2Yz3A"].join("_");
+const plain = (t) => t;
+
+test("every scanner candidate has a plain title naming the problem and where, with no secret value in it", () => {
+  const root = tmp();
+  fs.writeFileSync(path.join(root, "Dockerfile"), `FROM node:24\nWORKDIR /app\nCOPY . .\nENV PAYMENT_KEY=${STRIPE_STYLE}\n`);
+  fs.mkdirSync(path.join(root, "test", "fixtures"), { recursive: true });
+  fs.writeFileSync(path.join(root, "test", "fixtures", "keys.js"), `export const value = "${GH_TOKEN}";\n`);
+  fs.writeFileSync(path.join(root, ".gitignore"), "node_modules/\nsecrets/\n");
+  const titles = [];
+  const take = (list) => { for (const c of list) titles.push(c.title); return list; };
+
+  // The proof's SEC-001: a key in the working tree's Dockerfile.
+  const tree = take(scanTree({ root, files: ["Dockerfile", "test/fixtures/keys.js"], redact: plain }).candidates);
+  assert.deepEqual(tree.map((c) => c.title), ["A Stripe-style secret key in Dockerfile", "A GitHub token in test/fixtures/keys.js (a test or example file)"]);
+  // The proof's SEC-006 and SEC-007: gitleaks hits in the history.
+  const gl = take(parseGitleaks(JSON.stringify([
+    { RuleID: "github-pat", StartLine: 4, File: "Dockerfile", Commit: "c6a815d0cd2cfd3bc5204bb5111a66e7ee432c94", Secret: "REDACTED" },
+    { RuleID: "stripe-access-token", StartLine: 2, File: "lib/config.js", Commit: "734d093f053a1ee067a1eed6a51ae286c7014119", Secret: "REDACTED" },
+    { RuleID: "acme-widget-key", StartLine: 1, File: "x.cfg", Commit: "", Secret: "REDACTED" }
+  ]), plain).candidates);
+  assert.deepEqual(gl.map((c) => c.title), [
+    "A GitHub token in the git history of Dockerfile (commit c6a815d0cd2c)",
+    "A Stripe-style secret key in the git history of lib/config.js (commit 734d093f053a)",
+    "A secret (rule acme-widget-key) in the git history of x.cfg"
+  ]);
+  const hist = take(scanHistoryText(["@@C 734d093f053a1ee067a1eed6a51ae286c7014119", "+++ b/lib/config.js", `+export const PAYMENT_KEY = "${STRIPE_STYLE}";`].join("\n"), plain).candidates);
+  assert.equal(hist[0].title, "A Stripe-style secret key in the git history of lib/config.js (commit 734d093f053a)");
+  // The proof's SEC-019, and a tracked secrets file.
+  const sens = take(scanSensitiveAndGitignore({ root, tracked: [".env", "backup/data.sql"], redact: plain }).candidates);
+  assert.deepEqual(sens.map((c) => c.title), ["A file that usually holds secrets is committed: .env", "A database dump or local database is committed: backup/data.sql", ".gitignore does not cover .env"]);
+  assert.equal(scanSensitiveAndGitignore({ root: tmp(), tracked: [], redact: plain }).candidates[0].title, "No .gitignore at the project root");
+
+  // The proof's SEC-002: minimist 0.0.8, from npm audit (the installed version read from the lockfile) and osv-scanner.
+  const audit = JSON.stringify({ vulnerabilities: {
+    minimist: { name: "minimist", severity: "critical", range: "<=1.2.5", nodes: ["node_modules/minimist"], via: [{ title: "Prototype Pollution in minimist", cwe: ["CWE-1321"] }, { title: "Prototype Pollution in minimist" }], fixAvailable: { name: "minimist", version: "1.2.6", isSemVerMajor: true } },
+    mkdirp: { name: "mkdirp", severity: "critical", range: "0.4.1 - 0.5.1", via: ["minimist"], fixAvailable: { name: "webpack", version: "5.0.0", isSemVerMajor: true } },
+    inrange: { severity: "high", range: "<1.2.4", fixAvailable: true, via: [{ title: "a" }] },
+    nofix: { severity: "low", range: "*", fixAvailable: false, via: [{ title: "d" }] }
+  } });
+  const lock = { lockfileVersion: 3, packages: { "": {}, "node_modules/minimist": { version: "0.0.8" }, "node_modules/inrange": { version: "1.2.0" } } };
+  const npm = take(parseNpmAudit(audit, plain, { lock }).candidates);
+  assert.deepEqual(npm.map((c) => c.title), [
+    "minimist 0.0.8 has 2 known vulnerabilities (fixed in 1.2.6)",
+    "mkdirp is vulnerable through minimist (upgrading webpack to 5.0.0 fixes it)",
+    "inrange 1.2.0 has a known vulnerability (a fixed version is inside its allowed range)",
+    "nofix has a known vulnerability (no fixed version published yet)"
+  ]);
+  assert.equal(parseNpmAudit(audit, plain).candidates[0].title, "minimist has 2 known vulnerabilities (fixed in 1.2.6)", "without the lockfile, no version");
+  const osv = take(parseOsvScanner(JSON.stringify({ results: [{ source: { path: "/src/package-lock.json" }, packages: [{ package: { name: "minimist", version: "0.0.8", ecosystem: "npm" },
+    vulnerabilities: [{ id: "GHSA-vh95-rmgr-6w4m", affected: [{ package: { name: "minimist" }, ranges: [{ events: [{ introduced: "0" }, { fixed: "0.2.1" }] }] }] }, { id: "GHSA-xvch-5gv4-984h", affected: [{ package: { name: "minimist" }, ranges: [{ events: [{ introduced: "0" }, { fixed: "0.2.4" }] }] }] }],
+    groups: [{ max_severity: "9.8" }] }] }] }), plain).candidates);
+  assert.equal(osv[0].title, "minimist 0.0.8 has 2 known vulnerabilities (fixed in 0.2.4)");
+  take(parseOsvScanner(OSV_REPORT, plain).candidates);
+  assert.ok(titles.includes("flask 2.0.1 has a known vulnerability (no fixed version published yet)"), titles.join("\n"));
+
+  const lockRoot = tmp();
+  fs.writeFileSync(path.join(lockRoot, "package-lock.json"), JSON.stringify({ packages: { "node_modules/evil": { version: "1.0.0", resolved: "https://git.example.com/evil-1.0.0.tgz" } } }));
+  assert.equal(take(scanLockfileHygiene({ root: lockRoot, redact: plain }).candidates)[0].title, "evil is installed from outside the public npm registry");
+
+  for (const t of titles) assert.ok(typeof t === "string" && t.length > 10 && t.length <= 200, `a plain title: ${t}`);
+  const all = titles.join("\n");
+  assert.ok(!all.includes(STRIPE_STYLE) && !all.includes(GH_TOKEN), "a title never holds a value");
+  // The redactor runs over the title like the evidence.
+  assert.equal(scanTree({ root, files: ["Dockerfile"], redact: mark }).candidates[0].title, "[r]A Stripe-style secret key in Dockerfile");
+});
+
+test("runSecurityScanners names the installed version in an npm advisory's title, and OSV batch hits get one too", async () => {
+  const root = tmp();
+  fs.writeFileSync(path.join(root, "package-lock.json"), JSON.stringify({ lockfileVersion: 3, packages: { "": {}, "node_modules/minimist": { version: "0.0.8" } } }));
+  const npmAudit = JSON.stringify({ vulnerabilities: { minimist: { name: "minimist", severity: "critical", range: "<=1.2.5", via: [{ title: "x" }, { title: "y" }], fixAvailable: { name: "minimist", version: "1.2.6", isSemVerMajor: true } } } });
+  const out = await runSecurityScanners({ root, env: { PATH: "" }, options: { modules: ["deps"], advisories: true }, sweepDir: path.join(root, ".autoclaude", "sweeps", "t1"), run: makeRun({ npmAudit }), redact: plain });
+  assert.equal(out.candidates.find((c) => c.anchor === "pkg:npm:minimist").title, "minimist 0.0.8 has 2 known vulnerabilities (fixed in 1.2.6)");
+  const batch = await scanOsv({ fetchImpl: async () => ({ json: async () => ({ results: [{ vulns: [{ id: "PYSEC-1" }] }] }) }), ecosystem: "PyPI", packages: [{ name: "flask", version: "2.0.1" }], file: "requirements.txt", redact: plain });
+  assert.equal(batch.candidates[0].title, "flask 2.0.1 has a known vulnerability");
+});
+
 test("runSecurityScanners: without Docker both are not checked; advisories off leaves osv-scanner off; a failed image run is not checked", async () => {
   const root = tmp();
   fs.writeFileSync(path.join(root, "package-lock.json"), JSON.stringify({ packages: {} }));

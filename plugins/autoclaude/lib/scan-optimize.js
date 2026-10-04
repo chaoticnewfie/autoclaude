@@ -1075,9 +1075,12 @@ export function applyTierRules(c) {
 
 const SEVERITY_RANK = { critical: 3, high: 2, medium: 1, low: 0 };
 
+// A scanner's candidate in the findings shape. title: one plain line naming the problem and where
+// (the report's heading); every scanner below writes one.
 function candidate(fields) {
   return applyTierRules({
     kind: "optimize",
+    title: "",
     category: "leftover",
     severity: "low",
     cwe: null,
@@ -1168,6 +1171,7 @@ async function runJscpd(ctx) {
   writeJsonAtomic(path.join(ctx.scannersDir, "jscpd.json"), { version: JSCPD_VERSION, minLines: DUPLICATE_MIN_LINES, statistics: stats, duplicates: dups });
   ctx.coverage.examined.push(`jscpd ${JSCPD_VERSION}: ${dups.length} duplicated blocks of ${DUPLICATE_MIN_LINES} lines or more`);
   return dups.sort((x, y) => y.lines - x.lines).map((d) => candidate({
+    title: d.a.file === d.b.file ? `${d.lines} lines repeated within ${d.a.file}` : `${d.lines} lines repeated in ${d.a.file} and ${d.b.file}`,
     category: "duplicate",
     tool: `jscpd ${JSCPD_VERSION}`,
     severity: d.lines >= 30 ? "medium" : "low",
@@ -1227,6 +1231,7 @@ export function outdatedCandidates(entries, manifestText = "") {
     else if (want && compareSemver(want, cur) > 0 && !isMajorJump(e.current, e.wanted)) target = e.wanted;
     if (target) {
       out.push(candidate({
+        title: `${e.name} ${e.current} can be updated to ${target}`,
         category: "outdated",
         tool: "npm outdated",
         confidence: 8,
@@ -1242,6 +1247,7 @@ export function outdatedCandidates(entries, manifestText = "") {
     }
     if (major) {
       out.push(candidate({
+        title: `${e.name} has a new major version (${e.current} to ${e.latest})`,
         category: "major-upgrade",
         tool: "npm outdated",
         confidence: 8,
@@ -1292,6 +1298,7 @@ function unusedFromKnip(ctx, knip, record) {
     if (refs.length) { record.files.dropped.push({ name: rel, reason: `referenced in ${refs.join(", ")}` }); continue; }
     record.files.kept.push(rel);
     out.push(candidate({
+      title: `${rel} is not used anywhere`,
       category: "unused-file",
       tool: `knip ${KNIP_VERSION} + reference search`,
       confidence: 7,
@@ -1315,6 +1322,7 @@ function unusedFromKnip(ctx, knip, record) {
     record.exports.kept.push(name);
     const own = (ctx.corpus.get(e.file).match(new RegExp(`(?<![\\w$])${esc(e.name)}(?![\\w$])`, "g")) || []).length;
     out.push(candidate({
+      title: `${e.type ? "The exported type" : "The export"} ${e.name} in ${e.file} is ${own > 1 ? "used only inside its own file" : "not used anywhere"}`,
       category: "unused-export",
       tool: `knip ${KNIP_VERSION} + reference search`,
       confidence: 7,
@@ -1330,6 +1338,7 @@ function unusedFromKnip(ctx, knip, record) {
   for (const u of knip.unlisted) {
     if (isExcluded(u.file, ctx.exclude)) continue;
     out.push(candidate({
+      title: `${u.file} imports ${u.name}, which no package.json declares`,
       category: "unlisted-dependency",
       tool: `knip ${KNIP_VERSION}`,
       confidence: 7,
@@ -1365,6 +1374,7 @@ function unusedDependencies(ctx, knip, record) {
         if (binRefs.length) { if (byKnip) record.dependencies.dropped.push({ name, reason: `its command is used in ${binRefs.join(", ")}` }); continue; }
         record.dependencies.kept.push(`${m.rel} ${name}`);
         out.push(candidate({
+          title: `${name} is declared in ${m.rel} but never used`,
           category: "unused-dependency",
           tool: byKnip ? `knip ${KNIP_VERSION} + reference search` : "reference search",
           confidence: byKnip ? 8 : 7,
@@ -1475,6 +1485,7 @@ function leftoverCandidates(ctx) {
         record.commentedOut.push({ file: rel, blocks });
         const lines = blocks.reduce((s, b) => s + b.end - b.start + 1, 0);
         out.push(candidate({
+          title: `${blocks.length === 1 ? "A block" : `${blocks.length} blocks`} of commented-out code in ${rel}`,
           category: "commented-out",
           tool: "comment scan",
           confidence: 6,
@@ -1520,6 +1531,7 @@ async function staleTodoCandidates(ctx, record) {
     entry.stale = stale;
     if (!stale.length) continue;
     out.push(candidate({
+      title: `${stale.length === 1 ? `A ${stale[0].tag} comment` : `${stale.length} TODO or FIXME comments`} over ${STALE_TODO_DAYS} days old in ${entry.file}`,
       category: "stale-todo",
       tool: "comment scan + git blame",
       confidence: 5,
@@ -1597,6 +1609,7 @@ export function testCandidates(baseline) {
   const flakyFix = "Find the cause (timing, sleeps, shared state between tests, test order, ports, the real clock or random data) and make the test deterministic. Never skip it, delete or loosen an assertion, or raise a timeout to hide it.";
   for (const [file, tests] of byFile) {
     out.push(candidate({
+      title: `${tests.length === 1 ? `The test "${tests[0].name}"` : `${tests.length} tests`} in ${file} passed some identical runs and failed others`,
       category: "flaky-test",
       tool: "baseline reruns",
       severity: "medium",
@@ -1612,10 +1625,10 @@ export function testCandidates(baseline) {
   }
   for (const f of arr(flaky.files)) {
     if (byFile.has(f.file)) continue;
-    out.push(candidate({ category: "flaky-test", tool: "baseline reruns", severity: "medium", confidence: 7, file: f.file, line: 0, evidence: `the file passed ${f.passed} of ${f.runs} identical runs (no single test was named)`, impact: flakyText, fix: flakyFix, testIdea: "Run the file at least 5 times in a row: every run passes.", tier: "B" }));
+    out.push(candidate({ title: `${f.file} passed some identical runs and failed others`, category: "flaky-test", tool: "baseline reruns", severity: "medium", confidence: 7, file: f.file, line: 0, evidence: `the file passed ${f.passed} of ${f.runs} identical runs (no single test was named)`, impact: flakyText, fix: flakyFix, testIdea: "Run the file at least 5 times in a row: every run passes.", tier: "B" }));
   }
   for (const s of arr(flaky.suites)) {
-    out.push(candidate({ category: "flaky-test", tool: "baseline reruns", severity: "medium", confidence: 7, file: "", line: 0, evidence: `the check "${s.check}" (${s.command}) passed ${s.passed} of ${s.runs} identical runs`, impact: flakyText, fix: `${flakyFix} Its runner gives no per-test results, so start from its output.`, testIdea: `Run the check at least 5 times in a row: every run passes.`, tier: "B" }));
+    out.push(candidate({ title: `The check "${s.check}" passed some identical runs and failed others`, category: "flaky-test", tool: "baseline reruns", severity: "medium", confidence: 7, file: "", line: 0, evidence: `the check "${s.check}" (${s.command}) passed ${s.passed} of ${s.runs} identical runs`, impact: flakyText, fix: `${flakyFix} Its runner gives no per-test results, so start from its output.`, testIdea: `Run the check at least 5 times in a row: every run passes.`, tier: "B" }));
   }
   for (const suite of arr(baseline.testFiles)) {
     const files = arr(suite.files).filter((f) => Number.isFinite(f.ms));
@@ -1625,6 +1638,7 @@ export function testCandidates(baseline) {
     for (const f of slow) {
       const share = f.ms / total;
       out.push(candidate({
+        title: `${f.file} is one of the slowest test files: ${secs(f.ms)}, ${Math.round(share * 100)}% of the time of "${suite.check}"`,
         category: "slow-test",
         tool: "baseline timing",
         severity: share >= 0.25 ? "medium" : "low",

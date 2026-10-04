@@ -391,6 +391,10 @@ test("security sweep, report and fix plan: every stage runs, findings are verifi
   assert.match(report, /confirmed by 3 of 3 sessions/);
   assert.match(report, /## Appendix: refuted[\s\S]*A claim that does not hold/);
   assert.match(report, /## Uncertain[\s\S]*Hard to tell/);
+  // Scanner and probe findings carry a plain title too (P10.14), the key's value never in it.
+  assert.match(report, /### SEC-\d{3} · \w+ · A Stripe-style secret key in the git history of src\/app\.js \(commit [0-9a-f]{12}\)\n/);
+  assert.match(report, /### SEC-\d{3} · \w+ · No Content-Security-Policy header\n/);
+  for (const f of store.findings) assert.ok(typeof f.title === "string" && f.title.trim(), `${f.id} ${f.category} has a title`);
   const json = JSON.parse(fs.readFileSync(sp.findingsFile, "utf8"));
   assert.equal(json.schemaVersion, 1);
   assert.equal(json.counts.uncertain, 1);
