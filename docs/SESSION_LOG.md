@@ -427,3 +427,15 @@ One entry per working session: what was done, what was committed. Append only.
 - Scott passed on a suggestion to run the checkers side by side; the security review now runs alongside the browser checks (D61), added to the gate agent's P10.13 work.
 - P10.13 built (2 builders), integrated, reviewed (5 findings) and fixed: 782 of 782; 1.1.0-rc.3 on the branch.
 - P10.12 started: practice app with planted problems (spikes/lib/prep-sweep-practice.mjs); this machine temporarily on rc.3 from the clone (restore noted in CONTINUE_HERE).
+- P10.12 security sweep, live on the practice app (rc.3): the /autoclaude:security skill asked 5
+  rounds plus a go, found and fixed the setup itself (an unusable e2e check, the flaky test
+  noted), proved the checks and the dev server, and started the sweep. The sweep took 31 min
+  (estimate 36): 29 files in 5 areas, 6 scanner candidates, 7 review sessions, the probe and a
+  browser session; 35 candidates -> 25 after dedupe; 75 verifier sessions: 24 confirmed, 1
+  refuted. Every planted problem was found (XSS, path traversal, open redirect, stack traces, the
+  key in git history, the Dockerfile token, the compose port, minimist, missing headers), plus
+  real extras (CSRF, DNS rebinding, unbounded bodies, .dockerignore). The fix plan (18 steps in
+  6 phases) lints clean, fits its verification, and carries no exploit detail; the fix run
+  started on autoclaude/security-fixes-2026-10-04-0010.
+- Seen once: a verifier session hit "~/.claude.json is corrupted: Unexpected EOF" (parallel Claude
+  sessions racing on that file); its retry worked and the file is valid. Watch for it.
