@@ -990,3 +990,17 @@ Starting the security review before the checks pass: a failing check would waste
   quarter, capped at the fit limit), not by its worst-case time limit, while the real deadline
   still stops an overrun. No checker sweeps stray files while another lane runs; the gate sweeps
   once after all of them. The out-of-time alert offers verify-per-step only where it helps.
+
+### D62 CHECKPOINT 10: flaky reruns, polish, then 1.1.0 (2026-10-04)
+
+**Decision.** (1) The gate reruns a failed check once before counting an attempt; a check that
+passes on the rerun counts as passed and is reported as flaky. (2) The proof's report issues are
+fixed before 1.1.0: same-file findings merged when one is file-level, titles for scanner
+findings, plain labels in the baseline table. (3) D59 and the D61 addendum stand as built.
+(4) A short live planning session checks the automatic phase split before the release.
+
+**Why.** Scott's answers at CHECKPOINT 10, all the recommended options. The planted flaky test
+paused the practice fix run, and 4 of 5 check failures in his DB run were flaky.
+
+**Rejected.** Counting every failure as before; releasing first and polishing in 1.1.1; releasing
+without seeing the phase split live.

@@ -775,7 +775,12 @@ fixes and the gate verifies.
   - Accept: planning measures the checks, estimates every phase, and splits a phase that does not fit into smaller features by itself, telling the owner what it split
   - Accept: `autoclaude verify-per-step <phase>` marks a phase to be verified step by step (`gate.stepPhases`); the out-of-time alert names that command, and `autoclaude resume` carries on without the plan being rewritten
 
-**CHECKPOINT 10:** Show Scott both reports, the fix run's hand-back, the alerts, and the time and usage each sweep took.
+- [ ] **P10.14** Flaky checks and report polish, from the live proof (D62)
+  - Accept: when a check fails, the gate runs it once more before counting an attempt; a check that then passes counts as passed, is reported as flaky in the verification report, the commit body and HANDOFF, and a real failure (failing twice) counts as before
+  - Accept: a sweep merges findings about the same problem in the same file when one is file-level and the other names a line (the proof's OPT-007/013 and OPT-019/023 become one each), and every finding from a scanner has a title
+  - Accept: the optimize report's baseline table uses plain labels, not raw field names
+
+**CHECKPOINT 10:** Show Scott both reports, the fix run's hand-back, the alerts, and the time and usage each sweep took. (2026-10-04: held. Scott chose: rerun a failed check once, polish the reports before 1.1.0, keep D59 and the D61 addendum, a quick live test of phase sizing before the release; D62.)
 
 ---
 

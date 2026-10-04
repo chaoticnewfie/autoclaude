@@ -462,3 +462,4 @@ One entry per working session: what was done, what was committed. Append only.
   changes. Proof findings: same-file findings not merged when one is file-level (OPT-007/013,
   OPT-019/023), scanner findings without titles, raw keys in the baseline table. P10.12 ticked.
   This machine restored to GitHub 1.0.1 (notify.json intact). CHECKPOINT 10 next.
+- CHECKPOINT 10 held (D62): rerun failed checks once, polish reports, live phase-split test, then 1.1.0.
