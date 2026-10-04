@@ -8,7 +8,7 @@ import {
   DEFAULTS, mergeConfig, validateConfig, loadConfig, formatConfigErrors, PROJECT_ONLY_KEYS, SAFE_LIVE_KEYS, isSafeLiveKey,
   machineDefaultsFile, loadLayers, writeProjectConfig, writeMachineDefaults, readMachineDefaults, configTemplate, EFFORTS,
   setRunPlan, clearRunPlan, runPlanOverride, readRunPlan, runPlanFile, RUN_PLAN_ERROR_PATH, ACCEPTED_FILE, resolveRunPlanSource,
-  continueHereFor, runPlanTag
+  continueHereFor, runPlanTag, updateProjectConfig
 } from "../../plugins/autoclaude/lib/config.js";
 import { runCli } from "../../plugins/autoclaude/lib/cli.js";
 import { collectHandback, handoffFileFor } from "../../plugins/autoclaude/lib/summary.js";
@@ -110,8 +110,8 @@ test("gate.timeoutSec may not exceed the Stop hook's 1800 s; a check's timeoutSe
 test("the Phase 8 defaults: verify per feature, push on, effort unset, feature alerts on, Docker cleanup, no permissions", () => {
   const cfg = mergeConfig({});
   assert.deepEqual(cfg.builder, { model: "opus", effort: null });
-  assert.deepEqual(cfg.checkers, { effort: "xhigh" }, "one effort for every checker, xhigh unless set (D55)");
-  assert.deepEqual(cfg.gate, { timeoutSec: 1800, verifyAt: "phase" });
+  assert.deepEqual(cfg.checkers, { effort: "xhigh", parallel: "security" }, "one effort for every checker, xhigh unless set (D55); the security review alongside the browser checks (D60)");
+  assert.deepEqual(cfg.gate, { timeoutSec: 1800, verifyAt: "phase", fitPct: 70, stepPhases: [] });
   assert.deepEqual(cfg.git, { commitEachStep: true, tagPhaseEnds: true, push: true });
   assert.deepEqual(cfg.notify, { morningSummaryAt: null, events: { featureVerified: true, stepVerified: false, runStarted: false, runResumed: false, pausedByOwner: false } });
   assert.deepEqual(cfg.footprint, { docker: true });
@@ -245,6 +245,18 @@ test("SAFE_LIVE_KEYS: alerts, usage, review pauses, supervisor timings, pushes a
 test("checkers.effort: null or low to max; ultracode and other words are refused (D55)", () => {
   for (const e of [null, "low", "medium", "high", "xhigh", "max"]) assert.deepEqual(validateConfig(mergeConfig({ checkers: { effort: e } })), [], String(e));
   for (const e of ["ultracode", "turbo", 3]) assert.equal(validateConfig(mergeConfig({ checkers: { effort: e } }))[0].path, "checkers.effort", String(e));
+});
+
+test("checkers.parallel: security (the default), off or all; anything else is refused, and it is locked while a run is going", () => {
+  for (const v of ["security", "off", "all"]) assert.deepEqual(validateConfig(mergeConfig({ checkers: { parallel: v } })), [], v);
+  for (const v of ["on", "tester", true, null, 2]) {
+    const errors = validateConfig(mergeConfig({ checkers: { parallel: v } }));
+    assert.deepEqual(errors.map((e) => e.path), ["checkers.parallel"], JSON.stringify(v));
+    assert.match(errors[0].message, /expected one of security, off, all/);
+  }
+  // An older project file that sets only the effort keeps the default.
+  assert.equal(mergeConfig({ checkers: { effort: "high" } }).checkers.parallel, "security");
+  assert.equal(isSafeLiveKey("checkers.parallel"), false);
 });
 
 // ---------- Phase 10: sweeps, the findings file, the run-plan override (D58) ----------
@@ -464,4 +476,61 @@ test("no module reads the project's config except through loadConfig, so the ove
   // The readers named in the plan's research all exist and get their config from loadConfig or a caller that does.
   const readers = files.filter((f) => readsPlan.test(fs.readFileSync(f, "utf8"))).map((f) => path.basename(f)).sort();
   for (const want of ["cli.js", "gate.js", "session-context.js", "tool-guard.js"]) assert.ok(readers.includes(want), `${want} reads config.plan: ${readers.join(", ")}`);
+});
+
+// ---------- P10.13: phases that fit their verification (D60) ----------
+
+test("gate.fitPct is a number from 30 to 95 (default 70); gate.stepPhases a list of phase numbers (default none)", () => {
+  const cfg = mergeConfig({ gate: { timeoutSec: 1200 } });
+  assert.deepEqual([cfg.gate.fitPct, cfg.gate.stepPhases], [70, []], "a partial gate block keeps both defaults");
+  for (const ok of [30, 50, 70, 95, 72.5]) assert.deepEqual(validateConfig(mergeConfig({ gate: { fitPct: ok } })), [], String(ok));
+  for (const bad of [29, 96, 0, "70", null]) {
+    const errs = validateConfig(mergeConfig({ gate: { fitPct: bad } }));
+    assert.deepEqual(errs.map((e) => e.path), ["gate.fitPct"], String(bad));
+    assert.match(errs[0].message, /from 30 to 95/);
+  }
+  assert.deepEqual(validateConfig(mergeConfig({ gate: { stepPhases: [2, 5] } })), []);
+  const errs = validateConfig(mergeConfig({ gate: { stepPhases: [3, 0, 1.5, "4", -2] } }));
+  assert.deepEqual(errs.map((e) => e.path), ["gate.stepPhases[1]", "gate.stepPhases[2]", "gate.stepPhases[3]", "gate.stepPhases[4]"]);
+  assert.match(errs[0].message, /a phase number/);
+  assert.deepEqual(validateConfig(mergeConfig({ gate: { stepPhases: 3 } })).map((e) => e.path), ["gate.stepPhases"]);
+  // Neither may change while a run is going: both change how a feature is checked. A paused run
+  // is the normal time to change them (`verify-per-step`, the settings page).
+  for (const k of ["gate.fitPct", "gate.stepPhases"]) assert.equal(isSafeLiveKey(k), false, k);
+});
+
+test("gate.stepPhases is a project's own: in this computer's defaults it is reported and ignored, gate.fitPct is kept", () => {
+  const machineFile = path.join(tmpDir(), "defaults.json");
+  const root = tmpDir();
+  writeProjectConfig(root, { version: 1 });
+  fs.writeFileSync(machineFile, JSON.stringify({ gate: { fitPct: 80, stepPhases: [2] } }));
+  const m = readMachineDefaults(machineFile);
+  assert.deepEqual(m.values, { gate: { fitPct: 80 } });
+  const p = m.problems.find((x) => x.path === "gate.stepPhases");
+  assert.ok(p, JSON.stringify(m.problems));
+  assert.match(p.message, /belongs to a project's autoclaude\.config\.json/);
+  const r = loadConfig(root, { machineFile });
+  assert.deepEqual([r.config.gate.fitPct, r.config.gate.stepPhases, r.errors], [80, [], []]);
+  // A project sets its own.
+  writeProjectConfig(root, { version: 1, gate: { stepPhases: [4] } });
+  assert.deepEqual(loadConfig(root, { machineFile }).config.gate.stepPhases, [4]);
+  // Only stepPhases goes: a computer file whose gate holds nothing else loses the empty group.
+  fs.writeFileSync(machineFile, JSON.stringify({ gate: { stepPhases: [2] }, tester: { maxTurns: 30 } }));
+  assert.deepEqual(readMachineDefaults(machineFile).values, { tester: { maxTurns: 30 } });
+});
+
+test("updateProjectConfig edits the project's own file only, and refuses a missing or broken one", () => {
+  const machineFile = path.join(tmpDir(), "defaults.json");
+  writeMachineDefaults({ tester: { maxTurns: 30 } }, machineFile);
+  const root = tmpDir();
+  assert.throws(() => updateProjectConfig(root, () => {}), /does not exist; run autoclaude init first/);
+  assert.equal(fs.existsSync(path.join(root, "autoclaude.config.json")), false);
+  writeProjectConfig(root, { version: 1, gate: { timeoutSec: 1200 } });
+  const out = updateProjectConfig(root, (raw) => { raw.gate.stepPhases = [3]; });
+  assert.deepEqual(out, { version: 1, gate: { timeoutSec: 1200, stepPhases: [3] } });
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(root, "autoclaude.config.json"), "utf8")), out, "nothing inherited is copied in");
+  assert.deepEqual(updateProjectConfig(root, () => ({ version: 1 })), { version: 1 }, "a returned object replaces it");
+  fs.writeFileSync(path.join(root, "autoclaude.config.json"), "{ broken");
+  assert.throws(() => updateProjectConfig(root, () => {}), /not valid JSON.*fix it by hand first/);
+  assert.equal(fs.readFileSync(path.join(root, "autoclaude.config.json"), "utf8"), "{ broken");
 });

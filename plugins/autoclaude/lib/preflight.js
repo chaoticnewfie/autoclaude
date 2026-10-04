@@ -10,7 +10,8 @@ import { claudeUserConfigFile, homeDir, isWindows, trustKeyFor } from "./paths.j
 import { parsePlan, lintPlan, firstUnfinished, MARKERS } from "./plan.js";
 import { findOnPath, runCommand } from "./proc.js";
 import { claudeBinary } from "./headless.js";
-import { checksEnv as runChecksEnv } from "./checks.js";
+import { checksEnv as runChecksEnv, readCheckTimes } from "./checks.js";
+import { estimatePlan, misfitText } from "./estimate.js";
 import { readUsage } from "./usage.js";
 import { resolveChannel } from "./notify.js";
 import { restartDevServer, stopDevServer, devServerInfo } from "./devserver.js";
@@ -123,10 +124,12 @@ export async function preflight(project, { env = process.env, checksEnv = null, 
   // Plan
   const planText = readText(path.join(root, config.plan), null);
   let next = null;
+  let planClean = false;
   if (planText === null) add("plan", "fail", `${config.plan} not found`);
   else {
     const parsed = parsePlan(planText);
     const problems = lintPlan(parsed);
+    planClean = problems.length === 0;
     next = firstUnfinished(parsed);
     if (problems.length) add("plan", "fail", `${problems.length} lint problem(s); run \`autoclaude lint-plan\``);
     else if (!next) add("plan", "fail", "every step is already verified");
@@ -214,6 +217,15 @@ export async function preflight(project, { env = process.env, checksEnv = null, 
     }
   } else if (testerWanted) {
     add("dev server", "warn", "no devServer configured, so UI steps will not be checked in a browser");
+  }
+
+  // Phase size (P10.13, D60): a phase whose largest single verification part needs more than
+  // gate.fitPct percent of gate.timeoutSec, with the checks at the times recorded here. A warning
+  // only: the gate spreads a verification over turns, and one that still runs out of time pauses
+  // with the fix named.
+  if (project.parsed && planClean) {
+    const est = estimatePlan(project.parsed, { config, checkTimes: readCheckTimes(root) });
+    if (est.misfits.length) add("phase size", "warn", est.misfits.map((e) => misfitText(e)).join(" "));
   }
 
   // Usage

@@ -109,6 +109,60 @@ function joinOutput(stdout, stderr) {
   return out.endsWith("\n") ? out + err : `${out}\n${err}`;
 }
 
+// ---------- check times (P10.13, D60) ----------
+// Every verification and `autoclaude checks` record how long each check took, so the phase
+// estimates (lib/estimate.js) use this computer's real times instead of each check's timeoutSec.
+// Kept per check name: the last RECENT_RUNS times and their median. Only passed runs count: a
+// failing run may have stopped early (a compile error, a runner that bails), and one stopped by a
+// timeout or the gate's deadline says only that the check needs longer, not how long. The file
+// lives in .autoclaude/, so it stays on this computer, whose speed it describes.
+
+export const CHECK_TIMES_FILE = "check-times.json";
+export const RECENT_RUNS = 5;
+
+export function checkTimesFile(root) {
+  return path.join(root, RUNTIME_DIR, CHECK_TIMES_FILE);
+}
+
+// The median of a list of numbers (the mean of the middle two for an even count), rounded; null
+// for an empty list.
+export function medianOf(list) {
+  const xs = (Array.isArray(list) ? list : []).filter((n) => typeof n === "number" && Number.isFinite(n)).sort((a, b) => a - b);
+  if (!xs.length) return null;
+  const mid = Math.floor(xs.length / 2);
+  return Math.round(xs.length % 2 ? xs[mid] : (xs[mid - 1] + xs[mid]) / 2);
+}
+
+// Adds the passed checks among runChecks `results` to the file and returns the times as they are
+// now: { "<name>": { recentMs: [oldest .. newest], medianMs, at } }. Never throws: a file that
+// cannot be written costs the estimate one measurement, never the verification that called this.
+export function recordCheckTimes(root, results, { now = () => new Date() } = {}) {
+  const passed = (Array.isArray(results) ? results : []).filter((r) => r && typeof r.name === "string" && r.name && r.ok === true && r.ran !== false && !r.skipped && !r.timedOut && !r.outOfTime && Number.isFinite(r.durationMs) && r.durationMs > 0);
+  const times = readCheckTimes(root);
+  if (!passed.length) return times;
+  const at = now().toISOString();
+  for (const r of passed) {
+    const recentMs = [...(times[r.name] ? times[r.name].recentMs : []), Math.round(r.durationMs)].slice(-RECENT_RUNS);
+    times[r.name] = { recentMs, medianMs: medianOf(recentMs), at };
+  }
+  try { writeJsonAtomic(checkTimesFile(root), times); } catch {}
+  return times;
+}
+
+// The recorded times, the same shape; {} when there are none or the file is broken. An entry
+// without a usable time is left out, and the median is worked out again from the times kept.
+export function readCheckTimes(root) {
+  let j;
+  try { j = readJson(checkTimesFile(root), null); } catch { return {}; }
+  if (!j || typeof j !== "object" || Array.isArray(j)) return {};
+  const out = {};
+  for (const [name, v] of Object.entries(j)) {
+    const recentMs = v && Array.isArray(v.recentMs) ? v.recentMs.filter((n) => typeof n === "number" && Number.isFinite(n) && n > 0).slice(-RECENT_RUNS) : [];
+    if (recentMs.length) out[name] = { recentMs, medianMs: medianOf(recentMs), at: v && typeof v.at === "string" ? v.at : null };
+  }
+  return out;
+}
+
 // ---------- the checks' environment (P8.4) ----------
 // The gate runs the checks with the PATH of the terminal that ran `autoclaude run`: the window,
 // the builder session and its hooks all inherit it. `autoclaude checks` is often typed in another

@@ -984,3 +984,9 @@ Starting the security review before the checks pass: a failing check would waste
   timings marked as overlapping. A setting `checkers.parallel`: `security` (default), `off`, or
   `all` (the tester and bug bash overlap too; opt-in, only for apps whose test data can take
   both at once). Chosen by Scott's session as the recommended answers, for review at CHECKPOINT 10.
+- **Addendum to D60 (2026-10-03), from the review of the build.** The fix-up pass's checks and a
+  step's second run of the checks after findings are filed are spread over turns like the main
+  verification. The gate weighs a checker by its expected need (the estimate's model plus a
+  quarter, capped at the fit limit), not by its worst-case time limit, while the real deadline
+  still stops an overrun. No checker sweeps stray files while another lane runs; the gate sweeps
+  once after all of them. The out-of-time alert offers verify-per-step only where it helps.

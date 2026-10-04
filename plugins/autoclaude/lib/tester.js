@@ -409,8 +409,9 @@ export function verdictSection(kind, verdict, evaluation, meta = {}) {
 // verification too big for one stop, not a machine problem. Takes `steps` (the whole feature,
 // phase mode) or `step`; in phase mode the tester leaves out steps tagged no-ui (their tests
 // verify them), and its test changes run from state.phaseBaseCommit (read from the run state
-// when not passed).
-export async function runBrowserCheck({ kind = "tester", root, config, step = null, steps = null, parsed, state = null, env = process.env, attempt = 1, deadlineMs = Infinity, run = runHeadless, now = () => Date.now() }) {
+// when not passed). sweep: false leaves the files it created in the project to the caller (the
+// gate, which sweeps once every checker running alongside is done), and `strays` is then empty.
+export async function runBrowserCheck({ kind = "tester", root, config, step = null, steps = null, parsed, state = null, env = process.env, attempt = 1, deadlineMs = Infinity, run = runHeadless, now = () => Date.now(), sweep = true }) {
   const k = KINDS[kind];
   if (!k) throw new Error(`unknown browser check ${kind}`);
   const phaseMode = Array.isArray(steps) && steps.length > 0;
@@ -450,7 +451,7 @@ export async function runBrowserCheck({ kind = "tester", root, config, step = nu
   // The checker's working directory is its own report folder, so anything it saves by a bare
   // file name lands there; --add-dir keeps the project readable for Read, Glob and Grep.
   const args = buildArgs({ model: t.model, effort: config.checkers ? config.checkers.effort : null, maxTurns, schema: VERDICT_SCHEMA, mcpConfig: mcpFile, allowedTools: ALLOWED_TOOLS, extraArgs: ["--add-dir", root, ...playwrightGuardArgs()] });
-  const before = await untrackedSet(root, env);
+  const before = sweep ? await untrackedSet(root, env) : null;
 
   const errors = [];
   let result = null;

@@ -5,8 +5,10 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { failingAcceptLines, verifyMode, openFixupFindings } from "../../plugins/autoclaude/lib/gate.js";
+import { failingAcceptLines, verifyMode, openFixupFindings, expectedCheckMs, expectedCheckerMs, checkerNeedSec, fitLimitSec } from "../../plugins/autoclaude/lib/gate.js";
+import * as estimate from "../../plugins/autoclaude/lib/estimate.js";
 import { parsePlan } from "../../plugins/autoclaude/lib/plan.js";
+import { mergeConfig } from "../../plugins/autoclaude/lib/config.js";
 
 const PLAN = "# P plan\n\n## Phase 1: Lists\n- [~] **S1.1** One\n  - Accept: the page shows a button labelled \"Clear completed\"\n  - Test: test/clear.test.js\n- [~] **S1.2** Two\n  - Accept: the count line reads `1 left, 1 done`\n  - Accept: the count updates without a reload\n- [ ] **S1.3** Three\n  - Accept: the store keeps three items\n  - Test: test/store.test.js\n  - Tags: no-ui\n";
 const steps = parsePlan(PLAN).phases[0].steps;
@@ -16,6 +18,50 @@ test("verifyMode: per feature unless the project asks for per step", () => {
   assert.equal(verifyMode({ gate: { verifyAt: "phase" } }), "phase");
   assert.equal(verifyMode({ gate: {} }), "phase", "the 0.10.0 default");
   assert.equal(verifyMode({}), "phase");
+});
+
+test("verifyMode: a phase in gate.stepPhases is verified step by step; the key is read defensively", () => {
+  const cfg = { gate: { verifyAt: "phase", stepPhases: [2, "3"] } };
+  assert.deepEqual([verifyMode(cfg, 2), verifyMode(cfg, 3), verifyMode(cfg, 1), verifyMode(cfg)], ["step", "step", "phase", "phase"]);
+  assert.equal(verifyMode({ gate: { verifyAt: "step", stepPhases: [] } }, 1), "step", "verifyAt step covers every phase");
+  for (const stepPhases of ["2", null, { 2: true }, [null, "x", -1]]) assert.equal(verifyMode({ gate: { verifyAt: "phase", stepPhases } }, 2), "phase", JSON.stringify(stepPhases));
+});
+
+test("expectedCheckMs: a check's recent time with a quarter on top, else its timeoutSec; capped by its timeout, never under the least a check starts with", () => {
+  const unit = { name: "unit", command: "x", timeoutSec: 600 };
+  assert.equal(expectedCheckMs(unit, {}), 600000, "nothing on record: its timeoutSec");
+  assert.equal(expectedCheckMs({ name: "lint", command: "x" }, {}), 900000, "no timeoutSec: the 900 s default");
+  assert.equal(expectedCheckMs(unit, { unit: { recentMs: [100000, 400000, 120000], medianMs: 120000 } }), 150000);
+  assert.equal(expectedCheckMs(unit, { unit: { recentMs: [100000, 120000, 400000, 500000] } }), 325000, "no median recorded: the median of the recent times");
+  assert.equal(expectedCheckMs(unit, { unit: { medianMs: 590000 } }), 600000, "never more than its timeout");
+  assert.equal(expectedCheckMs(unit, { unit: { medianMs: 200 } }), 10000, "never less than the least a check is started with");
+  assert.equal(expectedCheckMs(unit, { unit: { medianMs: "soon", recentMs: "x" } }), 600000, "a record that makes no sense counts as none");
+  assert.equal(expectedCheckMs(unit, { other: { medianMs: 1000 } }), 600000);
+});
+
+test("expectedCheckerMs: a checker is weighed by the estimate's model with a quarter on top, never by its worst case; capped by its own limit and by the most a part may need", () => {
+  const cfg = mergeConfig({});
+  const lines = (n) => [{ id: "S1.1", tags: ["ui"], accept: Array.from({ length: n }, (_, i) => `line ${i}`) }];
+  // Six Accept lines: the tester's own limit is 1800 s (900 s for every 5 lines), more than a
+  // stop has; it needs about 50 + 6 x 15 = 140 s, and is weighed at 175 s.
+  assert.equal(checkerNeedSec("tester", cfg, { steps: lines(6) }), 140);
+  assert.equal(expectedCheckerMs("tester", cfg, { steps: lines(6) }), 175000);
+  assert.equal(expectedCheckerMs("tester", cfg, { step: lines(6)[0] }), 175000, "one step, as the gate runs a step verified on its own");
+  assert.equal(checkerNeedSec("tester", cfg, { steps: [...lines(6), { id: "S1.2", tags: ["no-ui"], accept: ["x", "y"] }] }), 140, "no-ui steps are left out, as the tester leaves them out");
+  // 70 lines: 1100 s, a quarter on top is 1375 s, more than the 1218 s a part may need.
+  assert.equal(expectedCheckerMs("tester", cfg, { steps: lines(70) }), fitLimitSec(cfg) * 1000);
+  assert.equal(fitLimitSec(cfg), 1218);
+  // The bug bash: 60 turns of 7 s; the security review: 180 s; a quarter on top of each.
+  assert.equal(expectedCheckerMs("bugbash", cfg, { step: lines(1)[0] }), 525000);
+  assert.equal(expectedCheckerMs("security", cfg), 225000);
+  // Never more than the checker's own limit, where it is stopped.
+  assert.equal(expectedCheckerMs("security", mergeConfig({ security: { timeoutSec: 100 } })), 100000);
+  assert.equal(expectedCheckerMs("tester", mergeConfig({ tester: { timeoutSec: 60 } }), { steps: lines(1) }), 60000);
+  // lib/estimate.js counts the checkers by the same model and the same limit.
+  assert.equal(estimate.fitLimitSec, fitLimitSec);
+  const six = parsePlan(`# P plan\n\n## Phase 1: Six\n- [ ] **S1.1** One\n${[1, 2, 3, 4, 5, 6].map((n) => `  - Accept: line ${n}\n`).join("")}  - Tags: ui\n`);
+  const e = estimate.estimatePhase(six.phases[0], { config: mergeConfig({ devServer: { command: "x", url: "http://127.0.0.1:1" } }), parsed: six });
+  assert.deepEqual(e.parts.filter((p) => p.kind !== "check").map((p) => [p.kind, p.seconds]), [["tester", 140], ["bugbash", 420], ["security", 180]]);
 });
 
 test("failingAcceptLines matches the tester's [FAIL] criteria to Accept lines, however the tester quotes them", () => {

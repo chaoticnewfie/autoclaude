@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { buildSummary, progressEntries, parseDecisions, runDecisions, ownerReviewDecisions, decisionsMark, decisionsAtStart, parseTableRows, isOpenStatus, unresolvedRows, isPrivateDoc, afterRunSection, afterRunItems, pushLine, pushStatus } from "../../plugins/autoclaude/lib/summary.js";
 import { preflight, checkRunnable, playwrightBrowsersDir, formatPreflight, checkRequirements } from "../../plugins/autoclaude/lib/preflight.js";
-import { recordRunEnv } from "../../plugins/autoclaude/lib/checks.js";
+import { recordRunEnv, recordCheckTimes } from "../../plugins/autoclaude/lib/checks.js";
 import { mergeConfig } from "../../plugins/autoclaude/lib/config.js";
 import { parsePlan, MARKERS } from "../../plugins/autoclaude/lib/plan.js";
 import { prepareFixture, gitEnv } from "../fixtures/prepare.js";
@@ -430,4 +430,29 @@ test("preflight on Linux and macOS requires tmux; on Windows there is no tmux it
 
   r = await preflight(project, { env: { PATH: without }, userConfigFile, skip, platform: "win32" });
   assert.equal(itemsOf(r).tmux, undefined);
+});
+
+test("preflight warns, never fails, about a phase whose largest verification part does not fit; recorded check times count", async () => {
+  const env = gitEnv(process.env);
+  const userConfigFile = path.join(tmp("autoclaude-pf-cfg-"), ".claude.json");
+  const node = JSON.stringify(process.execPath);
+  const suite = { name: "suite", command: `${node} -e 0`, timeoutSec: 1500 };
+  const project = pfProject(UI_PLAN, { checks: [suite] });
+  let r = await preflight(project, { env, userConfigFile, devServer: false, skip: QUIET, platform: "win32" });
+  const warn = itemsOf(r)["phase size"];
+  assert.equal(warn.status, "warn");
+  assert.match(warn.detail, /^Phase 1 \(A\) does not fit its verification: its check "suite" needs up to 1500 s \(its timeoutSec; not timed yet\), more than 1218 s .*`autoclaude checks` times it\./);
+  assert.equal(r.ok, true, formatPreflight(r));
+  assert.match(formatPreflight(r), /\n {2}warn phase size: Phase 1 \(A\) does not fit/);
+
+  // Timed on this computer at two minutes: nothing to warn about.
+  recordCheckTimes(project.root, [{ name: "suite", ok: true, ran: true, durationMs: 120000 }]);
+  r = await preflight(project, { env, userConfigFile, devServer: false, skip: QUIET, platform: "win32" });
+  assert.equal(itemsOf(r)["phase size"], undefined);
+
+  // A plan that fails lint is the plan item's FAIL alone; there is nothing to estimate.
+  const broken = pfProject("# P\n\n## Phase 1: A\n- [ ] **S1.1** no accept line\n", { checks: [suite] });
+  r = await preflight(broken, { env, userConfigFile, devServer: false, skip: QUIET, platform: "win32" });
+  assert.equal(itemsOf(r)["phase size"], undefined);
+  assert.equal(itemsOf(r).plan.status, "fail");
 });

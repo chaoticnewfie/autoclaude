@@ -92,6 +92,14 @@ export { cmdShimArg, cmdShimLine, spawnClaude };
 const ts = (iso) => { const t = iso ? Date.parse(iso) : NaN; return Number.isFinite(t) ? t : null; };
 const mins = (ms) => `${Math.round(ms / MIN)} min`;
 
+// Where a verification spread over stops stands (lib/gate.js state.verifying, D60): it moves on
+// with no tool call of the builder's, so a part done since the last relaunch is progress too.
+// Null when no verification is carried over.
+export function stageMark(state) {
+  const v = state && state.verifying;
+  return v && v.verifyId ? `${v.verifyId}:${Array.isArray(v.done) ? v.done.length : 0}` : null;
+}
+
 // Pure decision. Every input is a plain value; see supervise() for where each comes from.
 // Returns { action: "none" | "fresh" | "relaunch" | "nudge" | "continue" | "pause-stuck" | "pause-weekly" | "resume-weekly" | "halt" | "exit", reason }.
 export function decide(i) {
@@ -335,7 +343,8 @@ export async function supervise({
       }
       lastStatus = state.status;
       const beat = readHeartbeat(root);
-      if (beat.count > sup.countAtLastRecovery && sup.countAtLastRecovery >= 0) { sup.recoveries = 0; sup.countAtLastRecovery = -1; }
+      const stage = stageMark(state);
+      if (sup.countAtLastRecovery >= 0 && (beat.count > sup.countAtLastRecovery || (stage !== null && stage !== (sup.stageAtLastRecovery ?? null)))) { sup.recoveries = 0; sup.countAtLastRecovery = -1; }
       const idle = (() => { try { const j = readJson(p.idleFile, null); return j ? { type: j.type, at: ts(j.at) } : null; } catch { return null; } })();
       const failure = (() => { try { const j = readJson(p.failureFile, null); return j ? { type: j.type, at: ts(j.at) } : null; } catch { return null; } })();
       // A verifying marker only counts while the gate process that wrote it is alive; a session
@@ -388,7 +397,7 @@ export async function supervise({
         launch("resume");
       } else if (d.action === "relaunch") {
         await stopChild();
-        sup.recoveries += 1; sup.countAtLastRecovery = beat.count; sup.resumedAt = null; sup.nudgedAt = null;
+        sup.recoveries += 1; sup.countAtLastRecovery = beat.count; sup.stageAtLastRecovery = stage; sup.resumedAt = null; sup.nudgedAt = null;
         removeIfExists(p.idleFile);
         if (failure && failure.type !== "rate_limit") removeIfExists(p.failureFile);
         launch("resume");

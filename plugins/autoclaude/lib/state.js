@@ -10,7 +10,8 @@ import { readRunPlan, setRunPlan, clearRunPlan } from "./config.js";
 
 export const STATUS = Object.freeze({ idle: "idle", running: "running", paused: "paused", complete: "complete" });
 // Every pauseReason the gate, the CLI and the supervisor set.
-// "out-of-time": a verification that does not fit in one stop, twice for the same step.
+// "out-of-time": a verification that does not fit in one stop, twice for the same step (a part
+// that does not fit even in a stop of its own; the rest is carried to the next stop).
 export const PAUSE_REASONS = Object.freeze(["review", "blocked", "step-failed", "security", "stuck", "infra", "out-of-time", "commit-failed", "weekly-limit"]);
 
 export function defaultState() {
@@ -58,6 +59,14 @@ export function defaultState() {
     // again instead, taking the verification out with undo ({ ticked, markers, added,
     // progressCreated, rows }; none after a fix-up pass, which goes back to that pass).
     closing: null,
+    // A verification spread over more than one stop (D60): its parts (each check, the browser
+    // tester, the bug bash, the security review) run as far as they fit, and the rest waits for
+    // the next stop. { verifyId, stepId, feature, phase, attempt, scope, ticked, undo, done:
+    // [part keys], sections, timings, followUps, securityFindings, noted, turns, restarts,
+    // startedAt, tree, parked, pid, at }. parked is true between two stops: its ticks are then
+    // the gate's (the integrity check and resume accept them) and its snapshot is not a cut-off.
+    // tree is the tree it parked on; a next stop that finds other files starts it again.
+    verifying: null,
     // The plan is complete and the gate is finishing the run (machine footprint, hand-back,
     // its commit and push, the alert): { at, footprintDone, footprint, handoffDone, handoff,
     // headBefore, committed, pushWanted, pushed, pushState }. The run is marked complete only

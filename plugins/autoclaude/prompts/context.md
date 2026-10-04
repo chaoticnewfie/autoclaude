@@ -18,7 +18,7 @@ You are the builder in an unattended AutoClaude run for the project at `{{PROJEC
 
 ## Fix-up pass
 
-When a feature's verification passes with non-blocking findings (lower-severity bugs from the browser tester or the bug bash, security findings below the blocking level), the gate lists them before it closes the feature. For each finding, either fix it, or leave it for the owner with a reason: why it was not fixed and what fixing it would take. Record each outcome in the finding's row exactly as the gate's message says (`fixed`, or left for the owner with the reason). Then run `ready` on the same step again: the checks run once more and the feature closes. Do not start the next step before that. A fresh or resumed session in the middle of a fix-up pass gets the list again from the gate.
+When a feature's verification passes with non-blocking findings (lower-severity bugs from the browser tester or the bug bash, security findings below the blocking level), the gate lists them before it closes the feature. For each finding, either fix it, or leave it for the owner with a reason: why it was not fixed and what fixing it would take. Record each outcome in the finding's row exactly as the gate's message says (`fixed`, or left for the owner with the reason). Then run `ready` on the same step again: the checks run once more and the feature closes (when they do not all fit in one turn, the gate says so: end your turn without changing anything and they carry on). Do not start the next step before that. A fresh or resumed session in the middle of a fix-up pass gets the list again from the gate.
 
 ## Staying within what the plan allows
 

@@ -541,7 +541,7 @@ test("state.json after each per-feature path: built, failed, passed with finding
 const T0 = Date.parse("2026-09-28T10:00:00Z");
 const checkRuns = (root) => { try { return fs.readFileSync(path.join(root, ".autoclaude", "check-runs"), "utf8").length; } catch { return 0; } };
 
-test("the checkers share the gate's time: each keeps a reserve for those after it, and one stopped at its share is out of time, not a machine fault", async () => {
+test("the checkers get what is left of the stop; one stopped at the deadline after another part of its stop is carried over, and as the first part of a stop it is out of time, not a machine fault", async () => {
   const root = scratch();
   const { deps: b } = fakeBrowser({});
   const got = [];
@@ -550,32 +550,43 @@ test("the checkers share the gate's time: each keeps a reserve for those after i
   await build(root, ["S1.1", "S1.2"], b);
   let r = await ready(root, "S1.3", { ...b, runTester, runSecurity, clock: () => T0 });
   assert.match(r.reason, /^Phase 1 \(Lists\) verified and committed/, JSON.stringify(r.events));
-  // 1740 s for the checks and checkers (the stop's 1800 less a minute for the commit); each of
-  // the three allows itself 900 s, so each keeps half a fair share for every one after it.
-  assert.deepEqual(got, [["tester", 1160000], ["bugbash", 1305000], ["security", 1740000]]);
+  // 1740 s for the checks and checkers (the stop's 1800 less a minute for the commit). A part
+  // starts only when what it is allowed fits in what is left (the rest waits for the next stop,
+  // D60), so none needs a reserve kept for those after it. The security review starts with the
+  // tester, alongside the browser checks (checkers.parallel "security").
+  assert.deepEqual(got, [["tester", 1740000], ["security", 1740000], ["bugbash", 1740000]]);
 
-  // The security review stopped at its share: out of time, not an attempt, no machine blamed.
+  // The security review stopped at the deadline after the other parts of its stop: carried over.
   await build(root, ["S2.1"], b);
   const cut = { status: "out-of-time", failed: "Security review ran out of the gate's time (1 try): stopped at the gate's deadline after 435 s (its own limit is 900 s)", sections: [{ title: "Security review: out of time", body: "x" }], findings: [] };
   r = await ready(root, "S2.2", { ...b, runSecurity: async () => cut });
+  assert.match(r.reason, /^The verification of Phase 2 \(More\) goes on in the next turn: check "unit", the browser tester and the bug bash are done, and the security review would not fit/, JSON.stringify(r.events));
+  let s = loadState(root);
+  assert.deepEqual([s.attempts["S2.2"] || 0, s.infraFailures["S2.2"] || 0, s.outOfTime["S2.2"] || 0], [0, 0, 0]);
+  // The first part of the next stop, stopped again: out of time, not an attempt, no machine blamed.
+  r = await gate(root, { ...b, runSecurity: async () => cut });
   assert.equal(r.decision, "block", JSON.stringify(r.events));
   assert.match(r.reason, /^The verification of Phase 2 \(More\) ran out of time: Security review ran out of the gate's time/);
   assert.doesNotMatch(r.reason, /problem on this machine/);
-  let s = loadState(root);
-  assert.deepEqual([s.attempts["S2.2"] || 0, s.infraFailures["S2.2"] || 0, s.outOfTime["S2.2"]], [0, 0, 1]);
+  s = loadState(root);
+  assert.deepEqual([s.attempts["S2.2"] || 0, s.infraFailures["S2.2"] || 0, s.outOfTime["S2.2"], s.verifying], [0, 0, 1, null]);
   assert.equal(markers(root), "xxx~  ", "the ticks came out again");
-  const before = sent.length;
   r = await ready(root, "S2.2", { ...b, runSecurity: async () => cut });
+  assert.match(r.reason, /goes on in the next turn/);
+  const before = sent.length;
+  r = await gate(root, { ...b, runSecurity: async () => cut });
   assert.equal(r.decision, "allow");
   s = loadState(root);
   assert.deepEqual([s.status, s.pauseReason], ["paused", "out-of-time"]);
   const alert = sent.slice(before).find((m) => m.priority === "high");
   assert.match(alert.title, /S2\.2 does not fit in one verification/);
   assert.match(alert.message, /The feature is too big for one verification/);
+  assert.match(alert.message, /verify-per-step 2`, then `[^`]*resume`/);
   assert.doesNotMatch(alert.message, /Playwright|claude CLI/);
 
-  // Too little of the gate's time left to start a checker at all: out of time without running it.
-  const root2 = scratch();
+  // Too little of the gate's time left to start a checker at all, as the first part of its stop:
+  // out of time without running it.
+  const root2 = scratch({ checks: [] });
   await build(root2, ["S1.1", "S1.2"], b);
   const started = [];
   const late = () => { let n = 0; return () => T0 + (n++ === 0 ? 0 : 1700000); };

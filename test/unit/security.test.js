@@ -206,6 +206,20 @@ test("runSecurityReview: a pass with a low finding passes and hands the finding 
   assert.deepEqual([saved.kind, saved.ok, saved.tries, saved.blockOn, saved.model, saved.verdict.verdict], ["security", true, 1, "high", "opus", "pass"]);
 });
 
+test("runSecurityReview: files that appear in the project while it runs are moved by default; with sweep: false they are left to the caller", async () => {
+  // Running alongside the browser checks (checkers.parallel), a file the app writes meanwhile (an
+  // upload the tester made) must stay where the app put it: the gate sweeps once every lane is done.
+  const root = fixture();
+  const writes = (name) => () => { fs.writeFileSync(path.join(root, name), "png"); return ok(verdictOf([])); };
+  let { r } = await review([writes("upload-1.png")], { root, sweep: false });
+  assert.deepEqual([r.status, r.strays], ["passed", []]);
+  assert.ok(fs.existsSync(path.join(root, "upload-1.png")));
+  ({ r } = await review([writes("upload-2.png")], { root, attempt: 2 }));
+  assert.deepEqual([r.status, r.strays], ["passed", ["upload-2.png"]]);
+  assert.equal(fs.existsSync(path.join(root, "upload-2.png")), false);
+  assert.ok(fs.existsSync(path.join(root, ".autoclaude", "reports", "S1.2-2-security", "stray", "upload-2.png")));
+});
+
 test("runSecurityReview: a high finding fails the step and names file:line; the rest are handed back", async () => {
   const { r } = await review([ok(verdictOf([high, low], "fail"))]);
   assert.equal(r.status, "failed");

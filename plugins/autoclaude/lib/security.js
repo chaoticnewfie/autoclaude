@@ -221,8 +221,11 @@ const MIN_RETRY_MS = 60000;
 // | "infra" | "out-of-time", failed, sections, findings (the non-blocking ones, for the gate to
 // file), verdictFile, strays }. `run` is injectable for tests. Retries once on an
 // infrastructure failure when the deadline leaves room for it. "out-of-time": the deadline (the
-// gate's time for this checker), not security.timeoutSec, stopped it.
-export async function runSecurityReview({ root, config, step = null, steps = null, parsed, state = null, env = process.env, attempt = 1, deadlineMs = Infinity, run = runHeadless, now = () => Date.now() }) {
+// gate's time for this checker), not security.timeoutSec, stopped it. sweep: false leaves files
+// that appeared in the project meanwhile to the caller (the gate, which sweeps once every checker
+// running alongside is done: the app under the browser checks writes files while this runs), and
+// `strays` is then empty.
+export async function runSecurityReview({ root, config, step = null, steps = null, parsed, state = null, env = process.env, attempt = 1, deadlineMs = Infinity, run = runHeadless, now = () => Date.now(), sweep = true }) {
   if (!step && !(Array.isArray(steps) && steps.length)) throw new Error("runSecurityReview needs a step or steps");
   step = step || steps[steps.length - 1];
   const p = projectPaths(root);
@@ -237,7 +240,7 @@ export async function runSecurityReview({ root, config, step = null, steps = nul
   const prompt = buildSecurityPrompt({ template, step, steps: reviewed, parsed, base, diff, root, planFile: config.plan });
   // The reviewer works inside its report folder; --add-dir keeps the project readable.
   const args = buildArgs({ model: s.model, effort: config.checkers ? config.checkers.effort : null, maxTurns: MAX_TURNS, schema: SECURITY_SCHEMA, mcpConfig: null, allowedTools: SECURITY_TOOLS, extraArgs: ["--add-dir", root] });
-  const before = await untrackedSet(root, env);
+  const before = sweep ? await untrackedSet(root, env) : null;
 
   const errors = [];
   let result = null;

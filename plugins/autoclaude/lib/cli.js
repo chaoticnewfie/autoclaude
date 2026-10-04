@@ -5,7 +5,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { findProjectRoot, projectPaths, pluginRoot, binDir, machinePaths, isWindows } from "./paths.js";
-import { loadConfig, formatConfigErrors, readRunPlan, clearRunPlan, resolveRunPlanSource, runPlanFile } from "./config.js";
+import { loadConfig, formatConfigErrors, readRunPlan, clearRunPlan, resolveRunPlanSource, runPlanFile, updateProjectConfig } from "./config.js";
 import { loadState, updateState, describeState, STATUS, hasMainStateKept, readMainStateKept, restoreMainState, finishRunPlan, beginRunPlan, mainStateFile } from "./state.js";
 import { handoffFileFor } from "./handoff.js";
 import { parsePlan, lintPlan, formatLint, stepById, nextStep, progress } from "./plan.js";
@@ -17,13 +17,14 @@ import { initProject, formatInitReport } from "./init.js";
 import { writeReady, writeBlocked, readReady } from "./protocol.js";
 import { firstUnfinished, planSlug, setMarker, isFinished, MARKERS } from "./plan.js";
 import * as git from "./git.js";
-import { resumeRun, commitPending } from "./resume.js";
+import { resumeRun, commitPending, stagedVerification, stagedPartsText } from "./resume.js";
 import { preflight, formatPreflight } from "./preflight.js";
 import { supervise } from "./supervisor.js";
 import { openConsoleWindow, isPidAlive as pidAlive } from "./proc.js";
 import { registerProject } from "./registry.js";
 import { installLauncher } from "./launcher.js";
-import { runChecks, checksEnv, describeChecksEnv, recordRunEnv } from "./checks.js";
+import { runChecks, checksEnv, describeChecksEnv, recordRunEnv, recordCheckTimes, readCheckTimes } from "./checks.js";
+import { estimatePlan, formatPlanEstimate } from "./estimate.js";
 import { restartDevServer, stopDevServer, devServerInfo } from "./devserver.js";
 import { runDecider, runHeadless } from "./headless.js";
 import { stepText } from "./plan.js";
@@ -87,7 +88,8 @@ Project commands (run inside a project):
                         the watchdog and the status line
   checks                Run the configured checks the way the gate does (with the PATH the run
                         recorded, starting the dev server first when a check needs it) and print
-                        one line per check
+                        one line per check. The times of the checks that pass are recorded for
+                        the phase estimates of lint-plan and run --check
   guard-test "<command>"
                         Show whether the run's tool guard would allow this command in the Bash
                         tool and in the PowerShell tool, and why not
@@ -105,7 +107,17 @@ Project commands (run inside a project):
                         ends the builder session and the dev server is stopped
   note "<text>"         Leave a review note for Claude; it is read on the next resume or session start
   resume                Clear a pause and set the run going again (refuses if PLAN.md fails lint)
-  lint-plan [file]      Check the plan against the step format
+  lint-plan [file]      Check the plan against the step format, then estimate each unfinished
+                        phase's verification (each check at its recorded time, the browser tester
+                        by its Accept lines, the bug bash, the security review) and print a
+                        WARNING for a phase whose largest part needs more than gate.fitPct percent
+                        of gate.timeoutSec. The warnings do not change the exit code
+  verify-per-step <phase> [--off]
+                        Verify that phase step by step instead of as one feature (adds it to
+                        gate.stepPhases in autoclaude.config.json), for a plan already running out
+                        of time; \`autoclaude resume\` then carries on without the plan being
+                        rewritten. Refused while the run is running (pause it first).
+                        --off: verify the phase as one feature again
 
 Machine commands:
   usage                 Show the 5-hour and 7-day usage percentages Claude Code last reported
@@ -141,7 +153,7 @@ class Io {
 }
 
 // Every command runCli knows, for `<command> --help`.
-export const COMMANDS = ["help", "version", "init", "status", "config", "run", "security", "optimize", "sweep-run", "sweep-stop", "sweep-status", "checks", "guard-test", "supervise", "nudge", "watchdog", "uninstall", "start", "ready", "blocked", "decide", "answer", "pause", "note", "resume", "lint-plan", "usage", "install-cli", "notify-setup", "notify-test"];
+export const COMMANDS = ["help", "version", "init", "status", "config", "run", "security", "optimize", "sweep-run", "sweep-stop", "sweep-status", "checks", "guard-test", "supervise", "nudge", "watchdog", "uninstall", "start", "ready", "blocked", "decide", "answer", "pause", "note", "resume", "lint-plan", "verify-per-step", "usage", "install-cli", "notify-setup", "notify-test"];
 // Commands whose arguments are free text: only a first argument of --help or -h asks for help,
 // so a note or a question that mentions -h is left alone.
 const TEXT_COMMANDS = ["nudge", "blocked", "decide", "answer", "note", "guard-test", "notify-test"];
@@ -203,6 +215,7 @@ export async function runCli(argv, rawIo = {}) {
       case "note": return cmdNote(rest, io);
       case "resume": return await cmdResume(rest, io);
       case "lint-plan": return cmdLintPlan(rest, io);
+      case "verify-per-step": return cmdVerifyPerStep(rest, io);
       case "usage": return cmdUsage(rest, io);
       case "install-cli": return cmdInstallCli(rest, io);
       case "notify-setup": return cmdNotifySetup(rest, io);
@@ -332,6 +345,21 @@ async function cmdStatus(args, io) {
     }
   } else {
     io.out(`  plan: ${plan.problems[0].message}`);
+  }
+  // A verification spread over turns (state.verifying, D60): the phase, the parts done and the
+  // parts left.
+  const staged = stagedVerification(state.verifying);
+  if (staged) {
+    const ph = staged.feature && staged.phase !== null && plan.parsed ? plan.parsed.phases.find((x) => x.num === staged.phase) : null;
+    const what = ph ? `Phase ${ph.num} (${ph.title})` : staged.what;
+    const alive = io.deps.isPidAlive || isPidAlive;
+    const where = staged.parked
+      ? `carried over to the next turn after ${staged.turns} stop${staged.turns === 1 ? "" : "s"}; the gate carries it on when the builder's turn ends`
+      : state.verifying.pid && alive(state.verifying.pid)
+        ? `the gate is at work on it (stop ${staged.turns + 1} of it)`
+        : `cut off in stop ${staged.turns + 1} of it; the next stop takes it out`;
+    const partsText = stagedPartsText(staged);
+    io.out(`  verification: ${staged.fixup ? "the fix-up checks of " : ""}${what}${staged.feature ? `, at ${staged.stepId}` : ""}, ${where}${partsText ? `; ${partsText}` : ""}`);
   }
   if (state.pendingNotes.length) io.out(`  review notes waiting: ${state.pendingNotes.length}`);
   // An active run-plan override (a sweep's generated plan is the one `autoclaude run` uses, P10.7).
@@ -962,8 +990,10 @@ async function cmdChecks(args, io) {
     if (stopAfter) stop({ root });
   }
   for (const r of result.results) if (r.skipped) io.out(line(r));
+  // The phase estimates (lint-plan, run --check, planning) use these times (P10.13).
+  recordCheckTimes(root, result.results);
   if (result.ok) {
-    io.out(`autoclaude: all ${result.results.length} check(s) passed`);
+    io.out(`autoclaude: all ${result.results.length} check(s) passed; their times are recorded for the phase estimates`);
     return 0;
   }
   const f = result.failed;
@@ -1469,6 +1499,72 @@ function cmdLintPlan(args, io) {
   }
   const p = progress(parsed);
   io.out(`autoclaude: ${file} ok: ${p.total} steps in ${parsed.phases.length} phases (${p.done} verified, ${p.todo} to do${p.failed ? `, ${p.failed} failed` : ""}${p.blocked ? `, ${p.blocked} blocked` : ""})`);
+  for (const l of planEstimateLines(parsed, io)) io.out(l);
+  return 0;
+}
+
+// The per-phase verification estimate after a clean lint (P10.13, D60), with the settings of the
+// project lint-plan runs in and the check times recorded there. Nothing outside a project that
+// has its autoclaude.config.json: without its checks and dev server the numbers would mean
+// nothing. A WARNING line never changes lint-plan's exit code.
+function planEstimateLines(parsed, io) {
+  const root = findProjectRoot(io.cwd);
+  if (!root) return [];
+  const cfg = loadConfig(root);
+  if (!cfg.exists || cfg.errors.length) return [];
+  const { lines, warnings } = formatPlanEstimate(estimatePlan(parsed, { config: cfg.config, checkTimes: readCheckTimes(root) }));
+  return [...lines, ...warnings];
+}
+
+// ---------- verify-per-step ----------
+
+// Marks a phase to be verified step by step (gate.stepPhases, P10.13): the way out for a plan
+// already running whose feature keeps running out of time, without rewriting the plan. Written to
+// the project's own autoclaude.config.json, like any setting; locked while the run is running, as
+// on the settings page.
+function cmdVerifyPerStep(args, io) {
+  let off = false;
+  let num = null;
+  for (const a of args) {
+    if (a === "--off") off = true;
+    else if (/^\d+$/.test(a) && num === null) num = Number(a);
+    else if (/^\d+$/.test(a)) throw new Error(`verify-per-step takes one phase number; got ${num} and ${a}`);
+    else throw new Error(`unknown option ${a} (give the phase number, for example \`autoclaude verify-per-step 3\`)`);
+  }
+  if (num === null || num < 1) { io.err("autoclaude: usage: autoclaude verify-per-step <phase number> [--off]"); return 2; }
+  const project = requireProject(io);
+  if (!project) return 1;
+  const { root, config } = project;
+  const state = loadState(root);
+  if (state.status === STATUS.running) {
+    io.out("autoclaude: the run is running, and how a feature is verified cannot change under it. Pause it first (`autoclaude pause --now`, or `autoclaude pause` to stop after the next commit), then run this again and `autoclaude resume`.");
+    return 1;
+  }
+  const plan = loadPlan(project);
+  const phase = plan.parsed ? plan.parsed.phases.find((ph) => ph.num === num) : null;
+  if (plan.parsed && !phase) { io.out(`autoclaude: ${config.plan} has no Phase ${num}`); return 1; }
+  const name = phase ? `Phase ${num} (${phase.title})` : `Phase ${num}`;
+  const current = Array.isArray(config.gate.stepPhases) ? config.gate.stepPhases : [];
+  const has = current.includes(num);
+  if (config.gate.verifyAt === "step") io.out(`autoclaude: note: gate.verifyAt is "step", so every phase is verified step by step already; gate.stepPhases matters only with "phase".`);
+  if (off ? !has : has) {
+    io.out(`autoclaude: ${name} is ${off ? "already verified as one feature" : "already verified step by step"}; nothing changed (gate.stepPhases is ${JSON.stringify(current)})`);
+    return 0;
+  }
+  const next = off ? current.filter((n) => n !== num) : [...current, num].sort((a, b) => a - b);
+  const after = state.status === STATUS.paused
+    ? "Run `autoclaude resume` to carry on."
+    : "Commit autoclaude.config.json, then `autoclaude run` (its preflight needs a clean working tree).";
+  // Only the project's own file changes: the other layers' values stay inherited.
+  updateProjectConfig(root, (raw) => {
+    raw.gate = { ...(raw.gate && typeof raw.gate === "object" && !Array.isArray(raw.gate) ? raw.gate : {}), stepPhases: next };
+    if (!next.length) delete raw.gate.stepPhases;
+    if (!Object.keys(raw.gate).length) delete raw.gate;
+  });
+  io.out(off
+    ? `autoclaude: ${name} is verified as one feature again (gate.stepPhases is ${JSON.stringify(next)} in autoclaude.config.json).`
+    : `autoclaude: ${name} is now verified step by step (gate.stepPhases is ${JSON.stringify(next)} in autoclaude.config.json): each of its unfinished steps gets the checks, a browser test of its own Accept lines and the security review when due, and its last step the bug bash, so no single part of the verification covers the whole phase. The plan is not changed.`);
+  io.out(`  ${after}`);
   return 0;
 }
 

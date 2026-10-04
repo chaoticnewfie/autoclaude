@@ -70,6 +70,12 @@ test("defaults carry the builder session fields, and PAUSE_REASONS lists the rea
   assert.deepEqual([s.fixup, s.freshSession, s.phaseBaseCommit, s.phaseStartedAt, s.pushState], [null, false, null, null, null]);
   // What a gate cut off by the hook's timeout leaves for the next stop, and what resume needs.
   assert.deepEqual([s.outOfTime, s.closing, s.completing, s.uncommittedMessages, s.decisionsAtStart], [{}, null, null, {}, null]);
+  // A verification carried over between stops (D60); none in a fresh state or an older file.
+  assert.equal(s.verifying, null);
+  const root = tmpDir();
+  fs.mkdirSync(path.join(root, ".autoclaude"));
+  fs.writeFileSync(path.join(root, ".autoclaude", "state.json"), JSON.stringify({ version: 1, status: "running", currentStep: "S1.3" }));
+  assert.equal(loadState(root).verifying, null);
   assert.deepEqual([...PAUSE_REASONS].sort(), ["blocked", "commit-failed", "infra", "out-of-time", "review", "security", "step-failed", "stuck", "weekly-limit"]);
   assert.equal(s.lastRunPlan, null);
 });

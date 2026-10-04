@@ -22,13 +22,20 @@ export const DEFAULTS = Object.freeze({
   security: { when: ["phase-end", "tag:security"], blockOn: "high", model: "opus", timeoutSec: 900 },
   bugBash: { atPhaseEnd: true },
   // Reasoning effort for the browser tester, bug bash, security reviewer and decider: one level
-  // for all of them; null = the owner's own Claude Code default (D55).
-  checkers: { effort: "xhigh" },
+  // for all of them; null = the owner's own Claude Code default (D55). parallel: which checkers
+  // of a verification run at the same time (D61): "security" the security review alongside the
+  // browser tester and then the bug bash, "off" one after another, "all" all three at once.
+  checkers: { effort: "xhigh", parallel: "security" },
   retries: { maxAttemptsPerStep: 3, maxNoProgressStops: 3, maxMinutesPerStep: 120 },
   usage: { weeklyPauseAtPct: 85, autoResumeAfterWeeklyReset: false, staleAfterMin: 30 },
   git: { commitEachStep: true, tagPhaseEnds: true, push: true },
   // verifyAt "phase": verify once per feature; "step": the old verification after every step (D49).
-  gate: { timeoutSec: 1800, verifyAt: "phase" },
+  // fitPct: the share of a stop's time for its parts (timeoutSec less a minute for the commit,
+  // lib/gate.js stopPartsSec) the largest single part of a verification (one check, the browser
+  // tester, the bug bash, the security review) may need before lint-plan, the preflight and
+  // planning call its phase too big (D60). stepPhases: phase numbers verified step by step
+  // although verifyAt is "phase", for a plan already running out of time (`verify-per-step`).
+  gate: { timeoutSec: 1800, verifyAt: "phase", fitPct: 70, stepPhases: [] },
   // Informational alerts the owner can switch (D49); critical alerts are always sent.
   notify: { morningSummaryAt: null, events: { featureVerified: true, stepVerified: false, runStarted: false, runResumed: false, pausedByOwner: false } },
   review: { pauseAt: "never" },
@@ -63,6 +70,11 @@ export const DEFAULTS = Object.freeze({
 
 // Settings that describe one project and mean nothing as a computer-wide default (D49).
 export const PROJECT_ONLY_KEYS = Object.freeze(["plan", "branch", "devServer", "checks", "guard", "docs", "permissions"]);
+// The same for single settings inside a shared group: phase numbers name one plan's phases.
+export const PROJECT_ONLY_PATHS = Object.freeze(["gate.stepPhases"]);
+// The range of gate.fitPct: below 30 nearly every phase is "too big", above 95 nothing is left
+// for the dev server's start and a slow day.
+export const FIT_PCT_RANGE = Object.freeze([30, 95]);
 
 // Dotted-path prefixes that may change while a run is going: none of them changes how a step
 // is built or checked. Everything else is locked until the run is paused (P8.7). A run never
@@ -77,6 +89,9 @@ export const EFFORTS = Object.freeze(["low", "medium", "high", "xhigh", "max", "
 export const VERIFY_AT = Object.freeze(["phase", "step"]);
 // The checkers' levels: ultracode's orchestration has no place in a headless check (D54, D55).
 export const CHECKER_EFFORTS = Object.freeze(["low", "medium", "high", "xhigh", "max"]);
+// Which checkers run at the same time (checkers.parallel): the tester and the bug bash share one
+// dev server, so "all" is only for an app whose test data can take both at once.
+export const CHECKER_PARALLEL = Object.freeze(["security", "off", "all"]);
 const PAUSE_AT = ["never", "phase-end", "every-step"];
 // The Stop hook's own timeout in hooks.json. Claude Code kills the gate after this many seconds,
 // so a longer gate.timeoutSec would never be honoured.
@@ -194,6 +209,7 @@ export function validateConfig(cfg) {
   if (expect("checkers", cfg.checkers, "object")) {
     const e = cfg.checkers.effort;
     if (e !== null && e !== undefined && !CHECKER_EFFORTS.includes(e)) err("checkers.effort", `expected null (your Claude Code default) or one of ${CHECKER_EFFORTS.join(", ")}, got ${JSON.stringify(e)}`);
+    oneOf("checkers.parallel", cfg.checkers.parallel, CHECKER_PARALLEL);
   }
   if (expect("tester", cfg.tester, "object")) {
     expect("tester.enabled", cfg.tester.enabled, "boolean");
@@ -228,6 +244,13 @@ export function validateConfig(cfg) {
     positive("gate.timeoutSec", cfg.gate.timeoutSec);
     if (typeof cfg.gate.timeoutSec === "number" && cfg.gate.timeoutSec > MAX_GATE_TIMEOUT_SEC) err("gate.timeoutSec", `at most ${MAX_GATE_TIMEOUT_SEC} (the Stop hook's timeout in hooks.json), got ${cfg.gate.timeoutSec}`);
     oneOf("gate.verifyAt", cfg.gate.verifyAt, VERIFY_AT);
+    const [lo, hi] = FIT_PCT_RANGE;
+    if (typeof cfg.gate.fitPct !== "number" || !(cfg.gate.fitPct >= lo && cfg.gate.fitPct <= hi)) err("gate.fitPct", `expected a number from ${lo} to ${hi}, got ${JSON.stringify(cfg.gate.fitPct)}`);
+    if (expect("gate.stepPhases", cfg.gate.stepPhases, "array")) {
+      cfg.gate.stepPhases.forEach((n, i) => {
+        if (!Number.isInteger(n) || n < 1) err(`gate.stepPhases[${i}]`, `expected a phase number (a whole number from 1), got ${JSON.stringify(n)}`);
+      });
+    }
   }
   if (expect("notify", cfg.notify, "object")) {
     if (cfg.notify.morningSummaryAt !== null && (typeof cfg.notify.morningSummaryAt !== "string" || !/^([01]\d|2[0-3]):[0-5]\d$/.test(cfg.notify.morningSummaryAt))) err("notify.morningSummaryAt", "expected null or a time like 07:30");
@@ -368,6 +391,11 @@ export function cleanMachineDefaults(raw) {
     if (PROJECT_ONLY_KEYS.includes(k)) problem(k, `belongs to a project's ${CONFIG_FILE}, not to this computer's defaults; ignored`);
     else if (!Object.hasOwn(DEFAULTS, k)) problem(k, "is not an AutoClaude setting; ignored");
     else values[k] = structuredClone(raw[k]);
+  }
+  for (const p of PROJECT_ONLY_PATHS) {
+    if (!hasPath(values, p.split("."))) continue;
+    problem(p, `belongs to a project's ${CONFIG_FILE}, not to this computer's defaults; ignored`);
+    deletePath(values, p);
   }
   // Drop whatever fails validation, one setting at a time, and say so.
   for (let pass = 0; pass < 3; pass++) {
@@ -568,6 +596,19 @@ export function writeProjectConfig(root, obj) {
   const file = path.join(root, CONFIG_FILE);
   writeJsonAtomic(file, obj);
   return file;
+}
+
+// Changes the project's own file: fn(raw) edits a copy of what the file holds (never the merged
+// layers, so nothing inherited is copied in) and may return a replacement; the result is written
+// back and returned. Throws when the file is missing or does not parse, so nothing is lost.
+export function updateProjectConfig(root, fn) {
+  const p = readProjectConfig(root);
+  if (!p.exists) throw new Error(`${p.file} does not exist; run autoclaude init first`);
+  if (p.error) throw new Error(`${p.file} ${p.error}; fix it by hand first`);
+  const raw = structuredClone(p.raw);
+  const out = fn(raw) || raw;
+  writeProjectConfig(root, out);
+  return out;
 }
 
 // Writes this computer's defaults file as given.

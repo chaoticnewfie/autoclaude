@@ -11,7 +11,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import {
-  DEFAULTS, PROJECT_ONLY_KEYS, EFFORTS, CHECKER_EFFORTS, MAX_SWEEP_CONCURRENCY, isSafeLiveKey, loadLayers, readMachineDefaults, readProjectConfig,
+  DEFAULTS, PROJECT_ONLY_KEYS, PROJECT_ONLY_PATHS, FIT_PCT_RANGE, EFFORTS, CHECKER_EFFORTS, CHECKER_PARALLEL, MAX_SWEEP_CONCURRENCY, isSafeLiveKey, loadLayers, readMachineDefaults, readProjectConfig,
   writeProjectConfig, writeMachineDefaults, validateConfig, mergeLayers, settingPathOf, getPath, setPath,
   deletePath, machineDefaultsFile, cleanMachineDefaults
 } from "./config.js";
@@ -50,15 +50,20 @@ export const SWEEP_FIELD_PATHS = Object.freeze([
 // Every setting the page shows, in page order. section: run | alerts | project. type drives the
 // control: bool, int, enum, enum-null, model, time-null, string, string-null, path, strings,
 // multi, rows. Explanations are plain words for the owner; defaults come from DEFAULTS.
+// items "int": a "strings" list whose lines are whole numbers, saved as numbers. projectOnly: a
+// single setting of a shared group that only a project may set (config.js PROJECT_ONLY_PATHS).
 const f = (p, section, type, label, help, extra = {}) => ({ path: p, section, type, label, help, ...extra });
 export const FIELDS = Object.freeze([
   f("gate.verifyAt", "run", "enum", "When to verify", "phase: each step is committed as it is built, and the full verification (checks, browser tester, bug bash, security review) runs once when the step that closes the feature is ready. step: all of it after every step, which is slower.", { options: ["phase", "step"] }),
+  f("gate.fitPct", "run", "int", "Room a phase may use (%)", `How much of the verification time limit (Advanced, below, less a minute kept for the commit) the biggest single part of a feature's verification may need: one check, the browser tester, the bug bash or the security review. A phase that needs more is too big: autoclaude lint-plan and the run's preflight warn about it, and planning splits it into smaller features. From ${FIT_PCT_RANGE[0]} to ${FIT_PCT_RANGE[1]}; the rest is room for a slow day.`),
+  f("gate.stepPhases", "run", "strings", "Phases verified step by step", "Phase numbers, one per line, whose steps are each verified on their own instead of the whole phase at once. For a plan already running whose feature keeps running out of time: add its phase here (or run autoclaude verify-per-step <phase>), then resume. This project only; empty: every phase is verified as one feature.", { items: "int", projectOnly: true }),
   f("review.pauseAt", "run", "enum", "Pause for your review", "phase-end: stop after each verified feature so you can look and leave notes; every-step: after every step; never: run to the end.", { options: ["never", "phase-end", "every-step"] }),
   f("retries.maxAttemptsPerStep", "run", "int", "Attempts before it pauses", "How many times a step, or a whole feature when verifying per feature, may fail verification before the run pauses and alerts you."),
   f("retries.maxNoProgressStops", "run", "int", "Stops without progress", "How many times in a row the session may stop without using a tool or committing before the run counts as stuck."),
   f("builder.model", "run", "model", "Builder model", "The model that writes the code. opus or sonnet always mean the newest of each; a full claude-opus-* or claude-sonnet-* id pins one. Haiku is not allowed."),
   f("builder.effort", "run", "enum-null", "Builder effort", "Reasoning effort for the builder. Left on your Claude Code default, the builder works the way your own sessions do. ultracode runs at xhigh: a run never uses its multi-agent workflows.", { options: [...EFFORTS], nullLabel: "Your Claude Code default" }),
   f("checkers.effort", "run", "enum-null", "Checker effort", "Reasoning effort for everything that checks the builder's work: the browser tester, the bug bash, the security review and the decider. Higher catches more small problems and takes a little longer; these checks are a small part of a run's time.", { options: [...CHECKER_EFFORTS], nullLabel: "Your Claude Code default" }),
+  f("checkers.parallel", "run", "enum", "Checkers at the same time", "security: the security review runs alongside the browser tester and the bug bash, which still run one after the other, so a feature's verification takes less time (two checker sessions at once). off: every checker one after another. all: the browser tester and the bug bash at the same time too; only for an app whose test data can take both at once, since they share one dev server and the bug bash tries to break things.", { options: [...CHECKER_PARALLEL] }),
   f("tester.enabled", "run", "bool", "Browser tester", "Open the app in a headless browser and check the feature's Accept lines. Needs the dev server below."),
   f("tester.model", "run", "model", "Browser tester model", "The model that drives the browser checks."),
   f("tester.maxTurns", "run", "int", "Browser tester turns", "Turns the tester may take for every 5 Accept lines (at most 4 times this for a big feature)."),
@@ -125,6 +130,17 @@ export const FIELDS = Object.freeze([
 
 const FIELD_BY_PATH = new Map(FIELDS.map((x) => [x.path, x]));
 const isProjectOnly = (p) => PROJECT_ONLY_KEYS.includes(String(p).split(".")[0]);
+const isProjectOnlyPath = (p) => isProjectOnly(p) || PROJECT_ONLY_PATHS.includes(String(p));
+
+// A list of whole numbers comes from the page as text lines: "3" becomes 3. Anything else is
+// left as typed, for validation to name.
+function numberItems(changes) {
+  for (const [p, v] of Object.entries(changes.set)) {
+    const fd = FIELD_BY_PATH.get(p);
+    if (fd && fd.items === "int" && Array.isArray(v)) changes.set[p] = v.map((x) => (typeof x === "string" && /^\s*\d+\s*$/.test(x) ? Number(x) : x));
+  }
+  return changes;
+}
 const samePath = (a, b) => path.resolve(a).toLowerCase() === path.resolve(b).toLowerCase();
 
 // "https://discord.com/api/webhooks/1/abc" -> "https://discord.com/...": the host only, never the secret part.
@@ -277,12 +293,14 @@ export function createConfigApp({ root = null, env = process.env, deps = {}, tok
     const errors = [];
     const changes = {};
     for (const layer of ["project", "computer"]) {
-      try { changes[layer] = normalizeChanges(body[layer]); } catch (e) { errors.push({ layer, path: "", message: e.message }); continue; }
+      try { changes[layer] = numberItems(normalizeChanges(body[layer])); } catch (e) { errors.push({ layer, path: "", message: e.message }); continue; }
       const c = changes[layer];
       for (const p of [...Object.keys(c.set), ...c.reset]) {
         const err = (message, extra = {}) => errors.push({ layer, path: p, setting: p, message, ...extra });
         if (!FIELD_BY_PATH.has(p)) { err("is not a setting this page can change"); continue; }
-        if (layer === "computer" && isProjectOnly(p)) { err("belongs to a project; it cannot be a computer default"); continue; }
+        // A project-only setting inside a shared group may still be reset there, so one written
+        // into defaults.json by hand can be cleared from the page.
+        if (layer === "computer" && (isProjectOnly(p) || (isProjectOnlyPath(p) && Object.hasOwn(c.set, p)))) { err("belongs to a project; it cannot be a computer default"); continue; }
         if (layer === "project" && !root) { err("there is no project here; open the page from inside a project"); continue; }
         const lock = lockReasonFor(layer, p, ctx);
         if (lock) err(lock, { locked: true });

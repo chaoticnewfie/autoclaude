@@ -24,6 +24,86 @@ export function pendingVerifyFile(root) {
   return path.join(projectPaths(root).runtimeDir, "verify-pending.json");
 }
 
+// The phases whose steps are verified one by one although gate.verifyAt is "phase" (D60:
+// `autoclaude verify-per-step <phase>`, gate.stepPhases), as numbers. Read defensively: a config
+// without the key, or with something else in it, has none.
+export function stepPhaseList(config) {
+  const list = config && config.gate && Array.isArray(config.gate.stepPhases) ? config.gate.stepPhases : [];
+  return list.map((x) => (typeof x === "number" || (typeof x === "string" && x.trim()) ? Number(x) : NaN)).filter((n) => Number.isInteger(n) && n >= 0);
+}
+
+// "step" or "phase": how the steps of phase `num` are verified (any phase when num is null).
+export function verifyModeFor(config, num = null) {
+  if (config && config.gate && config.gate.verifyAt === "step") return "step";
+  return num !== null && num !== undefined && stepPhaseList(config).includes(Number(num)) ? "step" : "phase";
+}
+
+// Built [~] steps no verification would reach any more (plan.js reopenUnverified), put back to
+// [ ] by the way each phase is verified: every built step of a phase in gate.stepPhases is
+// reopened too, so each gets its own ready. Returns { text, reopened: [ids] } in plan order.
+export function reopenForMode(text, config) {
+  const mode = verifyModeFor(config);
+  const first = reopenUnverified(text, mode);
+  const phases = mode === "step" ? [] : stepPhaseList(config);
+  if (!phases.length) return first;
+  let out = first.text;
+  for (const ph of parsePlan(out).phases) {
+    if (!phases.includes(ph.num)) continue;
+    for (const s of ph.steps) if (s.marker === MARKERS.built) out = setMarker(out, s.id, MARKERS.todo);
+  }
+  const before = parsePlan(text);
+  const reopened = parsePlan(out).steps.filter((s) => s.marker === MARKERS.todo && (stepById(before, s.id) || {}).marker === MARKERS.built).map((s) => s.id);
+  return { text: out, reopened };
+}
+
+// Whether `v` (state.verifying) is a verification parked between two stops whose snapshot is
+// `snap`: carried over to the next stop, so neither cut off nor the owner's.
+export function parkedVerification(v, snap) {
+  return !!(v && v.parked && snap && snap.id && v.verifyId === snap.id);
+}
+
+const VERIFY_PART_NAMES = Object.freeze({ tester: "the browser tester", bugbash: "the bug bash", security: "the security review" });
+
+// The words for a part of a verification, by its key (lib/gate.js verificationParts and
+// checkParts, which name their parts with this): check "<name>", the same check's second run with
+// a step's findings filed (recheck:), the browser tester, the bug bash, the security review.
+export function verifyPartName(key) {
+  const k = String(key ?? "");
+  const m = /^check:\d+:([\s\S]*)$/.exec(k);
+  if (m) return `check "${m[1]}"`;
+  const again = /^recheck:\d+:([\s\S]*)$/.exec(k);
+  if (again) return `check "${again[1]}" (run again with the findings filed)`;
+  return VERIFY_PART_NAMES[k] || k;
+}
+
+// Where a verification spread over stops stands (state.verifying, D60), for `autoclaude status`
+// and a builder session that starts while one is carried over: { what ("Phase 3", or the step id
+// of one verified step by step), stepId, phase, feature, fixup (the checks of a fix-up pass),
+// parked, turns, done: [names], left: [names] }, or null when there is none. `left` is what was
+// carried over the last time, less what is done since; empty for a record that does not say.
+export function stagedVerification(v) {
+  if (!v || typeof v !== "object" || !v.stepId) return null;
+  const done = Array.isArray(v.done) ? v.done : [];
+  const left = Array.isArray(v.left) ? v.left.filter((k) => !done.includes(k)) : [];
+  const phase = Number.isInteger(v.phase) ? v.phase : null;
+  return {
+    what: v.feature && phase !== null ? `Phase ${phase}` : String(v.stepId), stepId: String(v.stepId), phase, feature: !!v.feature, fixup: !!v.fixup,
+    parked: !!v.parked, turns: Number.isInteger(v.turns) ? v.turns : 0, done: done.map(verifyPartName), left: left.map(verifyPartName)
+  };
+}
+
+const andList = (xs) => (xs.length <= 1 ? xs.join("") : `${xs.slice(0, -1).join(", ")} and ${xs[xs.length - 1]}`);
+
+// The parts of a stagedVerification in words: 'check "unit" and the browser tester are done, and
+// the bug bash is left'. Empty when it names none.
+export function stagedPartsText(sv) {
+  if (!sv) return "";
+  const are = (xs) => (xs.length === 1 ? "is" : "are");
+  const done = sv.done.length ? `${andList(sv.done)} ${are(sv.done)} done` : "";
+  const left = sv.left.length ? `${andList(sv.left)} ${are(sv.left)} left` : "";
+  return done && left ? `${done}, and ${left}` : done || (left ? `nothing is done yet, and ${left}` : "");
+}
+
 // Whether a gate process other than `except` is at work in the project right now
 // (scripts/stop-gate.js keeps .autoclaude/gate.json with its pid while it runs).
 export function gateRunning(root, { except = null } = {}) {
@@ -73,8 +153,11 @@ export function liveOtherGate(root, config, self) {
 // snapshot whose outcome the run state already records (a gate cut off between recording it
 // and removing the file) is only removed. `own` is the gate taking out its own verification
 // after a failure. A cut-off found while the run is running (not ended by the owner's pause)
-// counts towards state.outOfTime. Returns { step, ids, fixup, count } (count: that step's
-// out-of-time count when this one was counted, else 0) or null when there was nothing to undo.
+// counts towards state.outOfTime. A verification parked between two stops (state.verifying,
+// D60) is not cut off: it is left for the next stop. One taken out here (cut off in a later stop
+// of it, or the gate's own) leaves state.verifying too. Returns { step, ids, fixup, count }
+// (count: that step's out-of-time count when this one was counted, else 0) or null when there
+// was nothing to undo.
 export function undoCutVerification(root, config, { unlessGateRunning = false, self = null, own = false } = {}) {
   const file = pendingVerifyFile(root);
   let snap;
@@ -87,13 +170,20 @@ export function undoCutVerification(root, config, { unlessGateRunning = false, s
       removeIfExists(file);
       return null;
     }
+    if (parkedVerification(st.verifying, snap)) return null;
   }
   const ids = undoVerification(root, config, snap);
   removeIfExists(file);
   let count = 0;
-  if (!own && snap.step && loadState(root).status === STATUS.running) {
-    const st = updateState(root, (s) => { s.outOfTime = { ...(s.outOfTime || {}), [snap.step]: ((s.outOfTime || {})[snap.step] || 0) + 1 }; });
-    count = st.outOfTime[snap.step];
+  const ours = (v) => !!(v && snap.id && v.verifyId === snap.id);
+  const before = loadState(root);
+  const counted = !own && !!snap.step && before.status === STATUS.running;
+  if (counted || ours(before.verifying)) {
+    const st = updateState(root, (s) => {
+      if (counted) s.outOfTime = { ...(s.outOfTime || {}), [snap.step]: ((s.outOfTime || {})[snap.step] || 0) + 1 };
+      if (ours(s.verifying)) s.verifying = null;
+    });
+    if (counted) count = st.outOfTime[snap.step];
   }
   return { step: snap.step || null, ids, fixup: !!snap.fixup, count };
 }
@@ -240,6 +330,54 @@ export async function commitPending(project, state, { env } = {}) {
   return { ok: true, ids, sha: c.sha, error: null };
 }
 
+// The verification carried over between two stops that a resume keeps (state.verifying), or
+// null. One it cannot keep is taken out here, its ticks, PROGRESS lines and snapshot and nothing
+// else, and the change is listed. One a live gate is still at work on is left to that gate. The
+// checks of a fix-up pass carried over (fixup: true) are kept while that pass is: its closing
+// step and every step of its phase still ticked.
+function keepStaged(root, config, changes) {
+  const st = loadState(root);
+  const v = st.verifying;
+  if (!v || !v.stepId) return null;
+  let snap = null;
+  try { snap = readJson(pendingVerifyFile(root), null); } catch { snap = null; }
+  const own = !!(snap && snap.id && snap.id === v.verifyId);
+  if (own && !v.parked) return v;
+  const parsed = parsePlan(readText(path.join(root, config.plan), "") || "");
+  const ticks = Array.isArray(v.ticked) ? v.ticked : [];
+  const what = v.fixup ? `the fix-up checks of Phase ${v.phase}` : `the verification of ${v.feature && Number.isInteger(v.phase) ? `Phase ${v.phase}` : v.stepId}`;
+  const was = v.fixup ? "were" : "was";
+  const step = stepById(parsed, v.stepId);
+  let why = null;
+  if (!own) why = "its snapshot is gone";
+  else if (!step || !ticks.every((id) => (stepById(parsed, id) || {}).marker === MARKERS.done)) why = "the owner changed its ticks";
+  else if (v.fixup) {
+    if (!(st.fixup && st.fixup.stepId === v.stepId) || !fixupIntact(step)) why = "its fix-up pass is no longer under way";
+  } else {
+    const first = parsed.steps.find((s) => !isFinished(s) || ticks.includes(s.id));
+    const perFeature = verifyModeFor(config, step.phase ? step.phase.num : null) === "phase";
+    const name = v.feature && Number.isInteger(v.phase) ? `Phase ${v.phase}` : v.stepId;
+    if (!first || !ticks.includes(first.id)) why = "an earlier step is open again";
+    else if (!!v.feature !== perFeature) why = perFeature ? `${name} is verified as one feature now` : `${name} is verified step by step now`;
+  }
+  if (!why) {
+    const sv = stagedVerification(v);
+    const parts = `${(v.done || []).length} of its parts are done${sv && sv.left.length ? `; left: ${sv.left.join(", ")}` : ""}`;
+    changes.push(`${what} ${was} carried over between two stops; the next stop carries ${v.fixup ? "them" : "it"} on (${parts}), or starts ${v.fixup ? "them" : "it"} again if the files change before then. The builder ends its turn without changing anything, so the gate can carry ${v.fixup ? "them" : "it"} on`);
+    return v;
+  }
+  const ids = undoVerification(root, config, own ? snap : v.undo || {});
+  if (own) removeIfExists(pendingVerifyFile(root));
+  changes.push(`${what} ${was} carried over between two stops, but ${why}: ${v.fixup ? "they were" : "it was"} taken out${ids.length ? ` (unticked ${ids.join(", ")})` : ""} and ${v.fixup ? "are" : "is"} done again`);
+  return null;
+}
+
+// Whether a fix-up pass at `end` (its closing step) can go on: the step and every step of its
+// phase are still ticked.
+function fixupIntact(end) {
+  return !!(end && end.marker === MARKERS.done && (!end.phase || end.phase.steps.every((s) => s.marker === MARKERS.done)));
+}
+
 // `env` is the environment of the process running the resume: AUTOCLAUDE_BUILDER=1 there means
 // it is the builder session itself (/autoclaude:resume typed in the run window).
 export function resumeRun(project, state, extra = {}, { env = process.env } = {}) {
@@ -250,6 +388,12 @@ export function resumeRun(project, state, extra = {}, { env = process.env } = {}
   // owner's and its feature would be skipped.
   const cut = undoCutVerification(root, config, { unlessGateRunning: true });
   if (cut) changes.push(cut.fixup ? `the fix-up checks of ${cut.step || "the last step"} were cut off` : `the verification of ${cut.step || "the last step"} was cut off; its plan ticks and PROGRESS lines were taken out again`);
+  // A verification carried over between two stops (state.verifying, D60) and parked when the run
+  // paused: its ticks are the gate's, not the owner's, and the next stop carries it on (from its
+  // first part again if the files change before then). It is taken out like a cut-off one when
+  // the owner changed its ticks, an earlier step is open again, or its phase is now verified the
+  // other way (gate.verifyAt, gate.stepPhases).
+  let staged = keepStaged(root, config, changes);
   let text = readText(planFile, "");
   let parsed = parsePlan(text);
   let edited = false;
@@ -261,9 +405,10 @@ export function resumeRun(project, state, extra = {}, { env = process.env } = {}
     }
   }
   // Built steps no verification would reach any more (the owner ticked the step that closes
-  // their feature, or verifyAt changed to "step") are reopened, so no step stays unverified.
-  const mode = config.gate && config.gate.verifyAt === "step" ? "step" : "phase";
-  const reopen = reopenUnverified(text, mode);
+  // their feature, verifyAt changed to "step", or the phase is now verified step by step) are
+  // reopened, so no step stays unverified.
+  const mode = verifyModeFor(config);
+  const reopen = reopenForMode(text, config);
   if (reopen.reopened.length) {
     text = reopen.text;
     edited = true;
@@ -272,14 +417,19 @@ export function resumeRun(project, state, extra = {}, { env = process.env } = {}
       const s = stepById(after, id);
       changes.push(mode === "step"
         ? `${id}: reopened; it was built but not verified, and verifyAt is "step", so its ready verifies it`
-        : `${id}: reopened; Phase ${s.phase.num} was never verified and its other steps are all done or built, so the ready of ${id} verifies it`);
+        : s.phase && verifyModeFor(config, s.phase.num) === "step"
+          ? `${id}: reopened; it was built but not verified, and Phase ${s.phase.num} is now verified step by step (gate.stepPhases), so its ready verifies it`
+          : `${id}: reopened; Phase ${s.phase.num} was never verified and its other steps are all done or built, so the ready of ${id} verifies it`);
     }
   }
   if (edited) writeFileAtomic(planFile, text);
   parsed = parsePlan(text);
-  // [x] and [~] are both the gate's record; the integrity check accepts exactly this list.
-  const ticked = parsed.steps.filter(isFinished).map((s) => s.id);
+  // [x] and [~] are both the gate's record; the integrity check accepts exactly this list (and
+  // the ticks of a parked verification, which it reads from state.verifying).
+  // A built step the parked verification ticked [x] stays on the list as built.
   const before = new Set(state.tickedByGate || []);
+  const stagedIds = new Set(staged ? staged.ticked : []);
+  const ticked = parsed.steps.filter(isFinished).map((s) => s.id).filter((id) => !stagedIds.has(id) || before.has(id));
   for (const id of ticked) if (!before.has(id)) changes.push(`${id}: ticked by the owner, accepted as ${parsed.steps.find((s) => s.id === id).marker === MARKERS.built ? "built" : "done"}`);
   for (const id of before) if (!ticked.includes(id) && !reopen.reopened.includes(id)) changes.push(`${id}: unticked by the owner, will be done again`);
 
@@ -288,12 +438,19 @@ export function resumeRun(project, state, extra = {}, { env = process.env } = {}
   let fixup = state.fixup && state.fixup.stepId ? state.fixup : null;
   if (fixup) {
     const end = parsed.steps.find((s) => s.id === fixup.stepId);
-    const intact = end && end.marker === MARKERS.done && (!end.phase || end.phase.steps.every((s) => s.marker === MARKERS.done));
-    if (!intact) { changes.push(`the fix-up pass of ${fixup.stepId} is dropped: its phase is no longer ticked, so it is verified again`); fixup = null; }
+    if (!fixupIntact(end)) { changes.push(`the fix-up pass of ${fixup.stepId} is dropped: its phase is no longer ticked, so it is verified again`); fixup = null; }
   }
-  const current = fixup ? parsed.steps.find((s) => s.id === fixup.stepId) : firstUnfinished(parsed);
+  // Checks of a fix-up pass carried over go with their pass.
+  if (staged && staged.fixup && !(fixup && fixup.stepId === staged.stepId)) {
+    let snap = null;
+    try { snap = readJson(pendingVerifyFile(root), null); } catch { snap = null; }
+    if (snap && snap.id && snap.id === staged.verifyId) removeIfExists(pendingVerifyFile(root));
+    changes.push(`the fix-up checks of Phase ${staged.phase} carried over between two stops are dropped with their fix-up pass`);
+    staged = null;
+  }
+  const current = fixup ? parsed.steps.find((s) => s.id === fixup.stepId) : staged ? stepById(parsed, staged.stepId) : firstUnfinished(parsed);
   const id = current ? current.id : null;
-  if (fixup) changes.push(`resuming the fix-up pass of ${id}: fix or hand over each finding, then ready ${id}`);
+  if (fixup) changes.push(staged && staged.fixup ? `resuming the fix-up pass of ${id}: its findings are handled, and its checks go on at the next stop` : `resuming the fix-up pass of ${id}: fix or hand over each finding, then ready ${id}`);
   else if (id !== (state.currentStep || null)) changes.push(`current step is now ${id || "none (every step is done)"}`);
   // A pause at a feature's end (review, weekly limit) leaves the old builder session behind: the
   // next feature still gets a fresh one (D49), from a live supervisor only, since without one
@@ -307,7 +464,7 @@ export function resumeRun(project, state, extra = {}, { env = process.env } = {}
   else if (boundary && insideBuilder && state.pauseReason !== "blocked") changes.push(`${id} starts a new feature; this is the builder's own session, so it carries on here`);
   // With nothing built and no fix-up pass, no feature is under way: a base or start time left
   // behind (a gate cut off at the wrong moment) would stretch the next feature's review.
-  const underWay = !!fixup || parsed.steps.some((s) => s.marker === MARKERS.built);
+  const underWay = !!fixup || !!staged || parsed.steps.some((s) => s.marker === MARKERS.built);
   updateState(root, (s) => {
     s.status = STATUS.running; s.pauseReason = null; s.pauseRequested = false; s.recoveries = 0; s.noProgress = 0;
     // A `pause --now` the supervisor had not acted on yet must not end the resumed session later.
@@ -317,12 +474,14 @@ export function resumeRun(project, state, extra = {}, { env = process.env } = {}
     s.tickedByGate = ticked;
     s.currentStep = id;
     s.fixup = fixup;
+    s.verifying = staged;
     if (!underWay) { s.phaseBaseCommit = null; s.phaseStartedAt = null; }
     if (id) {
       s.attempts = { ...s.attempts, [id]: 0 }; s.infraFailures = { ...(s.infraFailures || {}), [id]: 0 };
-      // Also the cut-off-close counts lib/gate.js keeps under "close:<id>": the one that paused
-      // may belong to a later step of the feature than the current one.
-      s.outOfTime = Object.fromEntries(Object.entries({ ...(s.outOfTime || {}), [id]: 0 }).filter(([k]) => !k.startsWith("close:")));
+      // Every out-of-time count starts again, and the cut-off-close counts lib/gate.js keeps under
+      // "close:<id>" go: the one that paused may belong to a later step of the feature than the
+      // current one, which `autoclaude verify-per-step` makes common (its built steps reopen).
+      s.outOfTime = Object.fromEntries(Object.entries({ ...(s.outOfTime || {}), [id]: 0 }).filter(([k]) => !k.startsWith("close:")).map(([k]) => [k, 0]));
     }
     Object.assign(s, extra);
   });

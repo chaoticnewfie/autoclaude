@@ -304,6 +304,18 @@ test("runBrowserCheck moves files the checker created in the project into its re
   assert.deepEqual(r.screenshots.sort(), [".autoclaude/reports/S1.2-1-tester/stray/S1.2-final.png", ".autoclaude/reports/S1.2-1-tester/stray/shots/bug.png"]);
 });
 
+test("runBrowserCheck with sweep: false leaves the files that appeared in the project to the caller (the gate sweeps once every lane is done)", async () => {
+  const env = gitEnv(process.env);
+  const root = tmp();
+  prepareFixture({ dest: root, plan: "happy", git: true, env });
+  const run = async () => { fs.writeFileSync(path.join(root, "upload.png"), "png"); return ok(good); };
+  const r = await runBrowserCheck({ kind: "tester", root, config, step: stepById(parsed, "S1.2"), parsed, env, attempt: 1, run, sweep: false });
+  assert.equal(r.status, "passed");
+  assert.ok(fs.existsSync(path.join(root, "upload.png")), "not moved while another checker may still use the app");
+  assert.equal(fs.existsSync(path.join(root, ".autoclaude", "reports", "S1.2-1-tester", "stray")), false);
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(root, r.verdictFile), "utf8")).strays, []);
+});
+
 test("runBrowserCheck: no retry when the gate deadline is too close", async () => {
   let t = 0;
   const { r, calls } = await check([infra("timed out")], { deadlineMs: 1000, now: () => (t += 10) });

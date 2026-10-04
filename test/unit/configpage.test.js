@@ -468,3 +468,107 @@ test("browserCommand quotes the URL for cmd start on Windows and uses open or xd
   assert.equal(maskSecret("ntfy_url", "https://ntfy.sh/my-topic"), "https://ntfy.sh/...");
   assert.equal(maskSecret("ntfy_url", ""), "");
 });
+
+// ---------- P10.13: phases that fit their verification (D60) ----------
+
+test("the run section shows the room a phase may use and the phases verified step by step, with plain help", () => {
+  const byPath = new Map(FIELDS.map((f) => [f.path, f]));
+  const fit = byPath.get("gate.fitPct");
+  const steps = byPath.get("gate.stepPhases");
+  assert.deepEqual([fit.section, fit.type, fit.label, fit.group], ["run", "int", "Room a phase may use (%)", undefined]);
+  assert.deepEqual([steps.section, steps.type, steps.items, steps.projectOnly, steps.group], ["run", "strings", "int", true, undefined]);
+  assert.match(fit.help, /biggest single part/);
+  assert.match(fit.help, /From 30 to 95/, "the help names the range the config enforces");
+  assert.match(fit.help, /lint-plan/);
+  assert.match(steps.help, /verify-per-step/);
+  assert.match(steps.help, /one per line/);
+  for (const f of [fit, steps]) assert.ok(f.help.length > 60 && !/\b(TODO|TBD)\b/.test(f.help), f.path);
+  // Next to "When to verify", ahead of every group.
+  const run = FIELDS.filter((f) => f.section === "run").map((f) => f.path);
+  assert.deepEqual(run.slice(run.indexOf("gate.verifyAt"), run.indexOf("gate.verifyAt") + 3), ["gate.verifyAt", "gate.fitPct", "gate.stepPhases"]);
+});
+
+test("gate.stepPhases saves its lines as phase numbers, for the project only; gate.fitPct saves to either layer within its range", async () => {
+  const root = makeProject();
+  await withPage({ root }, async (pg) => {
+    let s = (await pg.api("GET", "/api/state")).json;
+    assert.deepEqual([s.merged.gate.fitPct, s.merged.gate.stepPhases], [70, []]);
+    let r = await pg.api("POST", "/api/save", { project: { set: { "gate.stepPhases": ["5", " 3 "], "gate.fitPct": 80 } } });
+    assert.equal(r.status, 200, r.text);
+    assert.deepEqual(readProject(root).gate, { stepPhases: [5, 3], fitPct: 80 });
+    s = (await pg.api("GET", "/api/state")).json;
+    assert.equal(s.sources.project["gate.stepPhases"], "project");
+
+    const before = fs.readFileSync(path.join(root, "autoclaude.config.json"), "utf8");
+    for (const [p, v, re] of [["gate.stepPhases", ["two"], /a phase number/], ["gate.stepPhases", ["0"], /a phase number/], ["gate.fitPct", 20, /from 30 to 95/], ["gate.fitPct", 99, /from 30 to 95/]]) {
+      r = await pg.api("POST", "/api/save", { project: { set: { [p]: v } } });
+      assert.equal(r.status, 400, `${p}=${JSON.stringify(v)}: ${r.text}`);
+      const e = r.json.errors.find((x) => x.setting === p);
+      assert.ok(e, r.text);
+      assert.match(e.message, re);
+    }
+    assert.equal(fs.readFileSync(path.join(root, "autoclaude.config.json"), "utf8"), before, "nothing written by a refused save");
+
+    // Phase numbers mean nothing in another project: not a computer default. The room is.
+    r = await pg.api("POST", "/api/save", { computer: { set: { "gate.stepPhases": ["2"] } } });
+    assert.equal(r.status, 400);
+    assert.match(r.json.errors[0].message, /belongs to a project/);
+    r = await pg.api("POST", "/api/save", { computer: { set: { "gate.fitPct": 60 } } });
+    assert.equal(r.status, 200, r.text);
+    assert.deepEqual(readDefaults(), { gate: { fitPct: 60 } });
+    // One written into defaults.json by hand is reported, and the page can still reset it.
+    fs.writeFileSync(DEFAULTS_FILE, JSON.stringify({ gate: { fitPct: 60, stepPhases: [2] } }));
+    s = (await pg.api("GET", "/api/state")).json;
+    assert.ok(s.errors.some((e) => e.layer === "computer" && e.path === "gate.stepPhases"), JSON.stringify(s.errors));
+    r = await pg.api("POST", "/api/save", { computer: { reset: ["gate.stepPhases"] } });
+    assert.equal(r.status, 200, r.text);
+    assert.deepEqual(readDefaults(), { gate: { fitPct: 60 } });
+  });
+});
+
+test("both are locked while the run is running and free while it is paused", async () => {
+  const root = makeProject();
+  setStatus(root, "running");
+  await withPage({ root }, async (pg) => {
+    const s = (await pg.api("GET", "/api/state")).json;
+    for (const p of ["gate.fitPct", "gate.stepPhases"]) assert.equal(s.locked.project[p], LOCK_REASON, p);
+    let r = await pg.api("POST", "/api/save", { project: { set: { "gate.stepPhases": ["2"] } } });
+    assert.equal(r.status, 409);
+    setStatus(root, "paused");
+    r = await pg.api("POST", "/api/save", { project: { set: { "gate.stepPhases": ["2"], "gate.fitPct": 75 } } });
+    assert.equal(r.status, 200, r.text);
+    assert.deepEqual(readProject(root).gate, { stepPhases: [2], fitPct: 75 });
+  });
+});
+
+test("checkers.parallel is shown next to the checker effort, saves to either layer, refuses other words, and is locked while a run is going", async () => {
+  const byPath = new Map(FIELDS.map((f) => [f.path, f]));
+  const par = byPath.get("checkers.parallel");
+  assert.deepEqual([par.section, par.type, par.label, par.group, [...par.options]], ["run", "enum", "Checkers at the same time", undefined, ["security", "off", "all"]]);
+  assert.match(par.help, /security review runs alongside the browser tester and the bug bash/);
+  assert.match(par.help, /share one dev server/, "all is explained as only for apps that can take it");
+  const run = FIELDS.filter((f) => f.section === "run").map((f) => f.path);
+  assert.equal(run[run.indexOf("checkers.effort") + 1], "checkers.parallel");
+  const root = makeProject();
+  await withPage({ root }, async (pg) => {
+    let s = (await pg.api("GET", "/api/state")).json;
+    assert.equal(s.merged.checkers.parallel, "security");
+    let r = await pg.api("POST", "/api/save", { computer: { set: { "checkers.parallel": "off" } } });
+    assert.equal(r.status, 200, r.text);
+    assert.deepEqual(readDefaults(), { checkers: { parallel: "off" } });
+    r = await pg.api("POST", "/api/save", { project: { set: { "checkers.parallel": "all" } } });
+    assert.equal(r.status, 200, r.text);
+    assert.equal(readProject(root).checkers.parallel, "all");
+    r = await pg.api("POST", "/api/save", { project: { set: { "checkers.parallel": "both" } } });
+    assert.equal(r.status, 400, r.text);
+    assert.ok(r.json.errors.some((e) => e.setting === "checkers.parallel"), r.text);
+  });
+  const locked = makeProject();
+  setStatus(locked, "running");
+  await withPage({ root: locked }, async (pg) => {
+    const s = (await pg.api("GET", "/api/state")).json;
+    assert.equal(s.locked.project["checkers.parallel"], LOCK_REASON);
+    const r = await pg.api("POST", "/api/save", { project: { set: { "checkers.parallel": "off" } } });
+    assert.equal(r.status, 409);
+  });
+});

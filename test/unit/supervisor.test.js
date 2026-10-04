@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { EventEmitter } from "node:events";
-import { decide, childEnv, launchArgs, supervise, builderSettings, launchOptions, spawnClaude, cmdShimLine, cmdShimArg } from "../../plugins/autoclaude/lib/supervisor.js";
+import { decide, childEnv, launchArgs, supervise, builderSettings, launchOptions, spawnClaude, cmdShimLine, cmdShimArg, stageMark } from "../../plugins/autoclaude/lib/supervisor.js";
 import { mergeConfig } from "../../plugins/autoclaude/lib/config.js";
 import { saveState, loadState, defaultState } from "../../plugins/autoclaude/lib/state.js";
 
@@ -380,6 +380,52 @@ test("supervise: ending a session in the middle of a verification takes that gat
   await h.run(1);
   assert.match(fs.readFileSync(path.join(root, "PLAN.md"), "utf8"), /- \[x\] \*\*S1\.1\*\*/);
   assert.ok(fs.existsSync(path.join(root, ".autoclaude", "verify-pending.json")));
+});
+
+test("supervise: a verification parked between two stops is left alone by a relaunch; one cut off in a later stop is taken out", async () => {
+  const park = (root, parked) => {
+    cutVerification(root);
+    const file = path.join(root, ".autoclaude", "verify-pending.json");
+    fs.writeFileSync(file, JSON.stringify({ ...JSON.parse(fs.readFileSync(file, "utf8")), id: "v-3", pid: null }));
+    saveState(root, { ...loadState(root), verifying: { verifyId: "v-3", stepId: "S1.1", ticked: ["S1.1"], parked, pid: parked ? null : 2 ** 30, done: ["check:0:unit"] } });
+  };
+  let root = fakeProject("running", { builderSessionId: "b-11" });
+  park(root, true);
+  let h = harness(root);
+  await h.run(1);
+  assert.match(fs.readFileSync(path.join(root, "PLAN.md"), "utf8"), /- \[x\] \*\*S1\.1\*\*/, "its ticks stand for the next stop");
+  assert.ok(fs.existsSync(path.join(root, ".autoclaude", "verify-pending.json")));
+  assert.equal(loadState(root).verifying.parked, true);
+
+  root = fakeProject("running", { builderSessionId: "b-12" });
+  park(root, false);
+  h = harness(root);
+  await h.run(1);
+  assert.match(fs.readFileSync(path.join(root, "PLAN.md"), "utf8"), /- \[ \] \*\*S1\.1\*\*/);
+  assert.deepEqual([loadState(root).verifying, loadState(root).outOfTime], [null, { "S1.1": 1 }]);
+});
+
+test("supervise: a verification that moves on between its stops is progress, so relaunches around it do not pause the run as stuck", async () => {
+  assert.equal(stageMark({ verifying: null }), null);
+  assert.equal(stageMark({ verifying: { verifyId: "v-1", done: ["a", "b"] } }), "v-1:2");
+  // Every session exits at once; without a tool call in between, two relaunches pause the run.
+  const run = async (moves) => {
+    const root = fakeProject("running", { builderSessionId: "b-13", verifying: { verifyId: "v-1", stepId: "S1.1", parked: true, done: [] } });
+    let clock = T;
+    let polls = 0;
+    const spawnChild = () => { const c = new EventEmitter(); c.pid = 5000 + polls; setImmediate(() => c.emit("exit", 1)); return c; };
+    const sleep = async (ms) => {
+      clock += ms;
+      polls++;
+      if (moves) { const s = loadState(root); saveState(root, { ...s, verifying: { ...s.verifying, done: Array.from({ length: polls }, (_, i) => `part-${i}`) } }); }
+      await new Promise((r) => setImmediate(r));
+    };
+    await supervise({ root, env: { PATH: process.env.PATH, CLAUDE_CONFIG_DIR: fs.mkdtempSync(path.join(os.tmpdir(), "autoclaude-sup-cfg-")) }, spawnChild, agentStatus: () => "idle", say: async () => {}, now: () => clock, sleep, maxLoops: 5, kill: () => true, newSessionId: () => `n-${polls}`, console: { log() {} } });
+    return loadState(root);
+  };
+  assert.deepEqual([(await run(false)).pauseReason], ["stuck"], "the same verification standing still is no progress");
+  const s = await run(true);
+  assert.deepEqual([s.status, s.pauseReason], ["running", null]);
 });
 
 test("supervise: supervisor.json is written only when it changes, and the window's PATH is recorded for the checks", async () => {

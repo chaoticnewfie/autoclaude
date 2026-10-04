@@ -11,11 +11,15 @@
 // and taken out again on a failure, so the tree that is verified is the tree that is committed.
 //
 // One stop has gate.timeoutSec, at most the hook's own timeout. The checks and the checkers run
-// against a deadline inside it; a verification that does not fit is "out of time", never the
-// builder's attempt, and pauses the run the second time. What a gate cut off by the hook leaves
-// behind is picked up by the next stop: a verification under way is undone (and counted), and a
-// verified commit under way (state.closing) or the end of the run (state.completing) is
-// finished.
+// against a deadline inside it. A verification's parts (each check, the browser tester, the bug
+// bash, the security review, which by default runs alongside the browser checks) run as far as
+// they fit, each weighed by what it is expected to need; what does not fit is carried to the next
+// stop (state.verifying, D60), and the builder is told to end its turn. The checks of a fix-up
+// pass, and a step's second run of the checks with its findings filed, are staged the same way.
+// A part that does not fit even in a stop of its own is "out of time", never the builder's
+// attempt, and pauses the run the second time. What a gate cut off by the hook leaves behind is picked up by the next
+// stop: a verification under way is undone (and counted), and a verified commit under way
+// (state.closing) or the end of the run (state.completing) is finished.
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -23,15 +27,15 @@ import crypto from "node:crypto";
 import { findProjectRoot, projectPaths, pluginRoot } from "./paths.js";
 import { isBuilderSession, liveSupervisorPid } from "./builder.js";
 import { loadState, saveState, updateState, STATUS, finishRunPlan } from "./state.js";
-import { loadConfig, MAX_GATE_TIMEOUT_SEC } from "./config.js";
-import { parsePlan, stepById, nextStep, firstUnfinished, isPhaseEnd, isFeatureEnd, isFinished, setMarker, stepText, progress, planSlug, reopenUnverified, MARKERS } from "./plan.js";
-import { readText, writeFileAtomic, writeJsonAtomic, appendLine, ensureDir } from "./fsatomic.js";
-import { pendingVerifyFile, undoCutVerification, undoVerification, liveOtherGate, heldByLiveGate, phaseTag } from "./resume.js";
+import { loadConfig, DEFAULTS, MAX_GATE_TIMEOUT_SEC } from "./config.js";
+import { parsePlan, stepById, nextStep, firstUnfinished, isPhaseEnd, isFeatureEnd, isFinished, setMarker, stepText, progress, planSlug, MARKERS } from "./plan.js";
+import { readText, readJson, writeFileAtomic, writeJsonAtomic, appendLine, ensureDir } from "./fsatomic.js";
+import { pendingVerifyFile, undoCutVerification, undoVerification, liveOtherGate, heldByLiveGate, phaseTag, verifyModeFor, reopenForMode, verifyPartName } from "./resume.js";
 import { readReady, clearReady, readBlocked, clearBlocked, readHeartbeat } from "./protocol.js";
-import { runChecks } from "./checks.js";
+import { runChecks, MIN_CHECK_MS, DEFAULT_CHECK_TIMEOUT_SEC } from "./checks.js";
 import { writeReport, checkFailureSection, summarize, fence } from "./report.js";
 import { restartDevServer, stopDevServer } from "./devserver.js";
-import { runBrowserCheck, browserTimeoutSec } from "./tester.js";
+import { runBrowserCheck, browserTimeoutSec, acceptCount, KINDS, untrackedSet, sweepStrays } from "./tester.js";
 import { runSecurityReview, securityWanted } from "./security.js";
 import { buildSummary, isOpenStatus } from "./summary.js";
 import * as git from "./git.js";
@@ -43,7 +47,9 @@ const MAX_REASON = 4000;
 // lib/notify.js owns the real list; this is only the fallback for an older notify.js.
 const EVENT_DEFAULTS = Object.freeze({ featureVerified: true, stepVerified: false, runStarted: false, runResumed: false, pausedByOwner: false });
 // Seconds of a stop kept after the checkers, for the commit, the tag and the push.
-const RESERVE_SEC = 60;
+export const RESERVE_SEC = 60;
+// The checks and the checkers of a stop never get less than this, whatever gate.timeoutSec.
+export const MIN_STOP_PARTS_SEC = 120;
 // A checker is not started with less of the gate's time than this for it.
 const MIN_CHECKER_MS = 60000;
 // The end of the run in a stop that already verified the last feature: the machine clean-up
@@ -52,6 +58,11 @@ const FOOTPRINT_MIN_MS = 90000;
 const HANDBACK_MS = 45000;
 // The Docker bookkeeping after the checks is best effort and short.
 const NOTE_FOOTPRINT_MS = 30000;
+// A check's recent time with a quarter on top is what it is expected to need (D60).
+const CHECK_HEADROOM = 1.25;
+// A verification carried over between stops starts again when the files change in between; the
+// third time the run pauses instead of starting it again all night.
+const MAX_STAGED_RESTARTS = 2;
 
 export function cliCommand(env = process.env) {
   // What the builder should type. Claude's Bash tool is Git Bash on Windows, which resolves the
@@ -66,9 +77,18 @@ export function cliCommand(env = process.env) {
 function nowIso(deps) { return (deps.now ? deps.now() : new Date()).toISOString(); }
 function nowMs(deps) { return deps.now ? deps.now().getTime() : Date.now(); }
 
-// "phase" unless the project asks for the old per-step verification.
-export function verifyMode(config) {
-  return config && config.gate && config.gate.verifyAt === "step" ? "step" : "phase";
+// The seconds one stop has for a verification's parts (the checks and the checkers): its
+// gate.timeoutSec less RESERVE_SEC for the commit, the tag and the push, never under
+// MIN_STOP_PARTS_SEC. runGate sets its deadline by it; lib/estimate.js sizes phases by it.
+export function stopPartsSec(config) {
+  const t = Number(config && config.gate ? config.gate.timeoutSec : NaN);
+  return Math.max(MIN_STOP_PARTS_SEC, (t > 0 ? t : DEFAULTS.gate.timeoutSec) - RESERVE_SEC);
+}
+
+// "phase" unless the project asks for the old per-step verification, everywhere or (with the
+// phase's number, gate.stepPhases: `autoclaude verify-per-step`) for that phase.
+export function verifyMode(config, phaseNum = null) {
+  return verifyModeFor(config, phaseNum);
 }
 
 // Another module's export, loaded on first use. A module that is missing or half-written (a
@@ -381,6 +401,114 @@ async function noteFootprintNow(g) {
   }
 }
 
+// The check times this project has on record (lib/checks.js readCheckTimes: { "<name>": {
+// recentMs, medianMs } }), or {} when it has none or the install's checks.js cannot say.
+async function recordedCheckTimes(g) {
+  const read = "readCheckTimes" in g.deps ? g.deps.readCheckTimes : await lazyExport("./checks.js", "readCheckTimes");
+  if (!read) return {};
+  try {
+    const t = await read(g.root);
+    return t && typeof t === "object" ? t : {};
+  } catch {
+    return {};
+  }
+}
+
+// Every run of the checks goes on record (lib/checks.js recordCheckTimes), so the next estimate
+// uses recent times. Best effort: an install without it, or a failed write, changes nothing.
+async function recordCheckTimesNow(g, results) {
+  // A check stopped at the gate's deadline has no time of its own to give.
+  const ran = (results || []).filter((r) => r && r.ran && !r.outOfTime);
+  if (!ran.length) return;
+  const rec = "recordCheckTimes" in g.deps ? g.deps.recordCheckTimes : await lazyExport("./checks.js", "recordCheckTimes");
+  if (!rec) return;
+  try { await rec(g.root, ran); } catch (e) { logLine(g.root, `could not record the check times: ${e && e.message ? e.message : e}`); }
+}
+
+function median(list) {
+  const xs = (Array.isArray(list) ? list : []).map(Number).filter((n) => n > 0).sort((a, b) => a - b);
+  if (!xs.length) return 0;
+  const mid = Math.floor(xs.length / 2);
+  return xs.length % 2 ? xs[mid] : (xs[mid - 1] + xs[mid]) / 2;
+}
+
+// A check's recent time on this computer, in ms (lib/checks.js readCheckTimes: its median, else
+// the median of its recent times); 0 when none is on record.
+export function recordedCheckMs(check, times = {}) {
+  const t = times && check ? times[check.name] : null;
+  const ms = t && Number(t.medianMs) > 0 ? Number(t.medianMs) : median(t && t.recentMs);
+  return ms > 0 ? ms : 0;
+}
+
+// What a check is expected to need, in ms: its recent time on record with a quarter on top, else
+// its timeoutSec; never more than its timeoutSec (it is stopped there), never less than the least
+// a check is started with. lib/estimate.js counts a check the same way.
+export function expectedCheckMs(check, times = {}) {
+  const capMs = (Number(check && check.timeoutSec) > 0 ? Number(check.timeoutSec) : DEFAULT_CHECK_TIMEOUT_SEC) * 1000;
+  const ms = recordedCheckMs(check, times);
+  if (!(ms > 0)) return capMs;
+  return Math.max(MIN_CHECK_MS, Math.min(capMs, Math.ceil(ms * CHECK_HEADROOM)));
+}
+
+// The most a single part of a verification may need: gate.fitPct percent of the seconds a stop
+// has for its parts (stopPartsSec), in whole seconds. lib/estimate.js sizes phases by it.
+export function fitLimitSec(config) {
+  const g = (config && config.gate) || DEFAULTS.gate;
+  return Math.floor((stopPartsSec(config) * (typeof g.fitPct === "number" && g.fitPct > 0 ? g.fitPct : DEFAULTS.gate.fitPct)) / 100);
+}
+
+// What the checkers are expected to need (D60), fitted to measured runs.
+// The browser tester: a fixed cost plus a cost per Accept line it checks in the browser. The DB
+// run's one-step features took 68 to 125 s for 3 to 5 Accept lines (16 to 27 turns), the practice
+// app's two-step feature 110 s for 9 lines. The fixed part is the session start, Playwright MCP
+// connecting through npx, the browser and the verdict; a line is a few browser actions. Both sit
+// at the top of what was measured, so a feature is over-estimated rather than under.
+export const TESTER_BASE_SEC = 50;
+export const TESTER_SEC_PER_LINE = 15;
+// The bug bash has no list to work through: it explores until its turns run out (tester.maxTurns
+// times 1.5, 60 by default; seen live wrapping up at that limit). Practice runs took 128 to 300 s
+// for 26 to 43 turns, about 7 s a turn, so a whole budget is about 420 s, under half of its own
+// limit (tester.timeoutSec, 900 by default).
+export const BUGBASH_SEC_PER_TURN = 7;
+// The security review reads the feature's diff. The DB runs' 30 reviews took 24 to 187 s, 77 s
+// on average, whole features of up to 9 steps among them; 180 s covers nearly all of them and is
+// a fifth of its own limit (security.timeoutSec, 900 by default).
+export const SECURITY_SEC = 180;
+
+// A checker's own limit, in seconds, where it is stopped: tester.timeoutSec (the tester's scaled
+// by its Accept lines, lib/tester.js browserTimeoutSec), security.timeoutSec for the security
+// review. `opts` is { step } or { steps }, as the checker is run.
+function checkerLimitSec(kind, config, opts = {}) {
+  if (kind === "security") return Number(config.security && config.security.timeoutSec) > 0 ? Number(config.security.timeoutSec) : SECURITY_SEC;
+  return browserTimeoutSec(kind, config, opts);
+}
+
+// What a checker ("tester", "bugbash" or "security") is expected to need by the model above, in
+// seconds, never more than its own limit: the tester its fixed cost and a cost per Accept line of
+// the steps it checks (those of `steps` not tagged no-ui, else `step`), the bug bash its whole turn
+// budget, the security review SECURITY_SEC. lib/estimate.js counts a checker's part by this, and
+// the gate weighs it by this with a quarter on top (expectedCheckerMs).
+export function checkerNeedSec(kind, config, { step = null, steps = null } = {}) {
+  const limit = checkerLimitSec(kind, config, { step, steps });
+  if (kind === "tester") {
+    const list = Array.isArray(steps) && steps.length ? steps.filter((s) => !(Array.isArray(s.tags) && s.tags.includes("no-ui"))) : step ? [step] : [];
+    return Math.min(limit, TESTER_BASE_SEC + TESTER_SEC_PER_LINE * acceptCount(list));
+  }
+  if (kind === "bugbash") return Math.min(limit, Math.round(config.tester.maxTurns * KINDS.bugbash.turnsFactor) * BUGBASH_SEC_PER_TURN);
+  return Math.min(limit, SECURITY_SEC);
+}
+
+// What the gate weighs a checker by before it starts it after another part of the same stop, in
+// ms: what it is expected to need (checkerNeedSec) with a quarter on top, as for a check, never
+// more than its own limit or than the most a part may need (fitLimitSec). Not its worst case: a
+// tester weighed by its scaled timeout (1800 s for 6 to 10 Accept lines) never started after any
+// check. Its run still gets the gate's real deadline, so one that overruns is stopped there and
+// carried to the next stop.
+export function expectedCheckerMs(kind, config, opts = {}) {
+  const need = Math.ceil(checkerNeedSec(kind, config, opts) * CHECK_HEADROOM * 1000);
+  return Math.min(checkerLimitSec(kind, config, opts) * 1000, fitLimitSec(config) * 1000, need);
+}
+
 // Who closes a phase's feature (verifyAt "phase"), for the messages: "S1.3, the step that closes
 // the phase,". That is its last step not yet done or built (isFeatureEnd; session-context.js says
 // the same), which is not the phase's last once the owner has ticked that one.
@@ -471,28 +599,42 @@ function outOfTimeHelp(config) {
   return `The checks and the checkers need longer than one stop allows: gate.timeoutSec is ${config.gate.timeoutSec} s, and it cannot go above the Stop hook's ${MAX_GATE_TIMEOUT_SEC} s. The feature is too big for one verification: split its phase into smaller ones, make the checks faster (and keep each check's timeoutSec well below gate.timeoutSec), or lower tester.maxTurns and tester.timeoutSec, or turn off bugBash.atPhaseEnd.`;
 }
 
+// The way out that needs no change to the plan (D60): the step's phase verified step by step,
+// with `verify-per-step`, then a resume. Null when the phase already is, or there is none.
+function perStepWayOut(g, stepId) {
+  const s = stepById(parsePlan(readText(g.planFile, "") || ""), String(stepId || ""));
+  const num = s && s.phase ? s.phase.num : null;
+  if (num === null || verifyMode(g.config, num) === "step") return null;
+  return `The quickest way on, with no change to the plan: \`${g.cli} verify-per-step ${num}\`, then \`${g.cli} resume\`. Phase ${num} is then verified one step at a time.`;
+}
+
 // The run pauses because a verification does not fit in one stop; resume clears the count.
-async function pauseOutOfTime(g, st, stepId, what, { report = null, outOfTime = null } = {}) {
+// verify-per-step is offered only where it can help: not in a fix-up pass (resume keeps the pass,
+// whose checks are the same either way), and not for a check (`part`), which every verification
+// runs whole.
+async function pauseOutOfTime(g, st, stepId, what, { report = null, outOfTime = null, part = null } = {}) {
   const { root, config, cli, ev, events, say } = g;
   const meanwhile = pausedMeanwhile(root);
-  save(g, { ...st, ...(outOfTime ? { outOfTime } : {}), status: STATUS.paused, pauseReason: "out-of-time", haltSession: meanwhile ? !!meanwhile.haltSession : !!st.haltSession });
+  const fixupPass = !!(st.fixup && st.fixup.stepId === stepId);
+  save(g, { ...st, verifying: null, ...(outOfTime ? { outOfTime } : {}), status: STATUS.paused, pauseReason: "out-of-time", haltSession: meanwhile ? !!meanwhile.haltSession : !!st.haltSession });
   stopDevServer({ root });
   ev("paused", { reason: "out-of-time" });
-  logLine(root, `${stepId}: paused, out of time: ${what}`);
-  await say({ title: `AutoClaude paused: ${stepId} does not fit in one verification`, message: `${what}.\n${outOfTimeHelp(config)}${report ? `\nReport: ${report}` : ""}\nThen \`${cli} resume\`.`, priority: "high" });
+  const wayOut = fixupPass || part === "check" ? null : perStepWayOut(g, stepId);
+  logLine(root, `${stepId}: paused, out of time: ${what}${wayOut ? `. ${wayOut}` : ""}`);
+  await say({ title: `AutoClaude paused: ${stepId} does not fit in one verification`, message: `${what}.\n${outOfTimeHelp(config)} Then \`${cli} resume\`.${wayOut ? `\n${wayOut}` : ""}${report ? `\nReport: ${report}` : ""}`, priority: "high" });
   return allow(events);
 }
 
 // A check or a checker stopped at the gate's deadline: not the builder's attempt. The first
 // time the builder readies again; the second time the run pauses, since the same verification
-// would run out of time the same way.
-async function ranOutOfTime(g, st, step, what, report) {
+// would run out of time the same way. `part` is the kind of part that ran out ("check", ...).
+async function ranOutOfTime(g, st, step, what, report, part = null) {
   const { root, cli, ev, events } = g;
   const n = ((st.outOfTime || {})[step.id] || 0) + 1;
   const outOfTime = { ...(st.outOfTime || {}), [step.id]: n };
   ev("out-of-time", { step: step.id, count: n, report });
   logLine(root, `${step.id}: out of time (${n}): ${what} (${report})`);
-  if (n >= 2) return await pauseOutOfTime(g, st, step.id, what, { report, outOfTime });
+  if (n >= 2) return await pauseOutOfTime(g, st, step.id, what, { report, outOfTime, part });
   const meanwhile = pausedMeanwhile(root);
   if (meanwhile) {
     save(g, { ...st, outOfTime, status: STATUS.paused, pauseReason: meanwhile.pauseReason || "review", haltSession: !!meanwhile.haltSession });
@@ -560,7 +702,7 @@ export async function runGate(input, deps = {}) {
     root, config, env, deps, cli, say, sayEvent, planFile, ev, events, loaded, clock, startedMs,
     // The checks and the checkers run against this; the rest of the stop is for the commit,
     // the tag and the push.
-    deadlineMs: startedMs + Math.max(120, config.gate.timeoutSec - RESERVE_SEC) * 1000,
+    deadlineMs: startedMs + stopPartsSec(config) * 1000,
     pid: "pid" in deps ? deps.pid : process.pid
   };
 
@@ -580,7 +722,10 @@ export async function runGate(input, deps = {}) {
     const what = interrupted.fixup ? `the fix-up checks of ${interrupted.step} were cut off` : `the verification of ${interrupted.step} was cut off`;
     ev("verify-interrupted", { step: interrupted.step, count: interrupted.count });
     logLine(root, `${what}${interrupted.fixup ? "" : "; its plan ticks, PROGRESS lines and findings rows were undone"}${interrupted.count ? ` (out of time ${interrupted.count})` : ""}`);
-    state.outOfTime = loadState(root).outOfTime;
+    // A verification cut off in a later stop of it leaves state.verifying with its snapshot.
+    const now = loadState(root);
+    state.outOfTime = now.outOfTime;
+    state.verifying = now.verifying;
     if (interrupted.step && interrupted.count >= 2) {
       return await pauseOutOfTime(g, state, interrupted.step, `The ${interrupted.fixup ? "fix-up checks" : "verification"} of ${interrupted.step} ${interrupted.fixup ? "were" : "was"} cut off ${interrupted.count} times by the Stop hook's timeout before ${interrupted.fixup ? "they" : "it"} finished`);
     }
@@ -590,8 +735,10 @@ export async function runGate(input, deps = {}) {
   if (planText === null) { ev("no-plan"); logLine(root, "plan file missing, allowing stop"); return allow(events); }
   let parsed = parsePlan(planText);
 
-  // Integrity: every [x] and [~] must be one the gate (or the owner, before the run) recorded.
-  const allowedTicks = new Set(state.tickedByGate || []);
+  // Integrity: every [x] and [~] must be one the gate (or the owner, before the run) recorded,
+  // the ticks of a verification carried over from an earlier stop included.
+  const staged = state.verifying && state.verifying.stepId ? state.verifying : null;
+  const allowedTicks = new Set([...(state.tickedByGate || []), ...(staged && Array.isArray(staged.ticked) ? staged.ticked : [])]);
   const rogue = parsed.steps.filter((s) => isFinished(s) && !allowedTicks.has(s.id));
   if (rogue.length) {
     for (const s of rogue) planText = setMarker(planText, s.id, MARKERS.todo);
@@ -608,6 +755,17 @@ export async function runGate(input, deps = {}) {
     const r = await resumeClose(g, state, parsed);
     if (r) return r;
     // Verified again instead (the files changed after its checks): the ticks may be out.
+    planText = readText(planFile, planText);
+    parsed = parsePlan(planText);
+  }
+  // A verification carried over from an earlier stop goes on from where it was (D60), before
+  // anything reads its ticks as done. Started again when the files changed since (`restart`,
+  // acted on below as the ready it was), or dropped, and the stop goes on as usual.
+  let restart = null;
+  if (state.verifying && state.verifying.stepId) {
+    const r = await carryOn(g, state, parsed);
+    if (r && r.decision) return r;
+    restart = r && r.restart ? r.restart : null;
     planText = readText(planFile, planText);
     parsed = parsePlan(planText);
   }
@@ -664,8 +822,9 @@ export async function runGate(input, deps = {}) {
     return allow(events);
   }
 
-  // No ready marker: keep the builder going, unless nothing is happening.
-  const ready = readReady(root);
+  // No ready marker: keep the builder going, unless nothing is happening. A verification that
+  // starts again is the ready it began with.
+  const ready = restart ? { step: restart } : readReady(root);
   if (!ready || (ready.step && ready.step !== step.id)) {
     if (ready) { clearReady(root); ev("ready-wrong-step", { marked: ready.step }); }
     const beat = readHeartbeat(root);
@@ -688,9 +847,9 @@ export async function runGate(input, deps = {}) {
     return block(`${owner.text}${wrong}Continue ${step.id} (${step.title}). When every Accept line holds, rewrite ${config.docs.continueHere} and run \`${cli} ready ${step.id}\`. If you truly cannot proceed without a human, run \`${cli} blocked ${step.id} "<question with options>"\`.\n\n${stepText(parsed, step)}`, events);
   }
 
-  // Ready.
+  // Ready. A phase in gate.stepPhases is verified step by step, whatever verifyAt says.
   clearReady(root);
-  const perFeature = verifyMode(config) === "phase";
+  const perFeature = verifyMode(config, step.phase ? step.phase.num : null) === "phase";
   if (!fixup && perFeature && !isFeatureEnd(parsed, step.id)) return await builtStep(g, state, step, parsed, planText);
   // A verification that ran out of time twice (counted by whoever undid the cut-off ones, the
   // supervisor included) is not started a third time.
@@ -744,57 +903,78 @@ async function builtStep(g, state, step, parsed, planText) {
   return await advance(g, base, { step, parsed: tparsed, next, sha, phaseEnd: false, closedFeature: false, built: true });
 }
 
-// The dev server (when anything needs it) and the configured checks, in order, each capped by
-// the gate's deadline. Returns { failure, failedCheck, outOfTime, sections, timings,
-// devServerReady }; outOfTime is true when a check was stopped (or not started) by the deadline.
-async function runCheckStage(g, { step, browserWanted }) {
-  const { root, config, env, deps, cli } = g;
-  const sections = [];
-  const timings = [];
-  let failure = null;
-  let failedCheck = null;
-  let outOfTime = false;
-  const restart = deps.restartDevServer || restartDevServer;
-  const needsServer = config.checks.some((c) => c.needsDevServer) || browserWanted;
-  let devServerReady = false;
-  if (needsServer && config.devServer.command && config.devServer.url) {
-    const ds = await restart(config.devServer, { root, env });
-    if (ds.ok) {
-      devServerReady = true;
-      if (ds.reused) sections.push({ title: "Dev server reused", body: `Something the gate did not start already answers at ${config.devServer.url}. It was used as it is and may be running older code.` });
-    } else {
-      failure = `the dev server did not start: ${ds.error}`;
-      sections.push({ title: "Dev server FAILED to start", body: `${ds.error}\n\n${fence((ds.logTail || []).join("\n") || "(no log output)")}` });
-    }
-  }
-  if (!failure) {
-    const checkResults = await runChecks(config.checks, { cwd: root, env, devServerReady, deadlineMs: g.deadlineMs, now: g.clock });
-    for (const r of checkResults.results) {
-      const passed = r.code === 0 && !r.timedOut;
-      if (r.ran) {
-        sections.push({ title: `Check "${r.name}": ${passed ? "passed" : r.outOfTime ? "OUT OF TIME" : "FAILED"}`, body: `\`${r.command}\` in ${Math.round(r.durationMs / 1000)} s${passed ? "" : `\n\n${checkFailureSection(r).body}`}` });
-        timings.push({ name: r.name, status: passed ? "passed" : r.outOfTime ? "out of time" : "FAILED", ms: r.durationMs });
-      } else if (!r.skipped) {
-        sections.push({ title: `Check "${r.name}": NOT RUN`, body: `\`${r.command}\` did not run: ${notRunReason(r, config, cli, step)}.` });
-      }
-    }
-    const f = checkResults.failed;
-    if (f) {
-      failedCheck = f;
-      outOfTime = !!f.outOfTime;
-      failure = f.outOfTime ? `check "${f.name}" ran out of the gate's time: ${f.reason}` : f.ran ? `check "${f.name}" failed` : `check "${f.name}" did not run: ${notRunReason(f, config, cli, step)}`;
-    }
-  }
-  return { failure, failedCheck, outOfTime, sections, timings, devServerReady };
+// The configured checks as parts of a verification, one each, in order: `kind` "check" (key
+// check:<i>:<name>), or "recheck" (recheck:<i>:<name>) for a per-step verification's second run
+// with its findings filed. `ms` is what the check is expected to need (expectedCheckMs).
+function checkParts(config, times, kind = "check") {
+  return config.checks.map((check, i) => {
+    const key = `${kind}:${i}:${check.name}`;
+    return { key, kind, name: verifyPartName(key), check, ms: expectedCheckMs(check, times) };
+  });
 }
 
-// The full verification of a step ("step" mode) or of the whole phase it closes (feature).
+// Runs the check parts of `list` that rec.done does not name yet, one by one, in this stop: the
+// checks of a verification, its second run with the findings filed, a fix-up pass's checks.
+// `ranHere` counts the parts this stop has run already. Before each check but the stop's first
+// part, the time left is weighed against what the check is expected to need; one that does not
+// fit, or is stopped at the deadline, after another part of this stop is carried over (`carry`
+// says why) and never counted. A check that passes goes into rec.done. Returns { ran (the results
+// of the checks that ran, for the record of check times), sections, timings, ranHere, carry,
+// failedCheck } (failedCheck: one that failed, did not run, or ran out of time as the stop's
+// first part).
+async function runCheckParts(g, rec, list, { step, devServerReady, ranHere = 0 }) {
+  const out = { ran: [], sections: [], timings: [], ranHere, carry: null, failedCheck: null };
+  for (const p of list) {
+    if (rec.done.includes(p.key)) continue;
+    if (out.ranHere && g.deadlineMs - g.clock() < p.ms) { out.carry = `${p.name} is expected to need ${secs(p.ms)}`; break; }
+    const r = (await runChecks([p.check], { cwd: g.root, env: g.env, devServerReady, deadlineMs: g.deadlineMs, now: g.clock })).results[0];
+    if (r.ran) out.ran.push(r);
+    if (r.outOfTime && out.ranHere) { out.carry = `${p.name} was stopped at the gate's deadline`; break; }
+    checkSection(g, r, step, out.sections, out.timings);
+    if (!r.ok) { out.failedCheck = r; break; }
+    rec.done.push(p.key);
+    out.ranHere++;
+  }
+  return out;
+}
+
+// A check's result in the report (sections) and in the commit body (timings).
+function checkSection(g, r, step, sections, timings) {
+  const passed = r.code === 0 && !r.timedOut;
+  if (r.ran) {
+    sections.push({ title: `Check "${r.name}": ${passed ? "passed" : r.outOfTime ? "OUT OF TIME" : "FAILED"}`, body: `\`${r.command}\` in ${Math.round(r.durationMs / 1000)} s${passed ? "" : `\n\n${checkFailureSection(r).body}`}` });
+    timings.push({ name: r.name, status: passed ? "passed" : r.outOfTime ? "out of time" : "FAILED", ms: r.durationMs });
+  } else if (!r.skipped) {
+    sections.push({ title: `Check "${r.name}": NOT RUN`, body: `\`${r.command}\` did not run: ${notRunReason(r, g.config, g.cli, step)}.` });
+  }
+}
+
+// Why a check failed a verification, in one line.
+function checkFailure(g, f, step) {
+  return f.outOfTime ? `check "${f.name}" ran out of the gate's time: ${f.reason}` : f.ran ? `check "${f.name}" failed` : `check "${f.name}" did not run: ${notRunReason(f, g.config, g.cli, step)}`;
+}
+
+// Starts (or restarts) the dev server for a verification. Returns { ok, failure } and adds what
+// the report needs to `sections`.
+async function devServerFor(g, sections) {
+  const { root, config, env, deps } = g;
+  const ds = await (deps.restartDevServer || restartDevServer)(config.devServer, { root, env });
+  if (ds.ok) {
+    if (ds.reused) sections.push({ title: "Dev server reused", body: `Something the gate did not start already answers at ${config.devServer.url}. It was used as it is and may be running older code.` });
+    return { ok: true, failure: null };
+  }
+  sections.push({ title: "Dev server FAILED to start", body: `${ds.error}\n\n${fence((ds.logTail || []).join("\n") || "(no log output)")}` });
+  return { ok: false, failure: `the dev server did not start: ${ds.error}` };
+}
+
+// The full verification of a step ("step" mode) or of the whole phase it closes (feature). The
+// ticks and PROGRESS lines are written first; then its parts run in order, as far as they fit in
+// this stop (runVerification), and the rest is carried to the next stop.
 async function verify(g, state, step, parsed, planText, feature) {
-  const { root, config, env, deps, cli, ev, events, say, planFile } = g;
+  const { root, config, env, deps, ev, planFile } = g;
   const attempt = (state.attempts[step.id] || 0) + 1;
-  const max = config.retries.maxAttemptsPerStep;
   const phase = step.phase;
-  const st = { ...state };
+  const st = { ...state, verifying: null };
   if (!st.phaseStartedAt) st.phaseStartedAt = st.stepStartedAt || st.startedAt || nowIso(deps);
   if (feature && !st.phaseBaseCommit) st.phaseBaseCommit = (await builtFeatureBase(g, phase)) || (await git.head(root, { env })) || null;
   const scopeIds = (feature && phase ? phase.steps : [step]).map((s) => s.id);
@@ -815,29 +995,136 @@ async function verify(g, state, step, parsed, planText, feature) {
   for (const id of toTick) ticked = setMarker(ticked, id, MARKERS.done);
   writeFileAtomic(planFile, ticked);
   if (added) appendLine(progressFile, added);
-  const restore = () => undoCutVerification(root, config, { own: true });
-  const tparsed = parsePlan(ticked);
-  const tstep = stepById(tparsed, step.id);
-  const scope = scopeIds.map((id) => stepById(tparsed, id));
+  // What the parts have found so far, and how to take the ticks out again without the snapshot:
+  // the record a stop parks in state.verifying when the rest does not fit (D60).
+  const rec = {
+    verifyId: snap.id, stepId: step.id, feature: !!feature, phase: phase ? phase.num : null, attempt, scope: scopeIds, ticked: toTick,
+    undo: { ticked: toTick, markers: Object.fromEntries(toTick.map((id) => [id, stepById(parsed, id).marker])), added, progressCreated: snap.progress === null },
+    done: [], sections: [], timings: [], followUps: [], securityFindings: [], noted: false, turns: 0, restarts: g.restarts || 0, startedAt: snap.at
+  };
+  return await runVerification(g, st, rec, snap, parsePlan(ticked));
+}
 
-  // Which browser checks this verification needs (Phase 4). The tester skips `no-ui` steps; the
-  // bug bash runs when a phase closes and the phase has any UI step at all.
+const andList = (xs) => (xs.length <= 1 ? xs.join("") : `${xs.slice(0, -1).join(", ")} and ${xs[xs.length - 1]}`);
+
+// checkers.parallel: "security" (the default) runs the security review, which reads only the
+// diff and needs no browser, alongside the browser checks; "off" runs every checker one after
+// another; "all" runs the tester and the bug bash at the same time too, which only an app whose
+// test data can take both at once should allow, since they share one dev server.
+export function checkersParallel(config) {
+  const v = config && config.checkers ? config.checkers.parallel : undefined;
+  return v === "off" || v === "all" ? v : "security";
+}
+
+// The lanes the checker parts run in, side by side; the parts of a lane run one after another.
+// By default the browser tester then the bug bash (never at the same time: they share the dev
+// server, and the bug bash tries to break things), and the security review in a lane of its own.
+export function checkerLanes(config, parts) {
+  const mode = checkersParallel(config);
+  if (mode === "off") return parts.length ? [parts] : [];
+  if (mode === "all") return parts.map((p) => [p]);
+  return [parts.filter((p) => p.kind !== "security"), parts.filter((p) => p.kind === "security")].filter((lane) => lane.length);
+}
+
+// The parts of a verification, in order: each configured check, the browser tester and the bug
+// bash (both need the dev server; without one set up they are left out, and the report says so),
+// then the security review (it needs only the diff, so by default it runs alongside the browser
+// checks: checkerLanes). `ms` is what each is expected to need: a check its recent time
+// (expectedCheckMs), a checker the estimate's model (expectedCheckerMs), each with a quarter on
+// top. For a feature the tester gets every UI step of the phase, one criterion per Accept line,
+// and the bug bash runs when the phase has any UI step at all. The checkers are run with sweep:
+// false: the gate sweeps their strays itself, once every lane is done (runVerification).
+function verificationParts(g, { tstep, tparsed, feature, scope, st, attempt, times }) {
+  const { root, config, env, deps } = g;
+  const parts = checkParts(config, times);
   const runBrowser = "runTester" in deps ? deps.runTester : runBrowserCheck;
   const uiSteps = scope.filter((s) => !s.tags.includes("no-ui"));
-  const phaseEnd = feature || isPhaseEnd(tparsed, step.id);
+  const phaseEnd = feature || isPhaseEnd(tparsed, tstep.id);
   const testerWanted = !!(runBrowser && config.tester.enabled && uiSteps.length);
   const bugBashWanted = !!(runBrowser && config.bugBash.atPhaseEnd && tstep.phase && phaseEnd && tstep.phase.steps.some((s) => !s.tags.includes("no-ui")));
-  const stage = await runCheckStage(g, { step: tstep, browserWanted: testerWanted || bugBashWanted });
-  await noteFootprintNow(g);
-  const { sections, timings } = stage;
-  let failure = stage.failure;
+  const browser = !!(config.devServer.command && config.devServer.url);
+  const browserRun = (kind, extra) => (deadlineMs) => runBrowser({ kind, root, config, step: tstep, ...extra, parsed: tparsed, state: st, env, attempt, deadlineMs, sweep: false });
+  if (browser && testerWanted) parts.push({ key: "tester", kind: "tester", name: verifyPartName("tester"), label: "browser tester", ms: expectedCheckerMs("tester", config, feature ? { steps: uiSteps } : { step: tstep }), run: browserRun("tester", feature ? { steps: uiSteps } : {}) });
+  if (browser && bugBashWanted) parts.push({ key: "bugbash", kind: "bugbash", name: verifyPartName("bugbash"), label: "bug bash", ms: expectedCheckerMs("bugbash", config, { step: tstep }), run: browserRun("bugbash", {}) });
+  // The security review of a feature reads its whole diff, from state.phaseBaseCommit.
+  const runSecurity = "runSecurity" in deps ? deps.runSecurity : runSecurityReview;
+  const securityOn = feature ? scope.some((s) => securityWanted(config, s, tparsed)) : securityWanted(config, tstep, tparsed);
+  if (runSecurity && securityOn) parts.push({ key: "security", kind: "security", name: verifyPartName("security"), label: "security review", ms: expectedCheckerMs("security", config, { step: tstep }), run: (deadlineMs) => runSecurity({ root, config, step: tstep, ...(feature ? { steps: scope } : {}), parsed: tparsed, state: st, env, attempt, deadlineMs, sweep: false }) });
+  return { parts, testerWanted, bugBashWanted, browser, phaseEnd };
+}
+
+const CHECKER_KINDS = Object.freeze(["tester", "bugbash", "security"]);
+const isChecker = (p) => CHECKER_KINDS.includes(p.kind);
+
+// Carries what is left of a verification (or of a fix-up pass's checks: rec.fixup) to the next
+// stop (D60). The record is parked in state.verifying with the tree it was verified on so far,
+// before the snapshot is freed from this gate, so a gate cut off in between is still undone as
+// one cut off. The builder is told to end its turn without changing anything; the next stop
+// carries on, and starts again from the first part if the files changed. Nothing is counted. An
+// owner pause made meanwhile stands. `head` opens the message ("The verification of Phase 1
+// (Lists) goes on"), `what` names it in the log, `again` in the warning about a change.
+async function parkStaged(g, st, rec, snap, parts, { why, what, head, again }) {
+  const { root, ev, events } = g;
+  const left = parts.filter((p) => !rec.done.includes(p.key));
+  rec.turns = (rec.turns || 0) + 1;
+  rec.tree = await stagedTree(g);
+  // The parts still to run, by key, for `autoclaude status` and a builder session started
+  // meanwhile (lib/resume.js stagedVerification).
+  Object.assign(rec, { parked: true, pid: null, at: new Date().toISOString(), left: left.map((p) => p.key) });
+  const next = { ...st, verifying: rec, noProgress: 0, toolCallsAtLastGate: readHeartbeat(root).count };
+  ev("staged", { step: rec.stepId, turn: rec.turns, done: [...rec.done], left: left.map((p) => p.key), ...(rec.fixup ? { fixup: true } : {}) });
+  logLine(root, `${what}: ${why}, with ${secs(Math.max(0, g.deadlineMs - g.clock()))} of this stop left; ${andList(left.map((p) => p.name))} carried to the next stop`);
+  const meanwhile = pausedMeanwhile(root);
+  save(g, meanwhile ? { ...next, status: STATUS.paused, pauseReason: meanwhile.pauseReason || "review", haltSession: !!meanwhile.haltSession } : next);
+  try { writeJsonAtomic(pendingVerifyFile(root), { ...snap, pid: null, at: rec.at }); } catch (e) { logLine(root, `could not free the verification snapshot: ${e && e.message ? e.message : e}`); }
+  if (meanwhile) {
+    stopDevServer({ root });
+    ev("paused", { reason: "owner", during: "verification" });
+    return allow(events);
+  }
+  const done = parts.filter((p) => rec.done.includes(p.key)).map((p) => p.name);
+  return block(`${head} in the next turn: ${andList(done)} ${done.length === 1 ? "is" : "are"} done, and ${andList(left.map((p) => p.name))} would not fit in what is left of this stop. Nothing failed and no attempt was counted. End your turn now without changing anything: the next stop carries on from here (a change to the files starts ${again} again from the beginning).`, events);
+}
+
+// Runs what is left of a verification in this stop. rec.done names the parts done in earlier
+// stops of it, and rec keeps what they found. Before each part but this stop's first, the time
+// left is weighed against what the part is expected to need: when it is short, or a part is
+// stopped at the deadline after another part of this stop, the rest goes to the next stop
+// (park), which never counts as an attempt or as out of time. A stop's first part always runs,
+// with the whole of the stop's time, so a part that does not fit even in a stop of its own is
+// out of time, as before. Each check runs on its own (lib/checks.js runChecks), in order; the
+// checkers then run in their lanes (checkerLanes), and nothing starts after a failed check. A
+// step verified on its own with findings filed runs its checks once more, staged the same way
+// (kind "recheck"), with the rows kept across stops. The outcome (a failure, out of time, a
+// checker that cannot run, the pass with its fix-up pass or its commit) is the same in whichever
+// stop it comes.
+async function runVerification(g, st, rec, snap, tparsed) {
+  const { root, config, env, deps, cli, ev, events, say, planFile } = g;
+  const step = stepById(tparsed, rec.stepId);
+  const phase = step.phase;
+  const feature = !!rec.feature;
+  const attempt = rec.attempt;
+  const max = config.retries.maxAttemptsPerStep;
+  const scope = rec.scope.map((id) => stepById(tparsed, id)).filter(Boolean);
+  const label = feature && phase ? `Phase ${phase.num} (${phase.title})` : step.id;
+  const date = nowIso(deps).slice(0, 10);
+  const { sections, timings, followUps, securityFindings } = rec;
+  const restore = () => undoCutVerification(root, config, { own: true });
+  const times = await recordedCheckTimes(g);
+  const { parts, testerWanted, bugBashWanted, browser, phaseEnd } = verificationParts(g, { tstep: step, tparsed, feature, scope, st, attempt, times });
+  // The second run of the checks, once a step's findings rows are filed (rec.rows): a part of
+  // the verification from then on, carried over like any other.
+  const rechecks = () => (!feature && rec.rows && rec.rows.filed.length ? checkParts(config, times, "recheck") : []);
+  if (rec.rows) parts.push(...rechecks());
+  const todo = parts.filter((p) => !rec.done.includes(p.key));
 
   // Out of the gate's time: nothing is taken as the builder's fault, and the ticks come out.
-  const outOfTime = async (what) => {
+  // `part` is the kind of the part that ran out, for the alert.
+  const outOfTime = async (what, part = null) => {
     const n = ((st.outOfTime || {})[step.id] || 0) + 1;
     const report = writeReport({ root, step: step.id, attempt: `${attempt}-time${n}`, title: `AutoClaude report: ${label}, verified at ${step.id}, ran out of time`, sections });
     restore();
-    return await ranOutOfTime(g, st, step, what, report.relPath);
+    return await ranOutOfTime(g, st, step, what, report.relPath, part === "recheck" ? "check" : part);
   };
 
   // A failed attempt: the ticks, PROGRESS lines and any findings rows come out again.
@@ -854,7 +1141,7 @@ async function verify(g, state, step, parsed, planText, feature) {
     if (attempt >= max) {
       // The plan as it is now, not as this gate read it: the owner may have edited it while the
       // checks ran (a `pause --now`, then a new step or a reworded Accept line).
-      try { writeFileAtomic(planFile, setMarker(readText(planFile, planText), step.id, MARKERS.failed)); } catch (e) { logLine(root, `could not mark ${step.id} [!]: ${e && e.message ? e.message : e}`); }
+      try { const now = readText(planFile, null); if (now !== null) writeFileAtomic(planFile, setMarker(now, step.id, MARKERS.failed)); } catch (e) { logLine(root, `could not mark ${step.id} [!]: ${e && e.message ? e.message : e}`); }
       const reason = failureKind === "security" ? "security" : "step-failed";
       save(g, { ...st, attempts, outOfTime: outOfTimeCounts, status: STATUS.paused, pauseReason: reason });
       stopDevServer({ root });
@@ -879,105 +1166,205 @@ async function verify(g, state, step, parsed, planText, feature) {
     return block(owner.text + summarize({ headline, sections: failingSections, reportPath: report.relPath, maxChars: MAX_REASON - owner.text.length }), events);
   };
 
-  if (stage.outOfTime) return await outOfTime(`The verification of ${label} ran out of time: ${failure}`);
+  // The rest goes to the next stop (D60, parkStaged).
+  const park = (why) => parkStaged(g, st, rec, snap, parts, { why, what: `${label} at ${step.id}`, head: `The verification of ${label} goes on`, again: "the verification" });
 
-  const followUps = [];
-  if (!failure && (testerWanted || bugBashWanted) && !stage.devServerReady) {
-    ev("browser-skipped", { reason: "no dev server" });
-    sections.push({ title: "Browser checks skipped", body: "No devServer command and url are set in autoclaude.config.json, so the browser tester and the bug bash could not open the app. Set devServer to have UI steps checked in a browser." });
-  } else if (!failure && !testerWanted && !bugBashWanted) {
-    ev("tester-skipped");
+  // The dev server, when a part still to run needs it.
+  let failure = null;
+  let failureKind = null;
+  let failedCheck = null;
+  let devServerReady = false;
+  const needsServer = (list) => list.some((p) => p.kind === "tester" || p.kind === "bugbash" || ((p.kind === "check" || p.kind === "recheck") && p.check.needsDevServer));
+  if (browser && needsServer(todo)) {
+    const ds = await devServerFor(g, sections);
+    devServerReady = ds.ok;
+    if (!ds.ok) { failure = ds.failure; failureKind = "checks"; }
   }
-  // The independent checkers, in order: browser tester, bug bash (both need the dev server),
-  // then the security reviewer (P5.4, needs only the diff). Same rules for all three: a failure
-  // counts as an attempt; a checker that cannot run never does, and pauses the second time; one
-  // that runs out of the gate's time is out of time. For a feature the tester gets every UI step
-  // of the phase, one criterion per Accept line. ownSec is each one's own timeout.
-  const checkers = [];
-  if (!failure && stage.devServerReady) {
-    if (testerWanted) checkers.push({ kind: "tester", label: "browser tester", ownSec: browserTimeoutSec("tester", config, feature ? { steps: uiSteps } : { step: tstep }), run: (deadlineMs) => runBrowser({ kind: "tester", root, config, step: tstep, ...(feature ? { steps: uiSteps } : {}), parsed: tparsed, state: st, env, attempt, deadlineMs }) });
-    if (bugBashWanted) checkers.push({ kind: "bugbash", label: "bug bash", ownSec: browserTimeoutSec("bugbash", config, { step: tstep }), run: (deadlineMs) => runBrowser({ kind: "bugbash", root, config, step: tstep, parsed: tparsed, state: st, env, attempt, deadlineMs }) });
+
+  // The checks, one by one.
+  let ranHere = 0;
+  const checksLeft = todo.filter((p) => p.kind === "check");
+  const cr = failure ? null : await runCheckParts(g, rec, checksLeft, { step, devServerReady, ranHere });
+  if (cr) {
+    sections.push(...cr.sections);
+    timings.push(...cr.timings);
+    ranHere = cr.ranHere;
   }
-  // The security review of a feature reads its whole diff, from state.phaseBaseCommit.
-  const runSecurity = "runSecurity" in deps ? deps.runSecurity : runSecurityReview;
-  const securityOn = feature ? scope.some((s) => securityWanted(config, s, tparsed)) : securityWanted(config, tstep, tparsed);
-  if (!failure && runSecurity && securityOn) {
-    checkers.push({ kind: "security", label: "security review", ownSec: config.security.timeoutSec, run: (deadlineMs) => runSecurity({ root, config, step: tstep, ...(feature ? { steps: scope } : {}), parsed: tparsed, state: st, env, attempt, deadlineMs }) });
+  if (checksLeft.length || !rec.turns) {
+    await recordCheckTimesNow(g, cr ? cr.ran : []);
+    await noteFootprintNow(g);
   }
-  const securityFindings = [];
-  let failureKind = failure ? "checks" : null;
-  for (let i = 0; i < checkers.length; i++) {
-    const c = checkers[i];
-    // The checkers share what is left of the gate's time. Each may use all of it but a reserve
-    // for every checker after it, half of that one's fair share (in proportion to the checkers'
-    // own timeouts). What one leaves unused goes to the next, and none is starved by those
-    // before it (seen in review: a long tester left the security review 30 s, and the run
-    // paused blaming this machine).
-    const left = g.deadlineMs - g.clock();
-    const total = checkers.slice(i).reduce((n, x) => n + x.ownSec, 0) || 1;
-    const reserve = checkers.slice(i + 1).reduce((n, x) => n + (left * x.ownSec) / total / 2, 0);
-    const allowMs = Math.floor(left - reserve);
-    const t0 = Date.now();
-    const leftSec = Math.max(0, Math.round(allowMs / 1000));
-    const r = allowMs < MIN_CHECKER_MS
-      ? { status: "out-of-time", failed: `the ${c.label} had ${leftSec} s of the gate's time left, too little to start it`, sections: [{ title: `The ${c.label}: out of time`, body: `Not started: ${leftSec} s of the gate's time was left for it.` }] }
-      : await c.run(g.clock() + allowMs);
-    timings.push({ name: c.label, status: r.status === "passed" ? "passed" : r.status === "infra" ? "could not run" : r.status === "out-of-time" ? "out of time" : "FAILED", ms: Date.now() - t0 });
-    ev(c.kind, { status: r.status, verdictFile: r.verdictFile });
-    sections.push(...(r.sections || []));
-    if (r.status === "out-of-time") return await outOfTime(`The verification of ${label} ran out of time: ${r.failed}`);
-    if (r.status === "infra") {
-      // The checker could not run: a machine problem, never the builder's attempt (P4.2).
-      restore();
-      const n = ((st.infraFailures || {})[step.id] || 0) + 1;
-      const report = writeReport({ root, step: step.id, attempt: `${attempt}-infra${n}`, title: `AutoClaude report: ${step.id}, ${c.label} could not run`, sections });
-      logLine(root, `${step.id}: ${c.label} could not run (${n}): ${r.failed} (${report.relPath})`);
-      ev("infra", { kind: c.kind, count: n, report: report.relPath });
-      const infraFailures = { ...(st.infraFailures || {}), [step.id]: n };
-      // A `pause --now` while the checker ran stays in force: saving `st` would undo it.
-      const meanwhile = pausedMeanwhile(root);
-      const halt = meanwhile ? !!meanwhile.haltSession : !!st.haltSession;
-      if (n >= 2) {
-        save(g, { ...st, infraFailures, status: STATUS.paused, pauseReason: "infra", haltSession: halt });
-        stopDevServer({ root });
-        ev("paused", { reason: "infra" });
-        await say({ title: `AutoClaude paused: the ${c.label} cannot run`, message: `${r.failed}\nReport: ${report.relPath}\nCheck ${c.kind === "security" ? "the claude CLI" : "Playwright and the claude CLI"} on this machine, then \`${cli} resume\`.`, priority: "high" });
-        return allow(events);
-      }
-      if (meanwhile) {
-        save(g, { ...st, infraFailures, status: STATUS.paused, pauseReason: meanwhile.pauseReason || "review", haltSession: halt });
-        stopDevServer({ root });
-        ev("paused", { reason: "owner", during: "verification" });
-        return allow(events);
-      }
-      save(g, { ...st, infraFailures });
-      return block(`The ${c.label} could not run: ${r.failed}. That is a problem on this machine, not with ${step.id}, and it did not count as an attempt. Run \`${cli} ready ${step.id}\` again. Report: ${report.relPath}`, events);
+  if (cr && cr.carry) return await park(cr.carry);
+  if (cr && cr.failedCheck) {
+    failedCheck = cr.failedCheck;
+    failure = checkFailure(g, failedCheck, step);
+    failureKind = "checks";
+  }
+  if (failedCheck && failedCheck.outOfTime) return await outOfTime(`The verification of ${label} ran out of time: ${failure}`, "check");
+  if (failure) return await fail(failure, failureKind, failedCheck);
+
+  if (!rec.noted) {
+    rec.noted = true;
+    if ((testerWanted || bugBashWanted) && !browser) {
+      ev("browser-skipped", { reason: "no dev server" });
+      sections.push({ title: "Browser checks skipped", body: "No devServer command and url are set in autoclaude.config.json, so the browser tester and the bug bash could not open the app. Set devServer to have UI steps checked in a browser." });
+    } else if (!testerWanted && !bugBashWanted) {
+      ev("tester-skipped");
     }
-    if (c.kind === "security") securityFindings.push(...(r.findings || []));
-    else followUps.push(...(r.followUps || []));
-    if (r.status === "failed") { failure = r.failed; failureKind = c.kind; break; }
   }
 
-  if (failure) return await fail(failure, failureKind, stage.failedCheck);
+  // The independent checkers, each its own part, in lanes that run side by side
+  // (checkerLanes): parts in a lane run one after another. Each part starts only when what it is
+  // allowed fits in what is left of the stop (a stop's first parts always start), with the gate's
+  // deadline as its limit. A lane stops at a part that does not fit (the rest of it carries to the
+  // next stop) and at a part that does not pass, and no lane starts a part once another has not
+  // passed. Every part started is waited for: a security review still running when a browser
+  // check fails finishes, and its findings go into the builder's report.
+  const lanes = checkerLanes(config, todo.filter(isChecker));
+  // Files a checker leaves in the project are moved out before the commit (lib/tester.js
+  // sweepStrays), but no checker sweeps for itself here (sweep: false): one lane's sweep would
+  // move files the app writes while another lane is still using it (an upload under test). The
+  // untracked files are noted once, before any lane starts, and swept once, after every lane is
+  // done, into one report folder for this stop's checkers (<step>-<attempt>-checkers/stray/).
+  const strayBase = lanes.length ? await untrackedSet(root, env) : null;
+  const started = [];
+  const running = new Set();
+  let stopNew = false;
+  // The first part of every lane is weighed at one and the same moment, before any starts.
+  const startLeft = g.deadlineMs - g.clock();
+  const startFirst = ranHere === 0;
+  const runLane = async (lane) => {
+    for (let i = 0; i < lane.length; i++) {
+      const p = lane[i];
+      if (stopNew) return;
+      const left = i === 0 ? startLeft : g.deadlineMs - g.clock();
+      const first = i === 0 ? startFirst : ranHere === 0;
+      if (!first && (left < p.ms || left < MIN_CHECKER_MS)) return;
+      const o = { p, first, alongside: new Set(), t0: Date.now(), ms: 0, r: null };
+      for (const other of running) { other.alongside.add(p.label); o.alongside.add(other.p.label); }
+      running.add(o);
+      started.push(o);
+      const leftSec = Math.max(0, Math.round(left / 1000));
+      try {
+        o.r = left < MIN_CHECKER_MS
+          ? { status: "out-of-time", failed: `the ${p.label} had ${leftSec} s of the gate's time left, too little to start it`, sections: [{ title: `The ${p.label}: out of time`, body: `Not started: ${leftSec} s of the gate's time was left for it.` }] }
+          : await p.run(g.deadlineMs);
+      } catch (e) {
+        o.r = { status: "infra", failed: `the ${p.label} stopped with an error: ${e && e.message ? e.message : e}`, sections: [{ title: `The ${p.label}: could not run`, body: String(e && e.stack ? e.stack : e) }] };
+      }
+      o.ms = Date.now() - o.t0;
+      running.delete(o);
+      if (!["failed", "infra", "out-of-time"].includes(o.r.status)) { ranHere++; continue; }
+      // One stopped at the deadline after another part of this stop is carried over, and leaves
+      // the others alone; any other outcome ends the verification here.
+      if (!(o.r.status === "out-of-time" && !first)) stopNew = true;
+      return;
+    }
+  };
+  await Promise.all(lanes.map((lane) => runLane(lane)));
+  const strayDir = path.join(projectPaths(root).reportsDir, `${step.id}-${attempt}-checkers`);
+  const strays = strayBase && started.length ? await sweepStrays(root, strayBase, strayDir, env) : [];
+  const strayRel = path.relative(root, path.join(strayDir, "stray")).replace(/\\/g, "/");
+  if (strays.length) logLine(root, `${label} at ${step.id}: moved ${strays.length} file(s) the checkers left in the project to ${strayRel}: ${strays.join(", ")}`);
 
-  // Pass. The findings are filed next to the ticks.
-  const fRows = followUpRows(step, followUps, date);
-  const sRows = securityRows(step, securityFindings, date);
-  const filed = fileRows(g, snap, [{ file: config.docs.blockers, header: BLOCKERS_HEADER, lines: fRows }, { file: config.docs.security, header: SECURITY_HEADER, lines: sRows }]);
+  // Once every lane is done: the events, the timings (marked when they overlapped) and the
+  // report sections, in the fixed order tester, bug bash, security review, then one outcome by a
+  // fixed priority: out of time > could not run > failed > carried over > passed.
+  const order = ["tester", "bugbash", "security"];
+  started.sort((a, b) => order.indexOf(a.p.kind) - order.indexOf(b.p.kind));
+  const carried = started.filter((o) => o.r.status === "out-of-time" && !o.first);
+  const settled = started.filter((o) => !carried.includes(o));
+  for (const o of started) ev(o.p.kind, { status: o.r.status, verdictFile: o.r.verdictFile });
+  for (const o of settled) {
+    const status = o.r.status === "passed" ? "passed" : o.r.status === "infra" ? "could not run" : o.r.status === "out-of-time" ? "out of time" : "FAILED";
+    const others = order.map((k) => parts.find((p) => p.kind === k)).filter((p) => p && o.alongside.has(p.label)).map((p) => `the ${p.label}`);
+    timings.push({ name: others.length ? `${o.p.label} (alongside ${andList(others)})` : o.p.label, status, ms: o.ms });
+    sections.push(...(o.r.sections || []));
+    if (o.r.status === "infra" || o.r.status === "out-of-time") continue;
+    if (o.p.kind === "security") securityFindings.push(...(o.r.findings || []));
+    else followUps.push(...(o.r.followUps || []));
+    if (o.r.status !== "failed") rec.done.push(o.p.key);
+  }
+  if (strays.length) sections.push({ title: "Files the checkers left in the project", body: `Moved to ${strayRel}, so the commit cannot pick them up:\n${strays.map((f) => `- ${f}`).join("\n")}` });
+  const timedOut = settled.find((o) => o.r.status === "out-of-time");
+  if (timedOut) return await outOfTime(`The verification of ${label} ran out of time: ${timedOut.r.failed}`, timedOut.p.kind);
+  const infra = settled.find((o) => o.r.status === "infra");
+  if (infra) {
+    // The checker could not run: a machine problem, never the builder's attempt (P4.2).
+    const { p, r } = infra;
+    restore();
+    const n = ((st.infraFailures || {})[step.id] || 0) + 1;
+    const report = writeReport({ root, step: step.id, attempt: `${attempt}-infra${n}`, title: `AutoClaude report: ${step.id}, ${p.label} could not run`, sections });
+    logLine(root, `${step.id}: ${p.label} could not run (${n}): ${r.failed} (${report.relPath})`);
+    ev("infra", { kind: p.kind, count: n, report: report.relPath });
+    const infraFailures = { ...(st.infraFailures || {}), [step.id]: n };
+    // A `pause --now` while the checker ran stays in force: saving `st` would undo it.
+    const meanwhile = pausedMeanwhile(root);
+    const halt = meanwhile ? !!meanwhile.haltSession : !!st.haltSession;
+    if (n >= 2) {
+      save(g, { ...st, infraFailures, status: STATUS.paused, pauseReason: "infra", haltSession: halt });
+      stopDevServer({ root });
+      ev("paused", { reason: "infra" });
+      await say({ title: `AutoClaude paused: the ${p.label} cannot run`, message: `${r.failed}\nReport: ${report.relPath}\nCheck ${p.kind === "security" ? "the claude CLI" : "Playwright and the claude CLI"} on this machine, then \`${cli} resume\`.`, priority: "high" });
+      return allow(events);
+    }
+    if (meanwhile) {
+      save(g, { ...st, infraFailures, status: STATUS.paused, pauseReason: meanwhile.pauseReason || "review", haltSession: halt });
+      stopDevServer({ root });
+      ev("paused", { reason: "owner", during: "verification" });
+      return allow(events);
+    }
+    save(g, { ...st, infraFailures });
+    return block(`The ${p.label} could not run: ${r.failed}. That is a problem on this machine, not with ${step.id}, and it did not count as an attempt. Run \`${cli} ready ${step.id}\` again. Report: ${report.relPath}`, events);
+  }
+  // Two failures make one attempt; "security" when the security review is one of them.
+  const failedParts = settled.filter((o) => o.r.status === "failed");
+  if (failedParts.length) return await fail(failedParts.map((o) => o.r.failed).join("; "), failedParts.some((o) => o.p.kind === "security") ? "security" : failedParts[0].p.kind, null);
+  const notDone = parts.filter((p) => p.kind !== "recheck" && !rec.done.includes(p.key));
+  if (notDone.length) return await park(carried.length ? `${andList(carried.map((o) => o.p.name))} stopped at the gate's deadline` : `${andList(notDone.map((p) => p.name))} would not fit`);
+
+  // Pass. The findings are filed next to the ticks, once: rec.rows keeps them (and the snapshot
+  // and its undo record name them) when the checks' second run below is carried to a later stop.
+  if (!rec.rows) {
+    const fRows = followUpRows(step, followUps, date);
+    const sRows = securityRows(step, securityFindings, date);
+    const filed = fileRows(g, snap, [{ file: config.docs.blockers, header: BLOCKERS_HEADER, lines: fRows }, { file: config.docs.security, header: SECURITY_HEADER, lines: sRows }]).map(({ file, text, created }) => ({ file, text, created }));
+    rec.rows = { followUps: fRows, security: sRows, filed };
+    if (filed.length) {
+      snap.rows = filed;
+      rec.undo = { ...rec.undo, rows: filed };
+    }
+    parts.push(...rechecks());
+  }
   // Per step, the rows go into this step's commit, so the checks run once more with them in the
   // tree: the verified commit is a tree the checks passed on (per feature, the fix-up pass runs
-  // them again).
-  if (!feature && filed.length) {
-    const docs = filed.map((e) => e.file).join(" and ");
-    const again = await runCheckStage(g, { step: tstep, browserWanted: false });
-    sections.push(...again.sections.map((s) => ({ ...s, title: `${s.title} (with the findings filed)` })));
-    timings.push(...again.timings.map((t) => ({ ...t, name: `${t.name} (with the findings filed)` })));
-    if (again.outOfTime) return await outOfTime(`The verification of ${label} ran out of time: ${again.failure}`);
-    if (again.failure) return await fail(`${again.failure} once the findings were filed in ${docs}`, "checks", again.failedCheck);
+  // them again). Staged like the first run: what does not fit after another part of this stop is
+  // carried over, with the rows filed, which are then part of the tree the next stop compares.
+  const again = parts.filter((p) => p.kind === "recheck");
+  if (again.length) {
+    const docs = [...new Set(rec.rows.filed.map((e) => e.file))].join(" and ");
+    if (browser && !devServerReady && needsServer(again.filter((p) => !rec.done.includes(p.key)))) {
+      const ds = await devServerFor(g, sections);
+      devServerReady = ds.ok;
+      if (!ds.ok) return await fail(`${ds.failure} once the findings were filed in ${docs}`, "checks", null);
+    }
+    const rr = await runCheckParts(g, rec, again, { step, devServerReady, ranHere });
+    sections.push(...rr.sections.map((s) => ({ ...s, title: `${s.title} (with the findings filed)` })));
+    timings.push(...rr.timings.map((t) => ({ ...t, name: `${t.name} (with the findings filed)` })));
+    await recordCheckTimesNow(g, rr.ran);
+    if (rr.carry) return await park(rr.carry);
+    if (rr.failedCheck) {
+      const f = checkFailure(g, rr.failedCheck, step);
+      if (rr.failedCheck.outOfTime) return await outOfTime(`The verification of ${label} ran out of time: ${f}`, "recheck");
+      return await fail(`${f} once the findings were filed in ${docs}`, "checks", rr.failedCheck);
+    }
   }
+  if (rec.turns) sections.push({ title: "Spread over turns", body: `The verification did not fit in one stop of the gate, so it ran over ${rec.turns + 1} stops, as much of it as fitted in each.` });
   const report = writeReport({ root, step: step.id, attempt, title: `AutoClaude report: ${feature && phase ? `${label}, verified at ${step.id},` : step.id} attempt ${attempt} passed`, sections });
+  const toTick = rec.ticked;
   const tickedIds = [...new Set([...(st.tickedByGate || []), ...toTick])];
-  const findings = fixupFindings(config, followUps, securityFindings, { followUps: fRows, security: sRows });
+  const filed = rec.rows.filed;
+  const findings = fixupFindings(config, followUps, securityFindings, { followUps: rec.rows.followUps, security: rec.rows.security });
   if (feature && findings.length) {
     // The fix-up pass (D49): the builder fixes or hands over each finding, then the checks run
     // once more before the feature is committed. The state records the pass (with the
@@ -1004,18 +1391,79 @@ async function verify(g, state, step, parsed, planText, feature) {
   // stop accepts and a commit it finishes, never ticks it reverts or a feature verified twice.
   // With the tree that was verified, and how to take this verification out again, in case the
   // files have changed by then.
-  const undo = {
-    ticked: toTick, markers: Object.fromEntries(toTick.map((id) => [id, stepById(parsed, id).marker])), added,
-    progressCreated: snap.progress === null, rows: filed.map(({ file, text, created }) => ({ file, text, created }))
-  };
+  const undo = { ...rec.undo, rows: filed.map(({ file, text, created }) => ({ file, text, created })) };
   const closing = {
-    verifyId: snap.id, stepId: step.id, scope: scopeIds, attempt, timings, findings: findings.length, report: report.relPath,
+    verifyId: snap.id, stepId: step.id, scope: rec.scope, attempt, timings, findings: findings.length, report: report.relPath,
     feature, phaseEnd, fixupDone: false, headBefore: config.git.commitEachStep ? await git.head(root, { env }) : null,
     tree: config.git.commitEachStep ? await stagedTree(g) : null, undo, pid: g.pid, at: new Date().toISOString()
   };
-  updateState(root, (s) => { s.tickedByGate = [...new Set([...(s.tickedByGate || []), ...toTick])]; s.closing = closing; });
+  updateState(root, (s) => { s.tickedByGate = [...new Set([...(s.tickedByGate || []), ...toTick])]; s.closing = closing; s.verifying = null; });
   clearPending(root);
-  return await close(g, { ...st, tickedByGate: tickedIds, closing }, { step: tstep, parsed: tparsed, scope, closing });
+  return await close(g, { ...st, tickedByGate: tickedIds, closing }, { step, parsed: tparsed, scope, closing });
+}
+
+// A stop of a verification carried over from an earlier one (state.verifying, parked by
+// runVerification): it goes on with the parts not done yet, on the same files. When the files
+// changed since that stop (other than the resume file alone, as for a cut-off close) it starts
+// again from its first part instead, counting nothing: this returns { restart: stepId }, which
+// runGate acts on as the ready the verification began with, and the third time the run pauses.
+// A record whose snapshot is gone or whose ticks were changed, or a question from the builder,
+// drops it: its ticks and PROGRESS lines come out, and the stop goes on as usual (null). The
+// checks of a fix-up pass carried over (rec.fixup) go on the same way (runFixupChecks), and are
+// dropped when their pass is no longer under way; started again, they are the pass's ready.
+async function carryOn(g, state, parsed) {
+  const { root, config, cli, ev, events, say } = g;
+  const rec = state.verifying;
+  let snap = null;
+  try { snap = readJson(pendingVerifyFile(root), null); } catch { snap = null; }
+  const own = !!(snap && snap.id && snap.id === rec.verifyId);
+  const fixupChecks = !!rec.fixup;
+  const what = fixupChecks ? `the fix-up checks of Phase ${rec.phase}` : `the verification of ${rec.feature && Number.isInteger(rec.phase) ? `Phase ${rec.phase}` : rec.stepId}`;
+  const was = fixupChecks ? "were" : "was";
+  const drop = (why) => {
+    const ids = undoVerification(root, config, own ? snap : rec.undo || {});
+    if (own) clearPending(root);
+    updateState(root, (s) => { s.verifying = null; });
+    state.verifying = null;
+    ev("verify-dropped", { step: rec.stepId, why });
+    logLine(root, `${what} carried over from an earlier stop ${was} dropped: ${why}${ids.length ? ` (unticked ${ids.join(", ")})` : ""}`);
+    return null;
+  };
+  const ticks = Array.isArray(rec.ticked) ? rec.ticked : [];
+  if (!own) return drop("its snapshot is gone");
+  const at0 = stepById(parsed, rec.stepId);
+  if (!at0 || (fixupChecks && at0.marker !== MARKERS.done) || !ticks.every((id) => (stepById(parsed, id) || {}).marker === MARKERS.done)) return drop("its plan ticks were changed");
+  if (fixupChecks && !(state.fixup && state.fixup.stepId === rec.stepId)) return drop("its fix-up pass is no longer under way");
+  if (readBlocked(root)) return drop("the builder asked the owner a question");
+  const tree = await stagedTree(g);
+  if (rec.tree && tree && tree !== rec.tree && !(await onlyResumeFileChanged(g, rec.tree, tree))) {
+    const restarts = (rec.restarts || 0) + 1;
+    undoCutVerification(root, config, { own: true });
+    state.verifying = null;
+    if (restarts > MAX_STAGED_RESTARTS) {
+      save(g, { ...state, status: STATUS.paused, pauseReason: "stuck" });
+      stopDevServer({ root });
+      ev("paused", { reason: "stuck", step: rec.stepId, restarts });
+      logLine(root, `the files changed between the stops of ${what} ${restarts} times; paused as stuck`);
+      await say({ title: `AutoClaude stuck on ${rec.stepId}`, message: `${what[0].toUpperCase()}${what.slice(1)} did not fit in one stop, and the files changed between ${fixupChecks ? "their" : "its"} stops ${restarts} times, so ${fixupChecks ? "they" : "it"} started again each time and never finished. Something changes the project while the gate waits between stops: the builder, or a process writing to files git tracks. Look at the project, then \`${cli} resume\`.`, priority: "high" });
+      return allow(events);
+    }
+    g.restarts = restarts;
+    ev("verify-restarted", { step: rec.stepId, restarts });
+    logLine(root, `the files changed since the last stop of ${what}; ${fixupChecks ? "they start" : "it starts"} again from ${fixupChecks ? "their" : "its"} first part, and nothing is counted`);
+    return { restart: rec.stepId };
+  }
+  const ready = readReady(root);
+  if (ready && (!ready.step || ready.step === rec.stepId)) clearReady(root);
+  const at = new Date().toISOString();
+  const live = { ...rec, parked: false, pid: g.pid, at };
+  const held = { ...snap, pid: g.pid, at };
+  updateState(root, (s) => { s.verifying = live; });
+  writeJsonAtomic(pendingVerifyFile(root), held);
+  ev("verify-continued", { step: rec.stepId, turn: (rec.turns || 0) + 1, done: [...(rec.done || [])], ...(fixupChecks ? { fixup: true } : {}) });
+  logLine(root, `${what} ${fixupChecks ? "go" : "goes"} on at ${rec.stepId}, stop ${(rec.turns || 0) + 1} of ${fixupChecks ? "them" : "it"} (${(rec.done || []).length} part(s) done)`);
+  if (fixupChecks) return await runFixupChecks(g, { ...state, verifying: null }, live, held, parsed);
+  return await runVerification(g, { ...state, verifying: null }, live, held, parsed);
 }
 
 // The ready after a fix-up pass: every finding has an outcome, then the checks only (the ticks
@@ -1065,53 +1513,95 @@ async function fixupReady(g, state, step, parsed) {
   ev("verify", { step: step.id, attempt, fixup: true });
   logLine(root, `fix-up checks for Phase ${fixup.phase} at ${step.id}, attempt ${attempt}`);
   // Nothing to undo, but a pass cut off by the hook's timeout counts like a verification.
-  writeJsonAtomic(pendingVerifyFile(root), { id: crypto.randomUUID(), step: step.id, fixup: true, pid: g.pid, at: new Date().toISOString(), ticked: [] });
-  const stage = await runCheckStage(g, { step, browserWanted: false });
-  await noteFootprintNow(g);
-  if (stage.outOfTime) {
-    const n = ((state.outOfTime || {})[step.id] || 0) + 1;
-    const report = writeReport({ root, step: `${step.id}-fixup`, attempt: `${attempt}-time${n}`, title: `AutoClaude report: the fix-up checks of Phase ${fixup.phase} ran out of time`, sections: stage.sections });
-    clearPending(root);
-    return await ranOutOfTime(g, state, step, `The fix-up checks of Phase ${fixup.phase} ran out of time: ${stage.failure}`, report.relPath);
+  const snap = { id: crypto.randomUUID(), step: step.id, fixup: true, pid: g.pid, at: new Date().toISOString(), ticked: [] };
+  writeJsonAtomic(pendingVerifyFile(root), snap);
+  // What the checks have done so far: the record a stop parks in state.verifying (fixup: true)
+  // when the rest does not fit, as for a verification (D60).
+  const rec = {
+    verifyId: snap.id, stepId: step.id, feature: true, fixup: true, phase: fixup.phase, attempt, scope: [], ticked: [], undo: {},
+    done: [], sections: [], timings: [], turns: 0, restarts: g.restarts || 0, startedAt: snap.at
+  };
+  return await runFixupChecks(g, { ...state, verifying: null }, rec, snap, parsed);
+}
+
+// The checks of a fix-up pass, on the files as the pass left them (the ticks and PROGRESS lines
+// are already written), then the feature closes. Staged like a verification's checks (D60): one
+// check per part, as many as fit in this stop, the rest carried to the next (parkStaged); only a
+// check that does not fit even as the first part of a stop is out of time. rec.done names the
+// checks done in earlier stops, rec.sections and rec.timings keep what they gave.
+async function runFixupChecks(g, st, rec, snap, parsed) {
+  const { root, config, cli, ev, events, say } = g;
+  const fixup = st.fixup;
+  const step = stepById(parsed, rec.stepId);
+  const attempt = rec.attempt;
+  const max = config.retries.maxAttemptsPerStep;
+  const { sections, timings } = rec;
+  const parts = checkParts(config, await recordedCheckTimes(g));
+  const todo = parts.filter((p) => !rec.done.includes(p.key));
+  let failure = null;
+  let failedCheck = null;
+  let devServerReady = false;
+  if (config.devServer.command && config.devServer.url && todo.some((p) => p.check.needsDevServer)) {
+    const ds = await devServerFor(g, sections);
+    devServerReady = ds.ok;
+    failure = ds.failure;
   }
-  if (stage.failure) {
+  const cr = failure ? null : await runCheckParts(g, rec, todo, { step, devServerReady });
+  if (cr) {
+    sections.push(...cr.sections);
+    timings.push(...cr.timings);
+    await recordCheckTimesNow(g, cr.ran);
+    if (cr.failedCheck) { failedCheck = cr.failedCheck; failure = checkFailure(g, failedCheck, step); }
+  }
+  await noteFootprintNow(g);
+  if (cr && cr.carry) {
+    return await parkStaged(g, st, rec, snap, parts, { why: cr.carry, what: `the fix-up checks of Phase ${fixup.phase} at ${step.id}`, head: `The fix-up checks of Phase ${fixup.phase} go on`, again: "the fix-up checks" });
+  }
+  if (failedCheck && failedCheck.outOfTime) {
+    const n = ((st.outOfTime || {})[step.id] || 0) + 1;
+    const report = writeReport({ root, step: `${step.id}-fixup`, attempt: `${attempt}-time${n}`, title: `AutoClaude report: the fix-up checks of Phase ${fixup.phase} ran out of time`, sections });
     clearPending(root);
-    const report = writeReport({ root, step: `${step.id}-fixup`, attempt, title: `AutoClaude report: the fix-up checks of Phase ${fixup.phase}, attempt ${attempt}`, sections: stage.sections });
-    const attempts = { ...state.attempts, [step.id]: attempt };
-    const outOfTimeCounts = { ...(state.outOfTime || {}), [step.id]: 0 };
-    ev("failed", { step: step.id, attempt, failure: stage.failure, report: report.relPath, fixup: true });
-    logLine(root, `fix-up checks of Phase ${fixup.phase} attempt ${attempt} failed: ${stage.failure} (${report.relPath})`);
+    return await ranOutOfTime(g, st, step, `The fix-up checks of Phase ${fixup.phase} ran out of time: ${failure}`, report.relPath, "check");
+  }
+  if (failure) {
+    clearPending(root);
+    const report = writeReport({ root, step: `${step.id}-fixup`, attempt, title: `AutoClaude report: the fix-up checks of Phase ${fixup.phase}, attempt ${attempt}`, sections });
+    const attempts = { ...st.attempts, [step.id]: attempt };
+    const outOfTimeCounts = { ...(st.outOfTime || {}), [step.id]: 0 };
+    ev("failed", { step: step.id, attempt, failure, report: report.relPath, fixup: true });
+    logLine(root, `fix-up checks of Phase ${fixup.phase} attempt ${attempt} failed: ${failure} (${report.relPath})`);
     if (attempt >= max) {
-      save(g, { ...state, attempts, outOfTime: outOfTimeCounts, status: STATUS.paused, pauseReason: "step-failed" });
+      save(g, { ...st, attempts, outOfTime: outOfTimeCounts, status: STATUS.paused, pauseReason: "step-failed" });
       stopDevServer({ root });
       ev("paused", { reason: "step-failed", fixup: true });
-      await say({ title: `AutoClaude paused: the fix-up checks of Phase ${fixup.phase} failed ${attempt} times`, message: `${stage.failure}\nReport: ${report.relPath}\nThe feature passed its verification; its fix-up pass broke a check. Fix it, then \`${cli} resume\` (the run resumes in the fix-up pass).`, priority: "high" });
+      await say({ title: `AutoClaude paused: the fix-up checks of Phase ${fixup.phase} failed ${attempt} times`, message: `${failure}\nReport: ${report.relPath}\nThe feature passed its verification; its fix-up pass broke a check. Fix it, then \`${cli} resume\` (the run resumes in the fix-up pass).`, priority: "high" });
       return allow(events);
     }
     const meanwhile = pausedMeanwhile(root);
     if (meanwhile) {
-      save(g, { ...state, attempts, outOfTime: outOfTimeCounts, status: STATUS.paused, pauseReason: meanwhile.pauseReason || "review", haltSession: !!meanwhile.haltSession });
+      save(g, { ...st, attempts, outOfTime: outOfTimeCounts, status: STATUS.paused, pauseReason: meanwhile.pauseReason || "review", haltSession: !!meanwhile.haltSession });
       stopDevServer({ root });
       ev("paused", { reason: "owner", during: "verification" });
       return allow(events);
     }
-    const owner = ownerInput(state, config);
-    save(g, owner.mark({ ...state, attempts, outOfTime: outOfTimeCounts }));
-    const failingSections = stage.sections.filter((s) => /FAILED|failed|NOT RUN/.test(s.title));
-    return block(owner.text + summarize({ headline: `The fix-up checks of Phase ${fixup.phase} (attempt ${attempt}/${max}) failed: ${stage.failure}. Fix the causes, then run \`${cli} ready ${step.id}\` again.`, sections: failingSections, reportPath: report.relPath, maxChars: MAX_REASON - owner.text.length }), events);
+    const owner = ownerInput(st, config);
+    save(g, owner.mark({ ...st, attempts, outOfTime: outOfTimeCounts }));
+    const failingSections = sections.filter((s) => /FAILED|failed|NOT RUN/.test(s.title));
+    return block(owner.text + summarize({ headline: `The fix-up checks of Phase ${fixup.phase} (attempt ${attempt}/${max}) failed: ${failure}. Fix the causes, then run \`${cli} ready ${step.id}\` again.`, sections: failingSections, reportPath: report.relPath, maxChars: MAX_REASON - owner.text.length }), events);
   }
-  const report = writeReport({ root, step: `${step.id}-fixup`, attempt, title: `AutoClaude report: the fix-up checks of Phase ${fixup.phase}, attempt ${attempt} passed`, sections: stage.sections });
+  if (rec.turns) sections.push({ title: "Spread over turns", body: `The fix-up checks did not fit in one stop of the gate, so they ran over ${rec.turns + 1} stops, as many of them as fitted in each.` });
+  const report = writeReport({ root, step: `${step.id}-fixup`, attempt, title: `AutoClaude report: the fix-up checks of Phase ${fixup.phase}, attempt ${attempt} passed`, sections });
   const scope = step.phase ? step.phase.steps : [step];
-  const timings = [...(fixup.checks || []), ...stage.timings.map((t) => ({ ...t, name: `${t.name} (after the fix-up)` }))];
+  const closingTimings = [...(fixup.checks || []), ...timings.map((t) => ({ ...t, name: `${t.name} (after the fix-up)` }))];
   const closing = {
-    verifyId: null, stepId: step.id, scope: scope.map((s) => s.id), attempt: fixup.attempt || 1, timings, findings: fixup.findings.length,
+    verifyId: null, stepId: step.id, scope: scope.map((s) => s.id), attempt: fixup.attempt || 1, timings: closingTimings, findings: fixup.findings.length,
     report: [fixup.report, report.relPath].filter(Boolean).join(" and "), feature: true, phaseEnd: true, fixupDone: true,
     headBefore: config.git.commitEachStep ? await git.head(root, { env: g.env }) : null,
     tree: config.git.commitEachStep ? await stagedTree(g) : null, pid: g.pid, at: new Date().toISOString()
   };
-  updateState(root, (s) => { s.closing = closing; });
+  updateState(root, (s) => { s.closing = closing; s.verifying = null; });
   clearPending(root);
-  return await close(g, { ...state, closing }, { step, parsed, scope, closing });
+  return await close(g, { ...st, closing }, { step, parsed, scope, closing });
 }
 
 // A verified commit whose gate was cut off (the hook's timeout in a slow pre-commit hook, the
@@ -1430,11 +1920,11 @@ async function advance(g, base, { step, parsed, next, sha, phaseEnd, closedFeatu
 
 // No step is left to do. Built steps no verification would reach first go back to [ ] (the
 // owner ticked the step that closes their feature, a start that skipped them, verifyAt changed
-// to "step"), so a plan never completes with an unverified step; then the plan completes.
+// to "step", or the phase is now verified step by step), so a plan never completes with an
+// unverified step; then the plan completes.
 async function finishPlan(g, state, parsed) {
   const { root, config, deps, cli, ev, events, planFile } = g;
-  const mode = verifyMode(config);
-  const { text, reopened } = reopenUnverified(readText(planFile, ""), mode);
+  const { text, reopened } = reopenForMode(readText(planFile, ""), config);
   if (!reopened.length) return await complete(g, state, parsed);
   writeFileAtomic(planFile, text);
   const rp = parsePlan(text);
@@ -1451,8 +1941,8 @@ async function finishPlan(g, state, parsed) {
   }
   const owner = ownerInput(next, config);
   save(g, owner.mark(next));
-  const why = mode === "step" || !step.phase
-    ? `${step.id} was built but never verified, and each step is verified on its own ready (gate.verifyAt "step")`
+  const why = !step.phase || verifyMode(config, step.phase.num) === "step"
+    ? `${step.id} was built but never verified, and each step ${step.phase && verifyMode(config) === "phase" ? `of Phase ${step.phase.num} is verified on its own ready (gate.stepPhases)` : `is verified on its own ready (gate.verifyAt "step")`}`
     : `${step.id} was built but Phase ${step.phase.num} (${step.phase.title}) was never verified: every other step of it is done or built, so ${step.id} now closes it`;
   return block(`${owner.text}${why}. Check that its Accept lines hold, rewrite ${config.docs.continueHere}, then run \`${cli} ready ${step.id}\`.\n\n${stepText(rp, step)}`, events);
 }

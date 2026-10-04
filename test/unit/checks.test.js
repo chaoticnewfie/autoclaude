@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { runChecks, tailLines, TAIL_LINES, DEFAULT_CHECK_TIMEOUT_SEC, isGitBashOnlyDir, withoutGitBashDirs, checksEnv, recordRunEnv, readRunEnv, runEnvFile, describeChecksEnv } from "../../plugins/autoclaude/lib/checks.js";
+import { runChecks, tailLines, TAIL_LINES, DEFAULT_CHECK_TIMEOUT_SEC, isGitBashOnlyDir, withoutGitBashDirs, checksEnv, recordRunEnv, readRunEnv, runEnvFile, describeChecksEnv, recordCheckTimes, readCheckTimes, checkTimesFile, medianOf, RECENT_RUNS } from "../../plugins/autoclaude/lib/checks.js";
 
 const node = JSON.stringify(process.execPath);
 const passing = (name = "pass") => ({ name, command: `${node} -e "console.log('ok from ${name}')"`, timeoutSec: 60 });
@@ -219,5 +219,67 @@ test("recordRunEnv writes only when the PATH changed; readRunEnv takes PATH, the
   assert.equal(readRunEnv(root).value, "C:\\b");
   fs.writeFileSync(runEnvFile(root), "{ not json");
   assert.equal(readRunEnv(root), null, "a broken file counts as none");
+});
+
+// ---------- check times (P10.13, D60) ----------
+
+test("medianOf: the middle value, the mean of the middle two, null for none", () => {
+  assert.equal(medianOf([5, 1, 3]), 3);
+  assert.equal(medianOf([4, 1, 3, 2]), 3, "(2 + 3) / 2 = 2.5, rounded");
+  assert.equal(medianOf([10, 20]), 15);
+  assert.equal(medianOf([]), null);
+  assert.equal(medianOf(null), null);
+  assert.equal(medianOf([7, "x", NaN]), 7, "only numbers count");
+});
+
+test("recordCheckTimes keeps the last 5 passed runs per check with their median; failed, timed-out, out-of-time and skipped runs are not times", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "autoclaude-ctimes-"));
+  assert.deepEqual(readCheckTimes(root), {}, "no file yet");
+  const res = (name, durationMs, extra = {}) => ({ name, ran: true, ok: true, timedOut: false, outOfTime: false, skipped: false, durationMs, ...extra });
+  const at = (s) => ({ now: () => new Date(s) });
+  let t = recordCheckTimes(root, [
+    res("unit", 120000),
+    res("lint", 9000),
+    res("e2e", 600000, { ok: false, timedOut: true, outOfTime: true }),
+    res("db", 1000, { ok: false, code: 1 }),
+    res("late", 0, { ran: false, ok: false, skipped: true })
+  ], at("2026-10-03T08:00:00Z"));
+  assert.deepEqual(t, {
+    unit: { recentMs: [120000], medianMs: 120000, at: "2026-10-03T08:00:00.000Z" },
+    lint: { recentMs: [9000], medianMs: 9000, at: "2026-10-03T08:00:00.000Z" }
+  });
+  assert.deepEqual(readCheckTimes(root), t, "written to the file");
+  assert.equal(checkTimesFile(root), path.join(root, ".autoclaude", "check-times.json"));
+
+  for (const ms of [100000, 140000, 90000, 500000, 110000]) t = recordCheckTimes(root, [res("unit", ms)], at("2026-10-03T09:00:00Z"));
+  assert.equal(RECENT_RUNS, 5);
+  assert.deepEqual(t.unit, { recentMs: [100000, 140000, 90000, 500000, 110000], medianMs: 110000, at: "2026-10-03T09:00:00.000Z" }, "the oldest run dropped; one slow run does not move the median far");
+  assert.deepEqual(t.lint.recentMs, [9000], "a check not in this run keeps its times");
+
+  // Nothing passed: nothing changes, and the times are still returned.
+  const before = fs.readFileSync(checkTimesFile(root), "utf8");
+  assert.deepEqual(recordCheckTimes(root, [res("unit", 5000, { ok: false })]), t);
+  assert.deepEqual(recordCheckTimes(root, null), t);
+  assert.equal(fs.readFileSync(checkTimesFile(root), "utf8"), before);
+});
+
+test("readCheckTimes never throws: a broken file or broken entries count as no times", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "autoclaude-ctimes-bad-"));
+  fs.mkdirSync(path.join(root, ".autoclaude"));
+  fs.writeFileSync(checkTimesFile(root), "{ not json");
+  assert.deepEqual(readCheckTimes(root), {});
+  fs.writeFileSync(checkTimesFile(root), "[1, 2]");
+  assert.deepEqual(readCheckTimes(root), {});
+  fs.writeFileSync(checkTimesFile(root), JSON.stringify({ unit: { recentMs: [3000, "x", -1, 5000], medianMs: 1 }, lint: { recentMs: [] }, e2e: "fast", db: null }));
+  assert.deepEqual(readCheckTimes(root), { unit: { recentMs: [3000, 5000], medianMs: 4000, at: null } }, "the median is worked out again from the times kept");
+  // A broken file is replaced by the next record, not left to block it.
+  const t = recordCheckTimes(root, [{ name: "lint", ok: true, ran: true, durationMs: 2000 }], { now: () => new Date("2026-10-03T10:00:00Z") });
+  assert.deepEqual(Object.keys(t).sort(), ["lint", "unit"]);
+  // A file where the .autoclaude folder should be: the write fails silently and the times are
+  // still returned.
+  const blocked = fs.mkdtempSync(path.join(os.tmpdir(), "autoclaude-ctimes-dir-"));
+  fs.writeFileSync(path.join(blocked, ".autoclaude"), "not a folder");
+  assert.deepEqual(Object.keys(recordCheckTimes(blocked, [{ name: "unit", ok: true, ran: true, durationMs: 1000 }])), ["unit"]);
+  assert.deepEqual(readCheckTimes(blocked), {});
 });
 

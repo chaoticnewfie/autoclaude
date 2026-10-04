@@ -836,7 +836,8 @@ test("verifyAt phase: non-blocking findings get a fix-up pass; the next ready ru
   assert.deepEqual(secCalls, ["S1.3#1"]);
   const body = gitBody(root);
   assert.match(body, /as one feature: S1\.1, S1\.2, S1\.3, attempt 1, then a fix-up pass\./);
-  assert.match(body, /\n- unit: passed in \d+ s\n- browser tester: passed in \d+ s\n- bug bash: passed in \d+ s\n- security review: passed in \d+ s\n- unit \(after the fix-up\): passed in \d+ s\n/);
+  // The security review ran alongside the browser checks (checkers.parallel "security").
+  assert.match(body, /\n- unit: passed in \d+ s\n- browser tester \(alongside the security review\): passed in \d+ s\n- bug bash( \(alongside the security review\))?: passed in \d+ s\n- security review \(alongside the browser tester( and the bug bash)?\): passed in \d+ s\n- unit \(after the fix-up\): passed in \d+ s\n/);
   assert.match(body, /Findings filed: 2\.\nReport: \.autoclaude\/reports\/S1\.3-1\.md and \.autoclaude\/reports\/S1\.3-fixup-2\.md\.$/);
   assert.equal(gitTags(root), "ac-phase-1");
   s = loadState(root);

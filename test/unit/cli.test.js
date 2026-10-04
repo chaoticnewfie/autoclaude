@@ -8,6 +8,7 @@ import { runCli, nextDecisionId, outsideFences, maskNtfyUrl, COMMANDS, commandHe
 import { loadState, saveState, defaultState } from "../../plugins/autoclaude/lib/state.js";
 import { loadConfig } from "../../plugins/autoclaude/lib/config.js";
 import { trustKeyFor } from "../../plugins/autoclaude/lib/paths.js";
+import { readCheckTimes, recordCheckTimes } from "../../plugins/autoclaude/lib/checks.js";
 
 class Sink { constructor() { this.text = ""; } write(s) { this.text += s; return true; } }
 
@@ -57,6 +58,39 @@ test("status: not initialized, then initialized with plan progress", async () =>
   assert.match(r.out, /next step: S1\.1 First/);
   assert.match(r.out, /last progress: never/);
   assert.match(r.out, /usage:/);
+});
+
+test("status shows a verification spread over turns: the phase, the parts done and the parts left", async () => {
+  const root = project({ plan: "# Demo plan\n\n## Phase 1: One\n- [x] **S1.1** First\n  - Accept: a\n- [x] **S1.2** Second\n  - Accept: b\n\n## Phase 2: Two\n- [ ] **S2.1** Third\n  - Accept: c\n" });
+  const verifying = { verifyId: "v-1", stepId: "S1.2", feature: true, phase: 1, attempt: 1, scope: ["S1.1", "S1.2"], ticked: ["S1.1", "S1.2"], done: ["check:0:unit", "check:1:e2e", "tester"], left: ["bugbash", "security"], parked: true, pid: null, turns: 2 };
+  saveState(root, { ...defaultState(), status: "running", currentStep: "S1.2", verifying });
+  let r = await run(["status"], root);
+  assert.equal(r.code, 0, r.out + r.err);
+  assert.match(r.out, /\n {2}verification: Phase 1 \(One\), at S1\.2, carried over to the next turn after 2 stops; the gate carries it on when the builder's turn ends; check "unit", check "e2e" and the browser tester are done, and the bug bash and the security review are left\n/);
+  // Paused with it carried over (a resume keeps it): the same line.
+  saveState(root, { ...defaultState(), status: "paused", pauseReason: "review", currentStep: "S1.2", verifying: { ...verifying, turns: 1 } });
+  r = await run(["status"], root);
+  assert.match(r.out, /^autoclaude: paused \(review\)/);
+  assert.match(r.out, /\n {2}verification: Phase 1 \(One\), at S1\.2, carried over to the next turn after 1 stop;/);
+
+  // A gate at work on it in its third stop; then the same with that gate gone (cut off).
+  saveState(root, { ...defaultState(), status: "running", currentStep: "S1.2", verifying: { ...verifying, parked: false, pid: 4242, done: [...verifying.done, "bugbash"] } });
+  r = await run(["status"], root, { deps: { isPidAlive: (pid) => pid === 4242 } });
+  assert.match(r.out, /\n {2}verification: Phase 1 \(One\), at S1\.2, the gate is at work on it \(stop 3 of it\); check "unit", check "e2e", the browser tester and the bug bash are done, and the security review is left\n/);
+  r = await run(["status"], root, { deps: { isPidAlive: () => false } });
+  assert.match(r.out, /\n {2}verification: Phase 1 \(One\), at S1\.2, cut off in stop 3 of it; the next stop takes it out; /);
+
+  // One step verified on its own names the step; a record that does not list what is left says
+  // what is done.
+  const { left, ...noLeft } = verifying;
+  saveState(root, { ...defaultState(), status: "running", currentStep: "S1.2", verifying: { ...noLeft, feature: false, done: ["check:0:unit"], turns: 1 } });
+  r = await run(["status"], root);
+  assert.match(r.out, /\n {2}verification: S1\.2, carried over to the next turn after 1 stop; the gate carries it on when the builder's turn ends; check "unit" is done\n/);
+  assert.ok(left.length);
+
+  // None carried over: no line.
+  saveState(root, { ...defaultState(), status: "running", currentStep: "S2.1" });
+  assert.doesNotMatch((await run(["status"], root)).out, /verification:/);
 });
 
 test("status reports config problems instead of running", async () => {
@@ -1246,4 +1280,140 @@ test("sweep-run: fix mode hands the plan in the sweep's folder to run --plan; pl
   assert.equal(r.code, 0);
   assert.match(r.out, /paused: weekly usage limit reached \(91%\)\. Rerun `autoclaude sweep-run 20261002-0905-security`/);
   assert.match(r.out, /usage\.autoResumeAfterWeeklyReset/);
+});
+
+// ---------- P10.13: phases that fit their verification (D60) ----------
+
+const TWO_PHASES = `# Demo plan
+
+## Phase 1: One
+- [x] **S1.1** First
+  - Accept: a
+
+## Phase 2: Two
+- [ ] **S2.1** Second
+  - Accept: b
+- [ ] **S2.2** Third
+  - Accept: c
+`;
+
+test("lint-plan prints each unfinished phase's estimate and a WARNING for one that does not fit, without changing the exit code", async () => {
+  const slow = { name: "suite", command: "npm test", timeoutSec: 1500 };
+  const root = project({ plan: TWO_PHASES, config: { version: 1, checks: [slow] } });
+  let r = await run(["lint-plan"], root);
+  assert.equal(r.code, 0, r.out + r.err);
+  assert.match(r.out, /ok: 3 steps in 2 phases/);
+  assert.match(r.out, /\nautoclaude: verification estimate per unfinished phase \(one part may need up to 1218 s: gate\.fitPct 70% of the 1740 s a stop has for its parts, gate\.timeoutSec 1800 s less 60 s for the commit\)\n/);
+  assert.doesNotMatch(r.out, /Phase 1 \(One\)/, "Phase 1 is verified");
+  assert.match(r.out, /\n {2}Phase 2 \(Two\): DOES NOT FIT; largest part check "suite", up to 1500 s \(its timeoutSec; not timed yet\)/);
+  assert.match(r.out, /\n {2}not timed on this computer yet: suite \(counted at its timeoutSec\); `autoclaude checks` times them\n/);
+  assert.match(r.out, /\nWARNING: Phase 2 \(Two\) does not fit its verification: its check "suite" needs up to 1500 s .*`autoclaude checks` times it\./);
+
+  // Timed at a minute on this computer: it fits, and nothing is left untimed.
+  recordCheckTimes(root, [{ name: "suite", ok: true, ran: true, durationMs: 60000 }]);
+  r = await run(["lint-plan"], root);
+  assert.equal(r.code, 0);
+  assert.match(r.out, /Phase 2 \(Two\): fits; largest part security review, about 180 s \(estimated\)/);
+  assert.doesNotMatch(r.out, /WARNING|not timed/);
+
+  // A phase verified step by step says so.
+  fs.writeFileSync(path.join(root, "autoclaude.config.json"), JSON.stringify({ version: 1, checks: [slow], gate: { stepPhases: [2] } }));
+  r = await run(["lint-plan"], root);
+  assert.match(r.out, /Phase 2 \(Two\), verified step by step: fits/);
+
+  // A plan with lint problems gets no estimate; a file outside any set-up project neither.
+  fs.writeFileSync(path.join(root, "bad.md"), "# B\n\n## Phase 1: A\n- [ ] **S1.1** a\n");
+  r = await run(["lint-plan", "bad.md"], root);
+  assert.equal(r.code, 1);
+  assert.doesNotMatch(r.out, /estimate/);
+  const loose = fs.mkdtempSync(path.join(os.tmpdir(), "autoclaude-cli-loose-"));
+  fs.writeFileSync(path.join(loose, "plan.md"), TWO_PHASES);
+  r = await run(["lint-plan", "plan.md"], loose);
+  assert.equal(r.code, 0, r.out);
+  assert.doesNotMatch(r.out, /estimate|WARNING/);
+});
+
+test("checks records the times of the checks that pass, for the estimates", async () => {
+  const node = JSON.stringify(process.execPath);
+  const checks = [
+    { name: "lint", command: `${node} -e "setTimeout(() => process.exit(0), 50)"`, timeoutSec: 60 },
+    { name: "unit", command: `${node} -e "process.exit(4)"`, timeoutSec: 60 },
+    { name: "late", command: `${node} -e "process.exit(0)"`, timeoutSec: 60 }
+  ];
+  const root = project({ config: { version: 1, checks } });
+  let r = await run(["checks"], root, { env: { ...process.env } });
+  assert.equal(r.code, 1, r.out + r.err);
+  let t = readCheckTimes(root);
+  assert.deepEqual(Object.keys(t), ["lint"], "a failed check and a skipped one are no times");
+  assert.equal(t.lint.recentMs.length, 1);
+  assert.ok(t.lint.medianMs >= 50, JSON.stringify(t));
+
+  fs.writeFileSync(path.join(root, "autoclaude.config.json"), JSON.stringify({ version: 1, checks: [checks[0], checks[2]] }));
+  r = await run(["checks"], root, { env: { ...process.env } });
+  assert.equal(r.code, 0, r.out + r.err);
+  assert.match(r.out, /all 2 check\(s\) passed; their times are recorded for the phase estimates\n$/);
+  t = readCheckTimes(root);
+  assert.deepEqual([t.lint.recentMs.length, t.late.recentMs.length], [2, 1]);
+});
+
+test("verify-per-step marks a phase to be verified step by step while the run is paused or idle, never while it runs; --off undoes it", async () => {
+  const root = project({ plan: TWO_PHASES, config: { version: 1, gate: { timeoutSec: 1500 } } });
+  const raw = () => JSON.parse(fs.readFileSync(path.join(root, "autoclaude.config.json"), "utf8"));
+
+  let r = await run(["verify-per-step"], root);
+  assert.equal(r.code, 2);
+  assert.match(r.err, /usage: autoclaude verify-per-step <phase number> \[--off\]/);
+  r = await run(["verify-per-step", "two"], root);
+  assert.equal(r.code, 1);
+  assert.match(r.err, /unknown option two/);
+  r = await run(["verify-per-step", "2", "3"], root);
+  assert.equal(r.code, 1);
+  assert.match(r.err, /takes one phase number/);
+
+  // Running: refused, and the config is untouched.
+  saveState(root, { ...defaultState(), status: "running", currentStep: "S2.2" });
+  r = await run(["verify-per-step", "2"], root);
+  assert.equal(r.code, 1);
+  assert.match(r.out, /the run is running.*Pause it first/);
+  assert.deepEqual(raw(), { version: 1, gate: { timeoutSec: 1500 } });
+
+  // Paused: added, the project's other gate settings kept, and resume named.
+  saveState(root, { ...defaultState(), status: "paused", pauseReason: "out-of-time", currentStep: "S2.2" });
+  r = await run(["verify-per-step", "2"], root);
+  assert.equal(r.code, 0, r.out + r.err);
+  assert.match(r.out, /Phase 2 \(Two\) is now verified step by step \(gate\.stepPhases is \[2\] in autoclaude\.config\.json\)/);
+  assert.match(r.out, /The plan is not changed\./);
+  assert.match(r.out, /\n {2}Run `autoclaude resume` to carry on\.\n$/);
+  assert.deepEqual(raw(), { version: 1, gate: { timeoutSec: 1500, stepPhases: [2] } });
+  assert.deepEqual(loadConfig(root).config.gate.stepPhases, [2]);
+  assert.equal(fs.readFileSync(path.join(root, "PLAN.md"), "utf8"), TWO_PHASES);
+
+  r = await run(["verify-per-step", "2"], root);
+  assert.equal(r.code, 0);
+  assert.match(r.out, /already verified step by step; nothing changed/);
+  r = await run(["verify-per-step", "1"], root);
+  assert.deepEqual(raw().gate.stepPhases, [1, 2], "kept in order");
+  r = await run(["verify-per-step", "7"], root);
+  assert.equal(r.code, 1);
+  assert.match(r.out, /PLAN\.md has no Phase 7/);
+
+  // --off removes it; the last one removed leaves no empty list behind.
+  r = await run(["verify-per-step", "1", "--off"], root);
+  assert.equal(r.code, 0);
+  assert.match(r.out, /Phase 1 \(One\) is verified as one feature again/);
+  r = await run(["verify-per-step", "--off", "2"], root);
+  assert.deepEqual(raw(), { version: 1, gate: { timeoutSec: 1500 } });
+  r = await run(["verify-per-step", "2", "--off"], root);
+  assert.match(r.out, /already verified as one feature; nothing changed/);
+
+  // Idle (or complete): allowed, and the change has to be committed before `autoclaude run`.
+  saveState(root, defaultState());
+  r = await run(["verify-per-step", "2"], root);
+  assert.equal(r.code, 0);
+  assert.match(r.out, /Commit autoclaude\.config\.json, then `autoclaude run`/);
+  // With verifyAt "step" every phase is per step already: said, and the list is still kept.
+  fs.writeFileSync(path.join(root, "autoclaude.config.json"), JSON.stringify({ version: 1, gate: { verifyAt: "step" } }));
+  r = await run(["verify-per-step", "2"], root);
+  assert.match(r.out, /gate\.verifyAt is "step", so every phase is verified step by step already/);
+  assert.match(commandHelp("verify-per-step"), /gate\.stepPhases/);
 });

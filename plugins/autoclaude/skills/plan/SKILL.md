@@ -283,6 +283,9 @@ set on the config page (`autoclaude config`) instead. Two rounds:
 
 **2.11 Features.** Propose the phases, one feature each (section 4), as a short list with the
 steps in each, and ask the owner to approve the list and its order before you write the steps.
+Size them first so each fits its verification ("Phases that fit their verification" in section
+4); a phase you split later, after `autoclaude lint-plan` warns, needs no second approval, only
+a mention in the hand-over.
 
 ## 3. Set the project up for the run (every case)
 
@@ -312,7 +315,11 @@ autoclaude checks
 
 It runs in the gate's environment, starts the dev server first when a check needs it and stops
 it after, prints one line per check, and exits 0 only if all pass. Do not judge a check by
-running it with the Bash tool: the gate uses a different shell. Then:
+running it with the Bash tool: the gate uses a different shell. `autoclaude checks` also times
+each check that passes and records the time on this computer; the phase estimates (section 4)
+use those times, and every verification during the run keeps them current. So run it until the
+checks pass, and again after anything that makes them slower (a new test suite, a seed). A check
+never timed is counted at its `timeoutSec`. Then:
 - A missing tool (a runtime, a database, a CLI) is an owner prerequisite, named exactly, or,
   when the owner allows installs, something the first step installs.
 - A check that downloads on every run (`npx` fetching a package, a runner installing browsers)
@@ -434,6 +441,35 @@ verification round over all of it: usually 3 to 8 steps, and at most about 20 br
 Accept lines across its UI steps (the tester's budget grows with the lines up to that point). The
 plan is as long as the work: no fixed number of phases or steps.
 
+**Phases that fit their verification.** The gate runs a feature's verification in parts: each
+check, the browser tester over the phase's Accept lines, the bug bash and the security review.
+It spreads the parts over several turns when it must, but each single part has to fit in one
+turn: a phase fits when its largest part needs at most `gate.fitPct` (default 70) percent of the
+time a stop has for its parts, which is `gate.timeoutSec` less 60 s for the commit (by default
+1740 s, so 1218 s). A phase that does not fit risks running out of time at every verification,
+which pauses the run. Size the phases for it:
+- Before writing the steps, estimate each phase the way `autoclaude lint-plan` does: each check at
+  the time `autoclaude checks` recorded, plus a quarter (as the gate counts it); the browser
+  tester at about 50 s plus 15 s per browser-checked Accept line (the lines of every step not
+  tagged `no-ui`); the bug bash at about 7 s per turn of its budget (420 s by default); the
+  security review at about 180 s. The security review runs alongside the browser checks
+  (`checkers.parallel`), which shortens a verification but not what any single part needs.
+- After writing the plan, `autoclaude lint-plan` prints that estimate for every unfinished phase
+  and a `WARNING` line for each phase that does not fit, naming its largest part.
+- **A phase whose browser tester does not fit: split it into smaller features yourself, without
+  asking.** A split moves where a feature's verification falls, not what gets built. Split at a
+  boundary where each part still works end to end, keep the IDs in order (never renumber a step
+  marked `[x]` or `[~]`), and run `autoclaude lint-plan` again until no phase warns.
+- **A check that does not fit** is not fixed by splitting phases: every verification runs every
+  check. A check never timed may only need `autoclaude checks` to time it. A check that really
+  takes that long is a question for the owner: make it faster, split it into several checks
+  (each one is a part of its own), or raise `gate.timeoutSec` if it is below 1800.
+- Then tell the owner which phases you split and why (the part and its estimate), in the hand-over
+  (section 6).
+- A plan already running whose feature keeps running out of time is not rewritten: while the run
+  is paused, `autoclaude verify-per-step <phase>` has that phase verified step by step
+  (`gate.stepPhases`), and `autoclaude resume` carries on. `--off` undoes it.
+
 **Steps.** One checkbox line with a bold ID, then indented fields:
 
 ```markdown
@@ -503,7 +539,9 @@ boundary.
 1. `autoclaude lint-plan` (or `autoclaude lint-plan <file>`). It checks the structure (phases,
    IDs, their order, no duplicate or empty phases), the markers, the tags, a `Test:` line on
    every `no-ui` step, and leftover template placeholders. Fix every problem and run it again
-   until it prints ok.
+   until it prints ok. Once it does, it prints each phase's verification estimate; settle every
+   `WARNING` line as section 4 says (split the phase yourself, or take a slow check to the owner)
+   and run it again until none is left.
 2. Lint cannot judge whether an Accept line is observable; this read-through is the real stall
    check. Read each step as the builder (could it be built from the plan alone without asking
    anything?) and each feature as the tester (with only the phase's text, a browser and Read,
@@ -520,6 +558,8 @@ boundary.
 1. Show the owner, and ask for approval:
    - the features and steps as a short table (phase, ID, title, tags), and the estimate with
      its basis
+   - the phases you split so each fits its verification, and why (the part that did not fit and
+     its estimate), or that none needed it
    - the scope in plain words: what the run does outside this folder, what it writes for the
      owner, what it never touches, the snapshots, the deny rules and the permissions
    - the run settings that differ from the inherited values
