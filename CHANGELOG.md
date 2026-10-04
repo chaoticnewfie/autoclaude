@@ -22,6 +22,7 @@
 - Security findings from normal runs go to the gitignored `docs/private/SECURITY-FINDINGS.md`.
 - Playwright MCP pinned to a tested version, and its arbitrary-code tool denied to every browser
   checker.
+
 ## 1.0.1 (2026-10-03)
 
 - Fixed: in a project whose `.gitignore` ignores `secrets/` and where that folder exists (a run
