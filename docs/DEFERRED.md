@@ -342,3 +342,60 @@ closed; (3) is Claude Code's own file and the retry already covers it.
 started at completion (devserver.js already knows which it started); (3) stagger session starts
 by a second or two.
 **No rework.** Each is a few lines in supervisor.js, gate.js complete() or the sweep pool.
+
+## 26. Sweeps in pieces (spare usage before a weekly reset)
+
+**What.** Scott's idea (2026-10-04): start a sweep overnight on leftover weekly usage, stop it in
+the morning unfinished, fix what that night found, and carry on later, with each piece cheaper
+than starting again. How sweeps behave today (read from sweep.js 1.1.1):
+- A stopped sweep (`sweep-stop`) resumed with `sweep-run <id>` carries on where it stopped and
+  never reruns a finished session. One sweep spread over several nights costs the same as one
+  run straight through.
+- Findings come only at the end. The stages run in order (inventory, scanners, map, review,
+  live, merge, verify, report, after), and verification starts after every reviewer has
+  finished. Verification is most of the work: 75 of 84 sessions in the practice security sweep,
+  78 of 86 in the optimize one. A sweep stopped part way leaves unverified candidates in
+  `agents/*.json`, with no report and no fix plan. A stop during verify decides nothing from a
+  part of the votes.
+- A new sweep starts from zero. Only `autoclaude.accepted.json` carries over. It is applied at
+  merge, after review, so it saves the verifier sessions of accepted findings and nothing else.
+  A re-sweep after fixes costs about the same in review. It costs less in verification, which
+  scales with the number of findings.
+- A sweep's file list and areas are fixed when it starts. Reviewers read the working tree as it
+  is when each one runs. Code changed between pieces of one sweep (fixes, or a fix run's branch
+  checked out in the same folder) means later areas see other code than earlier ones, and
+  verifiers judge earlier candidates against the changed code.
+- Possible today: split the code with `exclude`, one finished sweep per part. Every part runs the
+  scanners, the map, the cross-cutting reviewers and the live checks again.
+- Size today: the practice app (29 files, 5 areas) took 31 min and $20 at API prices per sweep,
+  3 sessions at a time. A project with ten times the areas is still a few hours, so most
+  projects fit in one night. Usage is the limit, not the clock. `autoclaude security --estimate`
+  (or `optimize --estimate`) prints the size and starts nothing.
+- Seen in both practice reports: the 5-hour and weekly readings were the same before and after a
+  $20 sweep. Check whether the sweep's headless sessions refresh the usage reading before relying
+  on a usage-based stop.
+
+**Why it waits.** Not asked to be built yet, and a real old project's size has not been
+measured. One overnight sweep may simply finish.
+**Trigger.** Scott asks for it, or a real sweep is too big to finish in the time or usage left.
+**Path**, in the recommended order:
+1. *Partial report.* `autoclaude sweep-report <id>` (or `sweep-stop --report`): merge, verify and
+   report what the finished reviewers found. Areas not yet reviewed are listed as not reviewed,
+   which the coverage table already supports. A resume reviews the remaining areas and verifies
+   only the new candidates, so merge has to keep earlier verdicts by fingerprint (today it
+   rewrites the store with `verdict: null`).
+2. *A deadline.* `--until <hh:mm>` and/or a weekly-usage ceiling for the sweep. At the deadline
+   it stops launching reviewers and writes the partial report from step 1.
+3. *Incremental re-sweeps.* Remember each finished area's file hashes, the plugin version and the
+   options. A new sweep skips areas unchanged since the last finished sweep and carries their
+   findings forward. Scanners, the map, the cross-cutting reviewers and the live checks always
+   run again. This is the saving for "fix, then sweep again". The risk: a change in one file can
+   open a hole in an unchanged one (shared auth code, say), so offer it as a choice, with a full
+   sweep as the default.
+4. *(Larger)* Verify each area as soon as its reviewer finishes, so any stop leaves verified
+   findings for the finished areas. Duplicates across areas would then be verified twice before
+   they merge.
+Whatever is built, a piece must not run while a fix run is working in the same folder.
+**No rework.** The ordered stages and the saved per-session results are already there.
+(1) is a new command plus a verdict-keeping merge. (2) is a stop condition in `runPool`.
+(3) is a filter in `buildAgentPlan` and a carry-forward in merge.

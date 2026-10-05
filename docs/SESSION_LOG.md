@@ -482,3 +482,10 @@ One entry per working session: what was done, what was committed. Append only.
   an older run state takes the new keys on load. Added test/unit/docs-coverage.test.js (settings
   on the page and in USAGE, commands in USAGE and INSTRUCTIONS, the template copy identical), the
   rule in CLAUDE.md, clearer update steps and `autoclaude version` in INSTRUCTIONS. 1.1.1.
+- Scott asked which sweep goes first on an old project: security, then optimize, with the
+  security fixes merged first (optimize's rebuilds pin today's behaviour in tests, holes
+  included). Then he asked whether a sweep can be run in pieces on spare weekly usage. Read from
+  sweep.js: a stopped sweep resumes without rerunning finished sessions, but findings come only
+  after every reviewer and every verifier has finished (verification is about 90% of the
+  sessions), and a new sweep starts from zero. The design for partial reports, a deadline and
+  incremental re-sweeps went into DEFERRED 26, not built. Docs only.

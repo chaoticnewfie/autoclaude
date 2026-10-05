@@ -72,6 +72,7 @@ Everything Scott has asked for after 2026-09-24, with where it landed. Nothing i
 | 2026-10-03 | "when doing the autoclaude plan, make sure that the phase is small enough that it'll be able to actually be verified in the given time. I'm currently redoing a plan because it keeps running out of time on the verification of a phase... something to get fixed before doing another big update" | P10.13 (D60), in 1.1.0 | Planned |
 | 2026-10-03 | A suggestion from another project's session: "Run the checkers side by side in one stop... The security review only reads the diff and never uses the browser. Running it alongside the browser checks costs almost nothing." Scott: "This combined with smaller phases should make it pretty safe" | P10.13 (D61) | Planned |
 | 2026-10-04 | "Make sure the config page and instructions are updated whenever new features are added everytime if they need to be" | CLAUDE.md definition of done item 4; test/unit/docs-coverage.test.js; 1.1.1 | Done |
+| 2026-10-04 | "start a security run to run overnight, and stop it in the morning before it finishes, but still fix any findings it gives us from that night, will it get through what it already checked once faster?... theory crafting a way to run them broken up... burning tokens we don't have time to use otherwise before a weekly reset" ("Don't build anything... document it to be built another time") | DEFERRED 26 (partial report, deadline, incremental re-sweeps) | Deferred |
 
 ### How each requirement is met
 
