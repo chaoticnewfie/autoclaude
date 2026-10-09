@@ -503,3 +503,14 @@ One entry per working session: what was done, what was committed. Append only.
   gate's security review and overflow near Claude's limits; never the builder or the decider.
   Written up in DEFERRED 8 (replacing its one-line entry), the request in PLAN.md, a fact in
   CLAUDE.md. Docs only.
+- Scott added images through Nano Banana and "use the tokens if we got them": DEFERRED 8 item 6.
+- He asked whether Gemini could continue when Claude "times out", then said the stop checks at
+  the end of phases only have 900 seconds, and confirmed he meant a phase's verification running
+  out of time. Ultracode was on: one read-only workflow (8 agents, about 31 min: gate limits,
+  pause recovery, Claude Code docs, Antigravity CLI research, three designs, an adversarial
+  judge). Checked by hand: the DB report S11.4-1 (`npm test` "timed out after 900 s" with time
+  left in the stop, counted as an attempt), `rerunWanted`, the gate's check-failure path, and
+  Antigravity's terms and FAQ (third-party tools on the login can get the account suspended;
+  the FAQ names Claude Code). Wrote DEFERRED 27 (time-limit fixes A0 to A4, automatic recovery
+  B1 to B3, risks, open decisions) and the research facts and the terms blocker into DEFERRED 8.
+  Nothing built. Docs only.

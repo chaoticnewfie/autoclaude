@@ -75,6 +75,43 @@ serving individual AI Pro and Ultra plans on 2026-06-18; its replacement is the 
   with "authentication required" instead of hanging. MCP servers, hooks and skills are supported
   (their pages not read yet). `/usage` shows model quotas; AI Pro's actual limits are not known.
 
+**The blocker: terms of service (checked by hand 2026-10-09).** Antigravity's terms, section 6:
+"Using third party software, tools, or services to access the Service (e.g. using OpenClaw with
+Antigravity OAuth) is a breach of this Agreement. Such actions may be grounds for suspension or
+termination of your Antigravity and/or Gemini CLI accounts" (https://antigravity.google/terms).
+The FAQ entry is titled "Why can't I use third-party software (such as Claude Code, OpenClaw, or
+OpenCode) with my Antigravity login?" and recommends "a Gemini Enterprise or Google AI Studio API
+key" for third-party coding agents (https://antigravity.google/docs/faq/). Whether a script that
+launches the unmodified `agy` binary counts is not answered by Google: forum threads asking
+exactly this got only non-staff replies saying it is fine. So AutoClaude driving `agy` on
+Scott's AI Pro login risks those accounts. The safe route is an AI Studio API key, which is
+billed per use and not covered by the subscription, which undercuts "I pay for it already".
+Scott using Antigravity by hand is fine either way.
+
+**More from the workflow research (2026-10-09; Google's docs, the `google-antigravity/
+antigravity-cli` repo at 1.3.2, issues; not run here).**
+- Windows: "runs natively on macOS, Linux, Googlebook, and Windows"; install
+  `irm https://antigravity.google/cli/install.ps1 | iex` to `%LOCALAPPDATA%\agy\bin`; tokens in
+  Windows Credential Manager; settings under `%USERPROFILE%\.gemini\antigravity-cli\`. Windows
+  Server is never mentioned. Open Windows issues: a `run_command` leaks dwm.exe handles (#1188),
+  a hung MCP server blocks a headless turn and then reports an empty SUCCESS (#841).
+- Read-only is not available from a flag: `--sandbox` restricts terminal commands only and
+  `write_file` still works (#45); there is no per-run settings or permissions flag (#627). Deny
+  rules (`write_file(*)`, `command(*)`) and a PreToolUse hook returning deny were honoured
+  headless in user reports, but only through global or project settings.
+- Quota stops (1.2.14+): exit code 3 and a stderr line `AGY_ERROR: {...,"status":
+  "RESOURCE_EXHAUSTED","error_code":429,...}` with "Resets in 1h1m35s" in the text.
+  `agy -p "/usage" --output-format json` reads the quota without spending any. A tool that was
+  auto-denied can still end with exit 0, SUCCESS and no `structured_output` (#794).
+  `--print-timeout` is 5m by the headless page but "unlimited" by changelog 1.2.6.
+- Instructions: reads `AGENTS.md`, `GEMINI.md`, `.agents/rules/*.md`; never `CLAUDE.md`.
+- Models on AI Pro: Gemini 3.1 Pro and 3.6 to 3.8 Flash; also Claude Sonnet 5.5 and Opus 5.5
+  (thinking) on non-trial AI Pro, in a separate "Claude and GPT models" quota with its own
+  5-hour and weekly limits (https://antigravity.google/docs/models/). AI Pro quota numbers are
+  not published.
+- Data: under the consumer terms Google may use "Interactions" to improve its products and
+  machine learning, and reviewers may read them; opt-out is in settings.
+
 **Where it fits, best first.**
 1. *Sweep verifiers.* Verification is about 90% of a sweep's sessions (DEFERRED 26) and a
    thorough sweep gives each candidate 3 verifiers. Making one or more of them Gemini moves that
@@ -103,25 +140,27 @@ cheap and benefits from consistency. In a normal run the review sessions are a s
 the usage (the builder is most of it), so outside sweeps the gain is a second opinion, not
 savings.
 
-**To prove first (a Phase 0-style spike on Windows).**
-- `agy` installs and runs on Windows Server 2025 and Windows 11, and print mode takes a long
-  prompt on stdin. The headless page does not mention Windows.
+**To prove first (a Phase 0-style spike on Windows), after the terms question is settled.**
+- `agy` installs and runs on Windows Server 2025 (Windows 11 is documented; Server is not), and
+  print mode takes a long prompt.
 - Read-only can be enforced. Claude checkers get `--allowedTools Read,Glob,Grep`; `agy`
-  auto-allows workspace writes. Options: `--sandbox` if it blocks writes, deny rules, or a
-  scratch copy of the project as the workspace. A reviewer that can edit the project breaks the
-  independence the gate rests on. This is the deciding question.
-- `--json-schema` holds with the real verdict schemas (nested objects, enums).
-- What a quota stop looks like in the JSON, so `isRateLimit` can tell it apart, and how much
-  AI Pro allows.
-- Its settings are global in the user's home, so AutoClaude must pass everything per run and not
-  rewrite the owner's own `agy` settings.
+  auto-allows workspace writes and `--sandbox` does not stop them (#45). Options: deny rules in
+  a project's settings, a PreToolUse hook that denies, or a scratch copy of the project as the
+  workspace. A reviewer that can edit the project breaks the independence the gate rests on.
+- `--json-schema` holds with the real verdict schemas (nested objects, enums), and a denied
+  tool is told apart from a real answer (#794).
+- The quota stop matches the `AGY_ERROR` form above on the installed version.
+- Its settings are global in the user's home, so AutoClaude must pass everything per run (or per
+  project) and not rewrite the owner's own `agy` settings.
 
 **Privacy.** Code and findings go to Google under the consumer AI Pro terms and their own
 data-use settings. Per-project opt-in, off by default, so a project with sensitive data can stay
 Claude-only. Live sweep checks (secrets file, attacks) stay with Claude.
 
-**Why it waits.** Not asked to be built yet; the spike has not run; AI Pro's quota is unknown.
-**Trigger.** Scott says go, or Claude usage limits keep stopping sweeps.
+**Why it waits.** Not asked to be built yet; the terms question above has no official answer;
+the spike has not run; AI Pro's quota is unknown.
+**Trigger.** Scott says go and chooses between his AI Pro login (account risk) and a billed AI
+Studio API key, or Google answers the terms question.
 **Path.**
 1. Spike under `spikes/`, results in `VERIFY.md`: the list above.
 2. A runner for `agy` beside `runHeadless` that returns the same normalised result
@@ -484,3 +523,122 @@ Whatever is built, a piece must not run while a fix run is working in the same f
 **No rework.** The ordered stages and the saved per-session results are already there.
 (1) is a new command plus a verdict-keeping merge. (2) is a stop condition in `runPool`.
 (3) is a filter in `buildAgentPlan` and a carry-forward in merge.
+
+## 27. Verification time limits and automatic recovery of paused runs
+
+**What.** Scott (2026-10-09) asked whether Gemini could take over "for times where claude times
+out... to automate continuing without needing me to get you to do it outside of autoclaude
+runs", added "The stop checks at the end of phases only have 900 seconds", and confirmed he
+meant verification at the end of a phase running out of time and pausing the run until he fixes
+it by hand. A workflow (4 researchers, 3 designs, 1 adversarial judge; read-only) mapped the
+limits and designed the fix. Verified by hand afterwards: the DB report and gate log below,
+`checks.js` rerunWanted, the gate's check-failure path, Google's FAQ and terms.
+
+**What "900 seconds" is.** Not the stop. A stop gives a verification's parts 1740 s
+(`gate.timeoutSec` 1800 less 60 s for the commit), and a part may need at most 1218 s to fit
+(`gate.fitPct` 70). The 900 s is a check's own `timeoutSec`: the default when unset
+(`DEFAULT_CHECK_TIMEOUT_SEC`, `lib/checks.js`), what `init` writes for e2e, and what the DB
+project set for `npm test`. The tester and the security review also default to 900 s, but their
+turn budgets end them sooner (the DB run's security reviews averaged 77 s).
+
+**What happens today when a check hits its own limit**, with time left in the stop:
+- It is killed at 900 s ("timed out after 900 s"), not rerun (`rerunWanted` excludes timeouts),
+  and counted as the builder's failed attempt. The third attempt pauses the run as
+  `step-failed`. It is not carried to the next stop and not treated as out of time.
+- The builder cannot raise the limit (the config is locked during a run). Nothing tells the
+  owner that the check's own limit, not the stop, was the binding one.
+- Seen in the DB run: S11.4 attempt 1, `npm test` "timed out after 900 s" with about 757 s of
+  the stop left (`C:\Database\.autoclaude\reports\S11.4-1.md`, gate.log lines 99-104). The
+  builder then sped the suite up (commit `bebdb37`: 928 s to 634 s) and attempt 2 passed
+  65 minutes later. The timeout was a useful signal; it should not have cost an attempt.
+- Related gaps: the estimate never learns a check's timed-out runs (only passes are recorded),
+  so `lint-plan` says a 900 s check fits; validation accepts a check `timeoutSec` above what a
+  stop can give; a checker that hits its own limit is reported as `infra` ("Check Playwright
+  and the claude CLI"), and its same-stop retry is a second Opus session that ends the same way;
+  a second out-of-time try of a stop's first part cannot succeed (it already had the whole
+  stop).
+- The 1800 s Stop-hook cap is our own `hooks.json` value. Claude Code documents a 600 s default
+  for command hooks and no maximum; nothing above 1800 s has been tested. `lib/configpage.js`
+  and `docs/USAGE.md` wrongly call it Claude Code's limit.
+
+**Recommended plan** (the judge's synthesis; each plugin change bumps the version, each setting
+reaches the settings page, INSTRUCTIONS, USAGE and CHANGELOG, each choice gets a decision):
+- *A0. Wording.* Fix "Claude Code's limit" (configpage, USAGE), say the tester limit scales 1x
+  to 4x and also bounds the bug bash, name a check's own `timeoutSec` first in the out-of-time
+  help, the plan skill and `estimate.js`, and stop suggesting weaker checks in alerts.
+  Accept: `grep "Claude Code's limit"` finds nothing; the out-of-time alert for a check names its
+  `timeoutSec`.
+- *A1. A check that hits its own limit is not an attempt the first time.* Raise that check's
+  limit for the rest of the run to the fit limit (1218 s by default) in run state
+  (`state.checkLimits`, not the config), carry it to the next stop, write a follow-up row ("did
+  not finish in its T s; passed in N s") so the fix-up pass asks for a faster suite, and alert.
+  A second timeout at the raised limit, or a check already at the fit limit, is the builder's
+  attempt with "a hang or a real slowdown: fix it; never skip or delete tests". Accept: a
+  fixture check with `timeoutSec` 5 that needs 8 s leaves attempts at 0, passes in the next stop,
+  sets `state.checkLimits`, writes the row and the alert; a check that never ends costs one extra
+  stop, then shows attempt 1/3.
+- *A2. Estimates see timeouts.* `check-times.json` keeps a timed-out lower bound; `lint-plan`
+  and the preflight warn; validation warns when a check's `timeoutSec` exceeds what a stop
+  gives. Accept: `lint-plan` prints the warning on a fixture with a recorded timeout.
+- *A3. Checkers that hit their own limit.* No same-stop retry; raise the limit for the run to
+  min(stop, 2x) and park; a second time is `infra` with a message naming `tester.timeoutSec` or
+  `security.timeoutSec`. Accept: a stub runner that times out gets one try, is parked, gets the
+  raised limit next stop, and the alert names the setting.
+- *A4. A checker that hits the Claude usage limit pauses as a new `usage-limit` reason*, keeps
+  `state.verifying`, records the reset time, counts nothing (today it becomes `infra`; only the
+  sweep reads `rateLimited`). Accept: a stub returning `rateLimited: true` leaves the run paused
+  as `usage-limit` with attempts and infra counts unchanged.
+- *B1. Record what a pause needs:* `state.pauseDetail` (reason, step, phase, part, whether the
+  per-step way out applies), hashes of the plan and config at the pause, and a `recoveryLog`
+  that `resume` does not reset.
+- *B2. Automatic recovery in the supervisor, plain Node, no model acts.* Only two cases:
+  `usage-limit` waits for the reset plus a grace, then resumes with the attempts kept;
+  `out-of-time` on a checker (not a check, not a fix-up pass) waits 10 minutes, then does what
+  the alert tells the owner today (`verify-per-step <phase>`, then `resume`), once per phase,
+  with an alert that names the extra usage and the undo (`verify-per-step N --off`). Never
+  `review`, `blocked`, `security`, `step-failed`, `stuck`, `infra`, `commit-failed`. Guards:
+  re-read state under the lock, do nothing if the plan or config changed since the pause (the
+  owner may be mid-edit), at most 3 actions per run, never touch PLAN.md, checks or checker
+  settings, no commit from the supervisor. The watchdog must relaunch a supervisor for a paused
+  run with a pending timed recovery (today it skips paused runs). Setting:
+  `supervisor.autoRecover` (the supervisor group is already safe to change during a run).
+  Accept: `decide()` tests for every pause reason; a scenario where out-of-time ends with
+  `gate.stepPhases` written, the run running and one `recoveryLog` entry; the same pause a
+  second time only pages; a plan edited during the pause stops any action.
+- *B3. Alerts that are silent today:* `GATE ERROR` and config errors (at most hourly), and the
+  Notification types `quota_auto_resume_disabled` / `quota_auto_resume_stale` (Claude Code gave
+  up waiting, or waits for Enter after a sleep).
+- *Optional, later:* B4, a read-only triage note (decider pattern, never acts) for the pauses
+  that stay with the owner; A5, a spike of a Stop hook timeout above 1800 s on Windows (and
+  whether a cancelled hook's `npm test` and `claude -p` children are killed, or keep burning
+  usage), only if a single check really needs more than 1218 s.
+Order: A0, A1 with A2, A3, A4, B1 with B2, B3, watch one run, then B4 and A5 if wanted.
+
+**Risks the judge raised.** Per-step verification spends more of the 5-hour window (every check
+and a tester per step), so auto-switching must say so and happen at most once per phase.
+Resuming `step-failed` automatically would let the builder refill its own attempts through test
+output it controls, so it stays out. More parks between stops push toward Claude Code's cap of
+8 blocks in a row without a tool call (count parks; keep them at 6 or fewer). A foreground Bash
+call is capped at 10 minutes, so a check over 600 s is also hard for the builder to rerun
+(unchecked).
+
+**Gemini's part: none.** A run is Claude Code (gate, guard, supervisor), so Gemini cannot keep
+it going, and once Claude has usage again plain Node covers every safe recovery. See DEFERRED 8
+for the terms-of-service question that applies to any scripted use of his AI Pro login.
+**Already provided by Claude Code, do not rebuild:** automatic continue at the 5-hour limit in
+interactive sessions (on by default since 2.1.234, Scott's settings leave it on): it covers the
+builder and his own sessions outside runs while the session stays open. It re-arms at most twice
+in a row, does not start for a reset more than 24 h away, not in `-p` or background sessions,
+and after a sleep of about 30 minutes it waits for Enter. Not stated for the VS Code extension.
+
+**Open decisions for Scott** (judge's defaults): where he saw the 900 s (default: a check's own
+limit, as in the DB run); A1 on by default (yes); keep 900 s for an unset check limit (yes,
+A1 handles real slowness); automatic recovery on for usage-limit and checker out-of-time only
+(yes, in this computer's defaults, per project override); recovery may write `gate.stepPhases`
+through the existing command (yes); never auto-resume `step-failed` or `stuck` (never); triage
+note (off until one live run); spike above 1800 s (no); Gemini in recovery (no).
+**Why it waits.** Not approved to build yet.
+**Trigger.** Scott says go.
+**No rework.** Parking, carry-over, `verify-per-step`, `resumeRun` and the supervisor's paused
+loop already exist; A1 to A4 change how a timeout is classified, B2 adds one branch to the
+supervisor's decision for a paused run.

@@ -205,7 +205,13 @@ never edited.
 - Gemini CLI stopped serving individual Google AI Pro and Ultra plans on 2026-06-18. Its
   replacement is the Antigravity CLI, `agy`, whose print mode mirrors `claude -p` (`-p`,
   `--output-format json`, `--json-schema`, `--model`, `--effort`). Flags and open questions:
-  `docs/DEFERRED.md` entry 8 (read from Google's docs, not yet run on Windows).
+  `docs/DEFERRED.md` entry 8 (read from Google's docs, not yet run on Windows). Antigravity's
+  terms forbid "third party software, tools, or services" accessing it with the login, and its
+  FAQ names Claude Code; scripting `agy` on an AI Pro login risks those accounts.
+- The 1800 s Stop-hook cap is our own `hooks.json` value: Claude Code documents a 600 s default
+  for command hooks and no maximum, and nothing above 1800 s has been tested. The limit that
+  bites at the end of a phase is usually a check's own `timeoutSec` (900 when unset), which
+  today counts as the builder's attempt (DEFERRED 27).
 
 ## Documentation index
 

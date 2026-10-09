@@ -24,7 +24,15 @@ then P9.2 to P9.4. Backlog from the proof: DEFERRED 23 to 25. Scott's idea of ru
 pieces on spare weekly usage is designed in DEFERRED 26, not built. His idea of Gemini (his
 Google AI Pro plan) as an optional second provider is designed in DEFERRED 8, not built: the
 Antigravity CLI `agy` (Gemini CLI no longer serves AI Pro) for sweep verifiers and reviewers
-first, after a Windows spike that proves a read-only `agy` session.
+first, plus images (Nano Banana). Blocked first by Antigravity's terms, which forbid third-party
+tools using the login (account risk); the safe route is a billed AI Studio API key.
+
+**Proposed, waiting for Scott's go: DEFERRED 27.** Verification at the end of a phase "only has
+900 seconds": that is a check's own `timeoutSec`, and a timeout there counts as the builder's
+attempt (the DB run's S11.4). The plan there: A0 wording, A1 a timed-out check gets a raised
+limit and the next stop instead of an attempt, A2 estimates see timeouts, A3 checkers that hit
+their own limit, A4 a `usage-limit` pause, B1 to B3 automatic recovery of two pause kinds in
+the supervisor (plain Node, no model) and alerts that are silent today.
 
 ## Notes for whoever continues
 
@@ -46,5 +54,8 @@ first, after a Windows spike that proves a read-only `agy` session.
 
 - Whether the project template ships the fuller docs set as stubs (default: core files only).
 - DEFERRED 22 (fix-up pass cost and small items): deferred until a real run measures them.
-- DEFERRED 8 (Gemini as a second provider): when to spike it, which roles first, which Gemini
-  model, and whether a Gemini vote alone can reject a finding.
+- DEFERRED 8 (Gemini as a second provider): AI Pro login (account risk) or a billed API key;
+  then when to spike it, which roles first, which Gemini model, whether a Gemini vote alone can
+  reject a finding.
+- DEFERRED 27: whether to build it, where he saw the 900 s (the DB run's case is on this
+  machine; others may be on his desktop), and the open decisions listed there with defaults.
