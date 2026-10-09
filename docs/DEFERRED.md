@@ -54,7 +54,10 @@ Trigger: `autoclaude status` and notifications stop being enough. Path: a static
 **What.** Scott (2026-10-09) has a Google AI Pro plan and asked for an optional way to use
 Gemini or Antigravity alongside Claude, to spread the usage and to use Gemini where it is good.
 Opt-in per project; nothing changes for anyone who does not turn it on. This entry replaces the
-earlier one-line "second-opinion reviewer through another provider".
+earlier one-line "second-opinion reviewer through another provider". Its priority, in his words
+the same day: "It's not critical, just brainstorming since I pay for it already, use the tokens
+if we got them". So Gemini is spare capacity to use when it is there, never something a run
+depends on.
 
 **The tool (read from Google's docs on 2026-10-09, not yet run here).** Gemini CLI stopped
 serving individual AI Pro and Ultra plans on 2026-06-18; its replacement is the Antigravity CLI,
@@ -85,6 +88,14 @@ serving individual AI Pro and Ultra plans on 2026-06-18; its replacement is the 
    sessions to Gemini instead of waiting. Fits DEFERRED 26's spare-usage idea.
 5. *Maybe later:* the browser tester. It needs Playwright MCP under `agy` and the same tool
    restrictions the Claude tester has.
+6. *Images (Nano Banana, Google's image model).* Scott, 2026-10-09: "we could use gemini for
+   nano bananna if we every need images". Claude cannot make raster images; today a builder can
+   only hand-write SVG. An app being built may want icons, illustrations, placeholder art or
+   mockups. Shape: a command the builder calls (like `autoclaude decide`) that asks Gemini for an
+   image, saves it into the project and returns the path; the step's Accept lines and the browser
+   tester judge the result as usual. Unknown: whether `agy` or the AI Pro plan can generate
+   images headlessly at all (the Gemini API's image models are billed per call with an API key,
+   which is not the subscription). The spike answers that first.
 Not the builder and not the decider. A run is built on Claude Code itself: the Stop gate, the
 tool guard (PreToolUse), the supervisor's `claude --continue`, the statusline usage reading.
 A Gemini builder would bypass the guard and the gate, which is a second product. The decider is
