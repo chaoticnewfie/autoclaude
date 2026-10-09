@@ -49,10 +49,84 @@ Path: the supervisor already polls on a timer; a window is a check before each r
 Trigger: `autoclaude status` and notifications stop being enough. Path: a static page reading
 `.autoclaude/state.json` and `PROGRESS.md`.
 
-## 8. Second-opinion reviewer through another provider
+## 8. A second provider: Gemini through the Antigravity CLI
 
-Trigger: a class of bug the security reviewer keeps missing. Path: a second `claude -p`-shaped
-runner behind the same verdict schema.
+**What.** Scott (2026-10-09) has a Google AI Pro plan and asked for an optional way to use
+Gemini or Antigravity alongside Claude, to spread the usage and to use Gemini where it is good.
+Opt-in per project; nothing changes for anyone who does not turn it on. This entry replaces the
+earlier one-line "second-opinion reviewer through another provider".
+
+**The tool (read from Google's docs on 2026-10-09, not yet run here).** Gemini CLI stopped
+serving individual AI Pro and Ultra plans on 2026-06-18; its replacement is the Antigravity CLI,
+`agy`. Its print mode has nearly the shape of `claude -p`:
+- `agy -p` (aliases `--print`, `--prompt`); `--output-format json` returns one envelope with
+  `conversation_id`, `status` (SUCCESS, ERROR, CANCELED, ...), `response`, `error`,
+  `num_turns`, `usage` and, with a schema, `structured_output`. `stream-json` also exists.
+- `--json-schema` takes a schema string or a `.json` path; `--model` takes a slug from
+  `agy models` (an unknown slug exits 1, no silent fallback); `--effort low|medium|high`;
+  `--continue` / `--conversation <id>`; `--print-timeout` (default 5m); `--sandbox`.
+- Permissions: reads and writes inside the workspace are auto-allowed; shell commands are
+  soft-denied (the run carries on and exits 0); `permissions.allow` rules live in
+  `~/.gemini/antigravity-cli/settings.json`; `--dangerously-skip-permissions` allows everything.
+- Auth: a one-time interactive `agy` sign-in; a headless run without cached credentials exits
+  with "authentication required" instead of hanging. MCP servers, hooks and skills are supported
+  (their pages not read yet). `/usage` shows model quotas; AI Pro's actual limits are not known.
+
+**Where it fits, best first.**
+1. *Sweep verifiers.* Verification is about 90% of a sweep's sessions (DEFERRED 26) and a
+   thorough sweep gives each candidate 3 verifiers. Making one or more of them Gemini moves that
+   share of the usage off Claude, and a vote from another model family is more independent than
+   three Claude votes. Verifiers are read-only and answer a schema: the cleanest fit.
+2. *Sweep reviewers*, as an extra pass over the same areas: different models miss different
+   things. A long context could read a whole small project at once (cross-file duplicates for
+   optimize).
+3. *The gate's security review* of a step's diff, as a second reviewer (the original entry).
+4. *Overflow.* When Claude's 5-hour reading nears the limit, a sweep's pool sends read-only
+   sessions to Gemini instead of waiting. Fits DEFERRED 26's spare-usage idea.
+5. *Maybe later:* the browser tester. It needs Playwright MCP under `agy` and the same tool
+   restrictions the Claude tester has.
+Not the builder and not the decider. A run is built on Claude Code itself: the Stop gate, the
+tool guard (PreToolUse), the supervisor's `claude --continue`, the statusline usage reading.
+A Gemini builder would bypass the guard and the gate, which is a second product. The decider is
+cheap and benefits from consistency. In a normal run the review sessions are a small part of
+the usage (the builder is most of it), so outside sweeps the gain is a second opinion, not
+savings.
+
+**To prove first (a Phase 0-style spike on Windows).**
+- `agy` installs and runs on Windows Server 2025 and Windows 11, and print mode takes a long
+  prompt on stdin. The headless page does not mention Windows.
+- Read-only can be enforced. Claude checkers get `--allowedTools Read,Glob,Grep`; `agy`
+  auto-allows workspace writes. Options: `--sandbox` if it blocks writes, deny rules, or a
+  scratch copy of the project as the workspace. A reviewer that can edit the project breaks the
+  independence the gate rests on. This is the deciding question.
+- `--json-schema` holds with the real verdict schemas (nested objects, enums).
+- What a quota stop looks like in the JSON, so `isRateLimit` can tell it apart, and how much
+  AI Pro allows.
+- Its settings are global in the user's home, so AutoClaude must pass everything per run and not
+  rewrite the owner's own `agy` settings.
+
+**Privacy.** Code and findings go to Google under the consumer AI Pro terms and their own
+data-use settings. Per-project opt-in, off by default, so a project with sensitive data can stay
+Claude-only. Live sweep checks (secrets file, attacks) stay with Claude.
+
+**Why it waits.** Not asked to be built yet; the spike has not run; AI Pro's quota is unknown.
+**Trigger.** Scott says go, or Claude usage limits keep stopping sweeps.
+**Path.**
+1. Spike under `spikes/`, results in `VERIFY.md`: the list above.
+2. A runner for `agy` beside `runHeadless` that returns the same normalised result
+   (`ok`, `infra`, `structured`, `rateLimited`, ...), with an `agyBinary()` lookup and an
+   environment override like `AUTOCLAUDE_CLAUDE_BIN`.
+3. Settings (names to settle): on/off per project, the model, which roles use it, how many of a
+   finding's verifiers are Gemini. Settings page, USAGE, INSTRUCTIONS, CHANGELOG
+   (docs-coverage test).
+4. Reports name the model behind each vote and each finding; preflight checks `agy` is found and
+   signed in when it is on.
+**Open decisions for Scott.** Which roles first; which Gemini model (D44 says newest Opus as
+main and no small Claude models; the Gemini equivalent of that floor); whether a Gemini vote can
+reject a finding on its own or only alongside a Claude vote.
+**No rework.** Every checker and sweep session already goes through one runner with a JSON
+schema and a normalised result, and votes are already tallied per verifier. A provider is one
+more runner behind that interface.
 
 ## 9. Answering blockers through Remote Control
 

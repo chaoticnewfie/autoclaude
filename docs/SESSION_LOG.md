@@ -489,3 +489,17 @@ One entry per working session: what was done, what was committed. Append only.
   after every reviewer and every verifier has finished (verification is about 90% of the
   sessions), and a new sweep starts from zero. The design for partial reports, a deadline and
   incremental re-sweeps went into DEFERRED 26, not built. Docs only.
+
+## 2026-10-09 (Code VM) - Gemini as an optional second provider (designed, not built)
+
+- Scott asked whether his Google AI Pro plan could be used through Gemini or the Antigravity CLI
+  as an optional supplement, to spread usage and use Gemini where it is good.
+- Checked Google's docs: Gemini CLI no longer serves AI Pro (2026-06-18); the Antigravity CLI
+  `agy` replaces it, and its headless mode has `-p`, JSON output with `structured_output`,
+  `--json-schema`, `--model` and `--effort`, close to the `claude -p` runner the checkers use.
+  Not installed or run here. Workspace writes are auto-allowed in `agy`, so a read-only reviewer
+  must be proven before anything is built.
+- Recommended: sweep verifiers first (about 90% of a sweep's sessions), then reviewers, the
+  gate's security review and overflow near Claude's limits; never the builder or the decider.
+  Written up in DEFERRED 8 (replacing its one-line entry), the request in PLAN.md, a fact in
+  CLAUDE.md. Docs only.

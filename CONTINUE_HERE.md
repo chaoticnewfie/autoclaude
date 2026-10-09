@@ -1,6 +1,6 @@
 # CONTINUE_HERE.md
 
-**Last updated: 2026-10-04.** Rewrite this file at the end of every prompt.
+**Last updated: 2026-10-09.** Rewrite this file at the end of every prompt.
 
 ## Where things are
 
@@ -21,7 +21,10 @@ xhigh, on the settings page) sets the tester, bug bash, security review and deci
 fit their verification, flaky-check reruns; D58 to D62), proven live on practice apps and
 installed on this machine from GitHub. Next: P9.1's written review of the DB project's second run,
 then P9.2 to P9.4. Backlog from the proof: DEFERRED 23 to 25. Scott's idea of running sweeps in
-pieces on spare weekly usage is designed in DEFERRED 26, not built.
+pieces on spare weekly usage is designed in DEFERRED 26, not built. His idea of Gemini (his
+Google AI Pro plan) as an optional second provider is designed in DEFERRED 8, not built: the
+Antigravity CLI `agy` (Gemini CLI no longer serves AI Pro) for sweep verifiers and reviewers
+first, after a Windows spike that proves a read-only `agy` session.
 
 ## Notes for whoever continues
 
@@ -43,3 +46,5 @@ pieces on spare weekly usage is designed in DEFERRED 26, not built.
 
 - Whether the project template ships the fuller docs set as stubs (default: core files only).
 - DEFERRED 22 (fix-up pass cost and small items): deferred until a real run measures them.
+- DEFERRED 8 (Gemini as a second provider): when to spike it, which roles first, which Gemini
+  model, and whether a Gemini vote alone can reject a finding.

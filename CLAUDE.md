@@ -202,6 +202,10 @@ never edited.
 - GitHub push protection (on since the repo went public) rejects a push whose commits contain a
   key-shaped literal, fake ones in tests included (a Stripe-style sk_live_ key was refused).
   Build fake keys at runtime, for example `["sk", "live", "..."].join("_")`.
+- Gemini CLI stopped serving individual Google AI Pro and Ultra plans on 2026-06-18. Its
+  replacement is the Antigravity CLI, `agy`, whose print mode mirrors `claude -p` (`-p`,
+  `--output-format json`, `--json-schema`, `--model`, `--effort`). Flags and open questions:
+  `docs/DEFERRED.md` entry 8 (read from Google's docs, not yet run on Windows).
 
 ## Documentation index
 

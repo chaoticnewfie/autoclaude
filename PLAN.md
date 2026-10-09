@@ -73,6 +73,7 @@ Everything Scott has asked for after 2026-09-24, with where it landed. Nothing i
 | 2026-10-03 | A suggestion from another project's session: "Run the checkers side by side in one stop... The security review only reads the diff and never uses the browser. Running it alongside the browser checks costs almost nothing." Scott: "This combined with smaller phases should make it pretty safe" | P10.13 (D61) | Planned |
 | 2026-10-04 | "Make sure the config page and instructions are updated whenever new features are added everytime if they need to be" | CLAUDE.md definition of done item 4; test/unit/docs-coverage.test.js; 1.1.1 | Done |
 | 2026-10-04 | "start a security run to run overnight, and stop it in the morning before it finishes, but still fix any findings it gives us from that night, will it get through what it already checked once faster?... theory crafting a way to run them broken up... burning tokens we don't have time to use otherwise before a weekly reset" ("Don't build anything... document it to be built another time") | DEFERRED 26 (partial report, deadline, incremental re-sweeps) | Deferred |
+| 2026-10-09 | "I do have a pro plan for gemini, would there be a way to setup an option way to use gemini/ antigravity cli as well? Spread out tokens a little and I know that gemini is good at certain things so it might be nice to use as a suppliment." | DEFERRED 8 (Antigravity CLI `agy` for sweep verifiers and reviewers first; spike before anything) | Deferred |
 
 ### How each requirement is met
 
